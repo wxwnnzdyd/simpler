@@ -21,6 +21,11 @@ RUNTIME_A = "a2a3/onboard/host_build_graph"
 RUNTIME_B = "a2a3/onboard/tensormap_and_ringbuffer"
 
 
+def make_pto_isa_checkout(path):
+    for required in pto_isa._PTO_ISA_REQUIRED_PATHS:
+        (path / required).mkdir(parents=True, exist_ok=True)
+
+
 def test_read_pto_isa_pin_reads_valid_pin(tmp_path):
     pin = tmp_path / "pto_isa.pin"
     pin.write_text(f"{PIN_A.upper()}\n")
@@ -71,7 +76,7 @@ def test_clone_lands_on_pinned_commit(tmp_path, monkeypatch):
 
 def test_ensure_pto_isa_root_reuses_pristine_checkout(tmp_path, monkeypatch):
     clone_path = tmp_path / "build" / "pto-isa"
-    (clone_path / "include").mkdir(parents=True)
+    make_pto_isa_checkout(clone_path)
     checked = []
 
     monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: PIN_A)
@@ -100,7 +105,7 @@ def test_ensure_pto_isa_root_clones_when_missing(tmp_path, monkeypatch):
 
     def fake_clone(path, commit, verbose=False):
         events.append(("clone", path, commit))
-        (path / "include").mkdir(parents=True)
+        make_pto_isa_checkout(path)
         return True
 
     monkeypatch.setattr(pto_isa, "_clone", fake_clone)
@@ -110,9 +115,19 @@ def test_ensure_pto_isa_root_clones_when_missing(tmp_path, monkeypatch):
     assert events == [("clone", clone_path, PIN_A)]
 
 
-def test_ensure_pto_isa_root_reclones_when_not_pristine(tmp_path, monkeypatch):
+def test_is_cloned_requires_arch_instruction_headers(tmp_path):
     clone_path = tmp_path / "build" / "pto-isa"
     (clone_path / "include").mkdir(parents=True)
+
+    assert not pto_isa._is_cloned(clone_path)
+
+    make_pto_isa_checkout(clone_path)
+    assert pto_isa._is_cloned(clone_path)
+
+
+def test_ensure_pto_isa_root_reclones_when_not_pristine(tmp_path, monkeypatch):
+    clone_path = tmp_path / "build" / "pto-isa"
+    make_pto_isa_checkout(clone_path)
     events = []
 
     monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: PIN_A)
@@ -137,7 +152,7 @@ def test_ensure_pto_isa_root_reclones_when_not_pristine(tmp_path, monkeypatch):
 
 def test_ensure_pto_isa_root_rejects_when_reclone_lands_wrong_commit(tmp_path, monkeypatch):
     clone_path = tmp_path / "build" / "pto-isa"
-    (clone_path / "include").mkdir(parents=True)
+    make_pto_isa_checkout(clone_path)
 
     monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: PIN_A)
     monkeypatch.setattr(pto_isa, "get_pto_isa_clone_path", lambda: clone_path)

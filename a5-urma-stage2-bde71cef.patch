@@ -1,0 +1,2447 @@
+From bde71cef4f165f90d0a8dea5e58115feb11e3220 Mon Sep 17 00:00:00 2001
+From: huadongyang <2482665114@qq.com>
+Date: Thu, 9 Jul 2026 13:00:19 +0800
+Subject: [PATCH] Add: support A5 URMA workspace staging
+
+- Add a5sim URMA deferred completion backend and demo coverage
+- Wire A5 onboard host runtime to PTO-ISA URMA workspace setup
+- Support CANN root and arch-root toolchain/include/library layouts
+- Add workspace assertions for A5 comm hardware smoke tests
+- Document the current HUGE_FIRST allocation policy for URMA windows
+---
+ docs/comm-domain.md                           |  12 +-
+ docs/developer-guide.md                       |  11 +-
+ docs/getting-started.md                       |   5 +-
+ docs/simt-launch.md                           |   4 +-
+ .../kernels/aiv/kernel_urma_complete.cpp      |  35 ++
+ .../kernels/aiv/kernel_urma_consumer.cpp      |  41 ++
+ .../kernels/aiv/kernel_urma_reset.cpp         |  33 ++
+ .../kernels/aiv/kernel_urma_tget.cpp          |  62 +++
+ .../kernels/aiv/kernel_urma_tput.cpp          |  62 +++
+ .../urma_async_completion_orch.cpp            |  95 ++++
+ .../test_urma_async_completion_demo.py        | 202 ++++++++
+ pto_isa.pin                                   |   2 +-
+ simpler_setup/build_runtimes.py               |  12 +-
+ simpler_setup/pto_isa.py                      |   3 +-
+ simpler_setup/runtime_builder.py              |  32 +-
+ simpler_setup/runtime_compiler.py             |   7 +
+ simpler_setup/toolchain.py                    |  54 ++-
+ src/a5/platform/onboard/aicore/simt_anchor.h  |   5 +-
+ src/a5/platform/onboard/aicpu/CMakeLists.txt  |   9 +
+ src/a5/platform/onboard/host/CMakeLists.txt   |  39 +-
+ src/a5/platform/onboard/host/comm_hccl.cpp    | 115 +++--
+ .../runtime/aicore_completion_mailbox.h       |  10 +-
+ .../runtime/aicore_completion_mailbox_types.h |   4 +-
+ .../backend/urma/urma_completion_abi.h        | 117 +++++
+ .../backend/urma/urma_completion_kernel.h     | 440 ++++++++++++++++++
+ .../backend/urma/urma_completion_scheduler.h  | 149 ++++++
+ .../runtime/pto_async_kernel_api.h            |   1 +
+ .../runtime/pto_async_wait.h                  |  20 +-
+ .../scheduler/scheduler_completion.cpp        |   4 +-
+ .../cpp/a5/test_aicore_completion_mailbox.cpp |  50 +-
+ tests/ut/py/test_runtime_builder.py           |  28 +-
+ tests/ut/py/test_worker/test_platform_comm.py |  38 ++
+ 32 files changed, 1563 insertions(+), 138 deletions(-)
+ create mode 100644 examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_complete.cpp
+ create mode 100644 examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_consumer.cpp
+ create mode 100644 examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_reset.cpp
+ create mode 100644 examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_tget.cpp
+ create mode 100644 examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_tput.cpp
+ create mode 100644 examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/orchestration/urma_async_completion_orch.cpp
+ create mode 100644 examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/test_urma_async_completion_demo.py
+ create mode 100644 src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/urma_completion_abi.h
+ create mode 100644 src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/urma_completion_kernel.h
+ create mode 100644 src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/urma_completion_scheduler.h
+
+diff --git a/docs/comm-domain.md b/docs/comm-domain.md
+index 171509aa..c255262f 100644
+--- a/docs/comm-domain.md
++++ b/docs/comm-domain.md
+@@ -111,11 +111,21 @@ symmetric window is realized:
+ | Window memory | POSIX shm + `ftruncate`, mmap'd per rank | `aclrtMalloc` + `aclrtIpcMem*` import; peer access via `aclrtDeviceEnablePeerAccess` |
+ | Subset barrier | shm-header atomic, `allocation_id`-scoped | file barriers, `allocation_id`-scoped |
+ | Window init | window zeroed after handshake (`memset`) | window zeroed after handshake (`aclrtMemset`) |
+-| SDMA workspace | n/a | provisioned once per handle (`ensure_sdma_workspace`); inherited into each domain `CommContext` |
++| PTO async workspace | n/a | a2a3 SDMA once per handle; a5 URMA in `CommContext::workSpace` |
+ 
+ The window is zero-initialized on both backends so scratch/signal protocols see
+ a known starting state (matching the historical static-path contract).
+ 
++For a5 URMA, the symmetric window passed to
++`UrmaWorkspaceManager::Init(...)` is currently allocated with
++`ACL_MEM_MALLOC_HUGE_FIRST`, the same policy used by the HCCL Path-D window
++allocator. This keeps the first real-workspace integration compatible with
++existing comm-window allocation behavior while still preferring huge pages.
++PTO-ISA's URMA documentation recommends `ACL_MEM_MALLOC_HUGE_ONLY` for the
++strictest memory-registration contract; switch the a5 URMA window path to
++`HUGE_ONLY` only after hardware validation shows `HUGE_FIRST` can fall back to
++small pages and break MR registration in this backend.
++
+ ---
+ 
+ ## 5. Staging host data into a window
+diff --git a/docs/developer-guide.md b/docs/developer-guide.md
+index 727dde25..c0c8a6cd 100644
+--- a/docs/developer-guide.md
++++ b/docs/developer-guide.md
+@@ -185,11 +185,18 @@ This builds the nanobind `_task_interface` extension **and** pre-builds all runt
+ | Nanobind bindings (`python/bindings/`) | Re-run `pip install --no-build-isolation -e .` (no rebuild-on-import; `editable.rebuild = false`) |
+ | Python-only code (`python/*.py`, `simpler_setup/*.py`) | No rebuild needed (editable install) |
+ | Examples / kernels (`examples/{arch}/`, `tests/st/`) | No rebuild needed, just re-run |
+-| `pto_isa.pin` changed | Re-run `pip install`. The cmake cache stamp and the `host_runtime` ccache key include the pinned PTO-ISA commit for a2a3 onboard, so a pin bump invalidates stale runtime objects automatically. |
++| `pto_isa.pin` changed | Re-run `pip install`; onboard PTO-ISA host headers invalidate a2a3/a5 `host_runtime` caches. |
+ 
+-A `pto_isa.pin` bump changes the SDMA headers embedded by
++A `pto_isa.pin` bump changes PTO async workspace headers embedded by
+ `host_runtime.so`. Install-time runtime builds and run-time kernel compilation
+ both read `pto_isa.pin`; use a different ISA revision by updating that file.
++The cmake cache stamp and `host_runtime` ccache key include the pinned
++PTO-ISA commit for onboard runtimes that embed PTO-ISA host headers, so a pin
++bump invalidates stale runtime objects automatically.
++The a5 URMA workspace currently uses the HCCL comm-window allocation policy
++(`ACL_MEM_MALLOC_HUGE_FIRST`); see
++[Communication Domains](comm-domain.md#4-backends) for the memory-registration
++trade-off and when to tighten it to `HUGE_ONLY`.
+ 
+ ### Runtime binary lookup
+ 
+diff --git a/docs/getting-started.md b/docs/getting-started.md
+index 4773fe78..62e3e083 100644
+--- a/docs/getting-started.md
++++ b/docs/getting-started.md
+@@ -55,8 +55,9 @@ To use a different PTO-ISA revision, update `pto_isa.pin` to the desired
+ diff and applies the same revision to install-time runtime builds and run-time
+ kernel compilation.
+ 
+-For a2a3 onboard runtimes, builds record the actual PTO-ISA git HEAD used for
+-each runtime in `build/lib/pto_isa_build.json`. This JSON is artifact
++For onboard runtimes that embed PTO-ISA host headers (a2a3 SDMA workspace,
++a5 URMA workspace), builds record the actual PTO-ISA git HEAD used for each
++runtime in `build/lib/pto_isa_build.json`. This JSON is artifact
+ provenance, not a second configuration source. If the metadata says a
+ pre-built runtime was built for an older pin, or a partial rebuild did not
+ record that runtime, lookup fails with a stale-binary diagnostic and asks you
+diff --git a/docs/simt-launch.md b/docs/simt-launch.md
+index 04d0d29f..47867597 100644
+--- a/docs/simt-launch.md
++++ b/docs/simt-launch.md
+@@ -86,8 +86,8 @@ These properties make it work and keep it cheap:
+   `cce::dim3`, `__simt_vf__`, `LAUNCH_BOUND`, `threadIdx` come from bisheng's
+   bundled `__clang_cce_*.h` headers (auto-included for `dav-c310-vec`).
+   `mscatter` itself lowers to exactly these builtins — pto-isa is only a
+-  wrapper. So the a5 **platform runtime stays pto-isa-free**; only per-example
+-  incore kernels pull pto-isa (via `kernel_compiler.py`).
++  wrapper. So the a5 **AICore SIMT anchor stays pto-isa-free**. The onboard
++  host runtime may still embed pto-isa for communication workspace setup.
+ - **Survives dead-code elimination.** `force_simt_anchor` is a trailing field
+   in the a5 `KernelArgs` ([kernel_args.h](../src/a5/platform/include/common/kernel_args.h))
+   that the host always leaves 0. Because it is loaded from `__gm__` memory the
+diff --git a/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_complete.cpp b/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_complete.cpp
+new file mode 100644
+index 00000000..26415a5a
+--- /dev/null
++++ b/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_complete.cpp
+@@ -0,0 +1,35 @@
++/*
++ * Copyright (c) PyPTO Contributors.
++ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
++ * CANN Open Software License Agreement Version 2.0 (the "License").
++ * Please refer to the License for details. You may not use this file except in compliance with the License.
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
++ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
++ * See LICENSE in the root of the software repository for the full text of the License.
++ * -----------------------------------------------------------------------------------------------------------
++ */
++
++#include <cstdint>
++
++#ifndef __gm__
++#define __gm__
++#endif
++#ifndef __aicore__
++#define __aicore__
++#endif
++
++#include "backend/urma/urma_completion_kernel.h"
++#include "tensor.h"
++
++extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
++    __gm__ Tensor *workspace_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
++    uint32_t remote_rank = static_cast<uint32_t>(args[2]);
++    uint32_t target_head = static_cast<uint32_t>(args[3]);
++    __gm__ uint8_t *workspace =
++        reinterpret_cast<__gm__ uint8_t *>(workspace_tensor->buffer.addr) + workspace_tensor->start_offset;
++
++    auto *ws = pto2::urma_backend::fake_workspace(workspace);
++    pto2::urma_backend::ensure_fake_workspace_initialized(workspace);
++    while (__atomic_load_n(&ws->sq_head[remote_rank], __ATOMIC_ACQUIRE) < target_head) {}
++    (void)UrmaFakeComplete(workspace, remote_rank, target_head);
++}
+diff --git a/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_consumer.cpp b/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_consumer.cpp
+new file mode 100644
+index 00000000..0d7d9e86
+--- /dev/null
++++ b/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_consumer.cpp
+@@ -0,0 +1,41 @@
++/*
++ * Copyright (c) PyPTO Contributors.
++ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
++ * CANN Open Software License Agreement Version 2.0 (the "License").
++ * Please refer to the License for details. You may not use this file except in compliance with the License.
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
++ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
++ * See LICENSE in the root of the software repository for the full text of the License.
++ * -----------------------------------------------------------------------------------------------------------
++ */
++
++#include <cstdint>
++
++#ifndef __gm__
++#define __gm__
++#endif
++#ifndef __aicore__
++#define __aicore__
++#endif
++
++#include "tensor.h"
++
++extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
++    __gm__ Tensor *tget_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
++    __gm__ Tensor *tput_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
++    __gm__ Tensor *tget_result_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
++    __gm__ Tensor *tput_result_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
++
++    __gm__ float *tget = reinterpret_cast<__gm__ float *>(tget_tensor->buffer.addr) + tget_tensor->start_offset;
++    __gm__ float *tput = reinterpret_cast<__gm__ float *>(tput_tensor->buffer.addr) + tput_tensor->start_offset;
++    __gm__ float *tget_result =
++        reinterpret_cast<__gm__ float *>(tget_result_tensor->buffer.addr) + tget_result_tensor->start_offset;
++    __gm__ float *tput_result =
++        reinterpret_cast<__gm__ float *>(tput_result_tensor->buffer.addr) + tput_result_tensor->start_offset;
++
++    uint32_t n = static_cast<uint32_t>(tget_result_tensor->shapes[0]);
++    for (uint32_t i = 0; i < n; ++i) {
++        tget_result[i] = tget[i];
++        tput_result[i] = tput[i];
++    }
++}
+diff --git a/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_reset.cpp b/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_reset.cpp
+new file mode 100644
+index 00000000..fa01cf99
+--- /dev/null
++++ b/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_reset.cpp
+@@ -0,0 +1,33 @@
++/*
++ * Copyright (c) PyPTO Contributors.
++ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
++ * CANN Open Software License Agreement Version 2.0 (the "License").
++ * Please refer to the License for details. You may not use this file except in compliance with the License.
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
++ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, OR FITNESS FOR A PARTICULAR PURPOSE.
++ * See LICENSE in the root of the software repository for the full text of the License.
++ * -----------------------------------------------------------------------------------------------------------
++ */
++
++#include <cstdint>
++
++#ifndef __gm__
++#define __gm__
++#endif
++#ifndef __aicore__
++#define __aicore__
++#endif
++
++#include "backend/urma/urma_completion_kernel.h"
++#include "tensor.h"
++
++extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
++    __gm__ Tensor *workspace_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
++    __gm__ Tensor *token_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
++    __gm__ uint8_t *workspace =
++        reinterpret_cast<__gm__ uint8_t *>(workspace_tensor->buffer.addr) + workspace_tensor->start_offset;
++    __gm__ int32_t *token = reinterpret_cast<__gm__ int32_t *>(token_tensor->buffer.addr) + token_tensor->start_offset;
++
++    UrmaFakeReset(workspace);
++    token[0] = 1;
++}
+diff --git a/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_tget.cpp b/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_tget.cpp
+new file mode 100644
+index 00000000..6217b270
+--- /dev/null
++++ b/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_tget.cpp
+@@ -0,0 +1,62 @@
++/*
++ * Copyright (c) PyPTO Contributors.
++ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
++ * CANN Open Software License Agreement Version 2.0 (the "License").
++ * Please refer to the License for details. You may not use this file except in compliance with the License.
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
++ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
++ * See LICENSE in the root of the software repository for the full text of the License.
++ * -----------------------------------------------------------------------------------------------------------
++ */
++
++#include <cstdint>
++
++#ifndef __gm__
++#define __gm__
++#endif
++#ifndef __aicore__
++#define __aicore__
++#endif
++
++#include "backend/urma/urma_completion_kernel.h"
++#include "tensor.h"
++
++namespace {
++
++constexpr uint32_t kElemCount = 1024;
++
++struct SimpleGlobalFloat {
++    using RawDType = float;
++    static constexpr pto::Layout layout = pto::Layout::ND;
++
++    __gm__ float *ptr;
++
++    inline __aicore__ explicit SimpleGlobalFloat(__gm__ float *data) :
++        ptr(data) {}
++    inline __aicore__ __gm__ float *data() { return ptr; }
++    inline __aicore__ int64_t GetShape(int dim) {
++        return dim == pto::GlobalTensorDim::DIM_4 ? static_cast<int64_t>(kElemCount) : 1;
++    }
++    inline __aicore__ int64_t GetStride(int dim) {
++        return dim == pto::GlobalTensorDim::DIM_4 ? 1 : static_cast<int64_t>(kElemCount);
++    }
++};
++
++}  // namespace
++
++extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
++    __gm__ Tensor *src_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
++    __gm__ Tensor *dst_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
++    __gm__ Tensor *workspace_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
++    uint32_t remote_rank = static_cast<uint32_t>(args[4]);
++
++    __gm__ float *src = reinterpret_cast<__gm__ float *>(src_tensor->buffer.addr) + src_tensor->start_offset;
++    __gm__ float *dst = reinterpret_cast<__gm__ float *>(dst_tensor->buffer.addr) + dst_tensor->start_offset;
++    __gm__ uint8_t *workspace =
++        reinterpret_cast<__gm__ uint8_t *>(workspace_tensor->buffer.addr) + workspace_tensor->start_offset;
++
++    SimpleGlobalFloat src_global(src);
++    SimpleGlobalFloat dst_global(dst);
++    AsyncCtx async_ctx = get_async_ctx(args);
++    (void)send_request_entry(async_ctx, UrmaTget(dst_global, src_global, workspace, remote_rank));
++}
+diff --git a/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_tput.cpp b/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_tput.cpp
+new file mode 100644
+index 00000000..fbc6ce0e
+--- /dev/null
++++ b/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/aiv/kernel_urma_tput.cpp
+@@ -0,0 +1,62 @@
++/*
++ * Copyright (c) PyPTO Contributors.
++ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
++ * CANN Open Software License Agreement Version 2.0 (the "License").
++ * Please refer to the License for details. You may not use this file except in compliance with the License.
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
++ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
++ * See LICENSE in the root of the software repository for the full text of the License.
++ * -----------------------------------------------------------------------------------------------------------
++ */
++
++#include <cstdint>
++
++#ifndef __gm__
++#define __gm__
++#endif
++#ifndef __aicore__
++#define __aicore__
++#endif
++
++#include "backend/urma/urma_completion_kernel.h"
++#include "tensor.h"
++
++namespace {
++
++constexpr uint32_t kElemCount = 1024;
++
++struct SimpleGlobalFloat {
++    using RawDType = float;
++    static constexpr pto::Layout layout = pto::Layout::ND;
++
++    __gm__ float *ptr;
++
++    inline __aicore__ explicit SimpleGlobalFloat(__gm__ float *data) :
++        ptr(data) {}
++    inline __aicore__ __gm__ float *data() { return ptr; }
++    inline __aicore__ int64_t GetShape(int dim) {
++        return dim == pto::GlobalTensorDim::DIM_4 ? static_cast<int64_t>(kElemCount) : 1;
++    }
++    inline __aicore__ int64_t GetStride(int dim) {
++        return dim == pto::GlobalTensorDim::DIM_4 ? 1 : static_cast<int64_t>(kElemCount);
++    }
++};
++
++}  // namespace
++
++extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
++    __gm__ Tensor *src_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
++    __gm__ Tensor *dst_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
++    __gm__ Tensor *workspace_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
++    uint32_t remote_rank = static_cast<uint32_t>(args[4]);
++
++    __gm__ float *src = reinterpret_cast<__gm__ float *>(src_tensor->buffer.addr) + src_tensor->start_offset;
++    __gm__ float *dst = reinterpret_cast<__gm__ float *>(dst_tensor->buffer.addr) + dst_tensor->start_offset;
++    __gm__ uint8_t *workspace =
++        reinterpret_cast<__gm__ uint8_t *>(workspace_tensor->buffer.addr) + workspace_tensor->start_offset;
++
++    SimpleGlobalFloat src_global(src);
++    SimpleGlobalFloat dst_global(dst);
++    AsyncCtx async_ctx = get_async_ctx(args);
++    (void)send_request_entry(async_ctx, UrmaTput(dst_global, src_global, workspace, remote_rank));
++}
+diff --git a/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/orchestration/urma_async_completion_orch.cpp b/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/orchestration/urma_async_completion_orch.cpp
+new file mode 100644
+index 00000000..92eb456e
+--- /dev/null
++++ b/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/kernels/orchestration/urma_async_completion_orch.cpp
+@@ -0,0 +1,95 @@
++/*
++ * Copyright (c) PyPTO Contributors.
++ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
++ * CANN Open Software License Agreement Version 2.0 (the "License").
++ * Please refer to the License for details. You may not use this file except in compliance with the License.
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
++ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
++ * See LICENSE in the root of the software repository for the full text of the License.
++ * -----------------------------------------------------------------------------------------------------------
++ */
++
++#include <stdint.h>
++
++#include "platform_comm/comm_context.h"
++#include "pto_orchestration_api.h"
++
++constexpr uint32_t kElemCount = 1024;
++
++extern "C" {
++
++__attribute__((visibility("default"))) PTO2OrchestrationConfig
++urma_async_completion_orchestration_config(const L2TaskArgs &orch_args) {
++    (void)orch_args;
++    return PTO2OrchestrationConfig{.expected_arg_count = 6};
++}
++
++__attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
++    return urma_async_completion_orchestration_config(orch_args);
++}
++
++__attribute__((visibility("default"))) void urma_async_completion_orchestration(const L2TaskArgs &orch_args) {
++    if (orch_args.tensor_count() + orch_args.scalar_count() != 6) {
++        LOG_ERROR("urma_async_completion_demo: expected 6 args");
++        return;
++    }
++
++    const Tensor &src = orch_args.tensor(0).ref();
++    const Tensor &tget_result = orch_args.tensor(2).ref();
++    const Tensor &tput_result = orch_args.tensor(3).ref();
++    const Tensor &workspace = orch_args.tensor(4).ref();
++    auto *comm_ctx = reinterpret_cast<CommContext *>(static_cast<uintptr_t>(orch_args.scalar(0)));
++    const uint32_t remote_rank = (comm_ctx->rankId + 1u) % comm_ctx->rankNum;
++    uint32_t output_shape[1] = {kElemCount};
++    uint32_t token_shape[1] = {1};
++
++    L0TaskArgs reset_args;
++    TensorCreateInfo reset_token_info(token_shape, 1, DataType::INT32);
++    reset_args.add_input(workspace);
++    reset_args.add_output(reset_token_info);
++    TaskOutputTensors reset_outputs = rt_submit_aiv_task(4, reset_args);
++    Tensor reset_token = reset_outputs.get_ref(0);
++
++    L0TaskArgs tget_args;
++    TensorCreateInfo tget_output_info(output_shape, 1, DataType::FLOAT32);
++    tget_args.add_input(src);
++    tget_args.add_output(tget_output_info);
++    tget_args.add_input(workspace);
++    tget_args.add_input(reset_token);
++    tget_args.add_scalar(remote_rank);
++    TaskOutputTensors tget_outputs = rt_submit_aiv_task(0, tget_args);
++    Tensor tget_tmp = tget_outputs.get_ref(0);
++
++    L0TaskArgs tput_args;
++    TensorCreateInfo tput_output_info(output_shape, 1, DataType::FLOAT32);
++    tput_args.add_input(src);
++    tput_args.add_output(tput_output_info);
++    tput_args.add_input(workspace);
++    tput_args.add_input(reset_token);
++    tput_args.add_scalar(remote_rank);
++    TaskOutputTensors tput_outputs = rt_submit_aiv_task(1, tput_args);
++    Tensor tput_tmp = tput_outputs.get_ref(0);
++
++    L0TaskArgs complete_head_1_args;
++    complete_head_1_args.add_input(workspace);
++    complete_head_1_args.add_input(reset_token);
++    complete_head_1_args.add_scalar(remote_rank);
++    complete_head_1_args.add_scalar(static_cast<uint64_t>(1));
++    rt_submit_aiv_task(2, complete_head_1_args);
++
++    L0TaskArgs complete_head_2_args;
++    complete_head_2_args.add_input(workspace);
++    complete_head_2_args.add_input(reset_token);
++    complete_head_2_args.add_scalar(remote_rank);
++    complete_head_2_args.add_scalar(static_cast<uint64_t>(2));
++    rt_submit_aiv_task(2, complete_head_2_args);
++
++    L0TaskArgs consumer_args;
++    consumer_args.add_input(tget_tmp);
++    consumer_args.add_input(tput_tmp);
++    consumer_args.add_output(tget_result);
++    consumer_args.add_output(tput_result);
++    rt_submit_aiv_task(3, consumer_args);
++}
++
++}  // extern "C"
+diff --git a/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/test_urma_async_completion_demo.py b/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/test_urma_async_completion_demo.py
+new file mode 100644
+index 00000000..0df1fe51
+--- /dev/null
++++ b/examples/a5/tensormap_and_ringbuffer/urma_async_completion_demo/test_urma_async_completion_demo.py
+@@ -0,0 +1,202 @@
++#!/usr/bin/env python3
++# Copyright (c) PyPTO Contributors.
++# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
++# CANN Open Software License Agreement Version 2.0 (the "License").
++# Please refer to the License for details. You may not use this file except in compliance with the License.
++# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
++# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
++# See LICENSE in the root of the software repository for the full text of the License.
++# -----------------------------------------------------------------------------------------------------------
++"""URMA-shaped deferred completion smoke test for a5sim."""
++
++from __future__ import annotations
++
++import argparse
++import os
++import sys
++from pathlib import Path
++
++REPO_ROOT = Path(__file__).resolve().parents[4]
++for path in (str(REPO_ROOT), str(REPO_ROOT / "python")):
++    if path not in sys.path:
++        sys.path.insert(0, path)
++sys.meta_path = [finder for finder in sys.meta_path if type(finder).__module__ != "_simpler_editable"]
++
++import torch
++from simpler.task_interface import (
++    ArgDirection,
++    CallConfig,
++    ChipCallable,
++    CommBufferSpec,
++    CoreCallable,
++    DataType,
++    TaskArgs,
++    Tensor,
++    TensorArgType,
++)
++from simpler.worker import Worker
++
++from simpler_setup.elf_parser import extract_text_section
++from simpler_setup.kernel_compiler import KernelCompiler
++from simpler_setup.pto_isa import ensure_pto_isa_root
++from simpler_setup.torch_interop import make_tensor_arg
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++N = 1024
++FAKE_WORKSPACE_NBYTES = 128 * 1024
++
++
++def parse_device_range(spec: str) -> list[int]:
++    if "," in spec:
++        return [int(x) for x in spec.split(",") if x]
++    if "-" in spec:
++        lo, hi = (int(x) for x in spec.split("-"))
++        return list(range(lo, hi + 1))
++    return [int(spec)]
++
++
++def build_chip_callable(platform: str) -> ChipCallable:
++    kc = KernelCompiler(platform=platform)
++    runtime = "tensormap_and_ringbuffer"
++    pto_isa_root = ensure_pto_isa_root()
++    include_dirs = kc.get_orchestration_include_dirs(runtime)
++    extra_includes = list(include_dirs) + [str(kc.project_root / "src" / "common")]
++
++    children = []
++    for func_id, rel in [
++        (0, "kernels/aiv/kernel_urma_tget.cpp"),
++        (1, "kernels/aiv/kernel_urma_tput.cpp"),
++        (2, "kernels/aiv/kernel_urma_complete.cpp"),
++        (3, "kernels/aiv/kernel_urma_consumer.cpp"),
++        (4, "kernels/aiv/kernel_urma_reset.cpp"),
++    ]:
++        kernel = kc.compile_incore(
++            source_path=os.path.join(HERE, rel),
++            core_type="aiv",
++            pto_isa_root=pto_isa_root,
++            extra_include_dirs=extra_includes,
++        )
++        if not platform.endswith("sim"):
++            kernel = extract_text_section(kernel)
++        children.append(
++            (
++                func_id,
++                CoreCallable.build(
++                    signature=[
++                        ArgDirection.IN,
++                        ArgDirection.INOUT,
++                        ArgDirection.OUT,
++                        ArgDirection.OUT,
++                        ArgDirection.IN,
++                    ],
++                    binary=kernel,
++                ),
++            )
++        )
++
++    orch = kc.compile_orchestration(
++        runtime_name=runtime,
++        source_path=os.path.join(HERE, "kernels/orchestration/urma_async_completion_orch.cpp"),
++        extra_include_dirs=[str(kc.project_root / "src" / "common")],
++    )
++    return ChipCallable.build(
++        signature=[
++            ArgDirection.IN,
++            ArgDirection.INOUT,
++            ArgDirection.OUT,
++            ArgDirection.OUT,
++            ArgDirection.IN,
++        ],
++        func_name="urma_async_completion_orchestration",
++        binary=orch,
++        children=children,
++    )
++
++
++def run(platform: str = "a5sim", device_ids: list[int] | None = None) -> int:
++    if device_ids is None:
++        device_ids = [0, 1]
++    nranks = len(device_ids)
++    if nranks != 2:
++        raise ValueError(f"urma_async_completion_demo needs exactly 2 devices, got {device_ids}")
++
++    src = [
++        torch.tensor([float(rank * 1000 + i) for i in range(N)], dtype=torch.float32).share_memory_()
++        for rank in range(nranks)
++    ]
++    scratch = [torch.zeros(N, dtype=torch.float32).share_memory_() for _ in range(nranks)]
++    tget_result = [torch.zeros(N, dtype=torch.float32).share_memory_() for _ in range(nranks)]
++    tput_result = [torch.zeros(N, dtype=torch.float32).share_memory_() for _ in range(nranks)]
++
++    chip_callable = build_chip_callable(platform)
++    worker = Worker(
++        level=3,
++        platform=platform,
++        runtime="tensormap_and_ringbuffer",
++        device_ids=device_ids,
++        num_sub_workers=0,
++    )
++    chip_handle = worker.register(chip_callable)
++    try:
++        worker.init()
++
++        def orch_fn(orch, _args, cfg):
++            with orch.allocate_domain(
++                name="default",
++                workers=list(range(nranks)),
++                window_size=FAKE_WORKSPACE_NBYTES,
++                buffers=[
++                    CommBufferSpec(
++                        name="urma_workspace",
++                        dtype="uint8",
++                        count=FAKE_WORKSPACE_NBYTES,
++                        nbytes=FAKE_WORKSPACE_NBYTES,
++                    )
++                ],
++            ) as handle:
++                for rank in range(nranks):
++                    domain = handle[rank]
++                    args = TaskArgs()
++                    args.add_tensor(make_tensor_arg(src[rank]), TensorArgType.INPUT)
++                    args.add_tensor(make_tensor_arg(scratch[rank]), TensorArgType.INOUT)
++                    args.add_tensor(make_tensor_arg(tget_result[rank]), TensorArgType.OUTPUT_EXISTING)
++                    args.add_tensor(make_tensor_arg(tput_result[rank]), TensorArgType.OUTPUT_EXISTING)
++                    args.add_tensor(
++                        Tensor.make(
++                            data=domain.buffer_ptrs["urma_workspace"],
++                            shapes=(FAKE_WORKSPACE_NBYTES,),
++                            dtype=DataType.UINT8,
++                            child_memory=True,
++                        ),
++                        TensorArgType.INPUT,
++                    )
++                    args.add_scalar(domain.device_ctx)
++                    orch.submit_next_level(chip_handle, args, cfg, worker=rank)
++
++        worker.run(orch_fn, args=None, config=CallConfig())
++
++        ok = True
++        for rank in range(nranks):
++            max_tget = float(torch.max(torch.abs(tget_result[rank] - src[rank])))
++            max_tput = float(torch.max(torch.abs(tput_result[rank] - src[rank])))
++            print(f"[urma_async_completion_demo] rank {rank}: max_tget={max_tget:.3e} max_tput={max_tput:.3e}")
++            ok = ok and max_tget <= 1e-6 and max_tput <= 1e-6
++        return 0 if ok else 1
++    finally:
++        worker.close()
++
++
++def test_urma_async_completion_demo() -> None:
++    assert run("a5sim", [0, 1]) == 0
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("-p", "--platform", default="a5sim")
++    parser.add_argument("-d", "--device", default="0-1")
++    args = parser.parse_args()
++    return run(args.platform, parse_device_range(args.device))
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/pto_isa.pin b/pto_isa.pin
+index c57af289..4c656e07 100644
+--- a/pto_isa.pin
++++ b/pto_isa.pin
+@@ -1 +1 @@
+-83d01313d9bfc247c4b7c8bcf969d1019f0d106f
++b67f0292f8a7b10786d9de7fcae35ab50b32a609
+diff --git a/simpler_setup/build_runtimes.py b/simpler_setup/build_runtimes.py
+index c0914983..c25acc14 100644
+--- a/simpler_setup/build_runtimes.py
++++ b/simpler_setup/build_runtimes.py
+@@ -112,12 +112,10 @@ def build_all(
+     pto_isa_root_for_metadata: Optional[str] = None
+     pto_isa_runtime_keys: list[str] = []
+ 
+-    # a2a3 onboard host_runtime hard-depends on pto-isa headers + CANN-9.0
+-    # aclnn syms (cf. src/a2a3/platform/onboard/host/CMakeLists.txt
+-    # SIMPLER_ENABLE_PTO_SDMA_WORKSPACE marker). Resolve PTO_ISA_ROOT now so
+-    # the runtime compiler consumes the same pinned managed checkout as kernel
+-    # compilation. Skipped when only sim platforms are being built.
+-    if "a2a3" in platforms:
++    # Onboard host runtimes that embed pto-isa headers need the same pinned
++    # managed checkout as kernel compilation. Skipped when only sim platforms
++    # are being built.
++    if any(p in platforms for p in ("a2a3", "a5")):
+         from simpler_setup.pto_isa import ensure_pto_isa_root  # noqa: PLC0415
+ 
+         pto_isa_root = ensure_pto_isa_root(verbose=True)
+@@ -156,7 +154,7 @@ def build_all(
+ 
+         for runtime_name in runtimes:
+             tasks.append((platform, runtime_name))
+-            if arch == "a2a3" and variant == "onboard":
++            if arch in ("a2a3", "a5") and variant == "onboard":
+                 from simpler_setup.pto_isa import pto_isa_runtime_artifact_key  # noqa: PLC0415
+ 
+                 pto_isa_runtime_keys.append(pto_isa_runtime_artifact_key(arch, variant, runtime_name))
+diff --git a/simpler_setup/pto_isa.py b/simpler_setup/pto_isa.py
+index e88fad5d..02efd878 100644
+--- a/simpler_setup/pto_isa.py
++++ b/simpler_setup/pto_isa.py
+@@ -129,7 +129,8 @@ def write_pto_isa_build_metadata(lib_dir: Path, pto_isa_root: str, runtime_keys:
+         raise RuntimeError(
+             "Cannot record PTO-ISA build revision: "
+             f"{pto_isa_root} is not a git checkout or git HEAD is unavailable. "
+-            "Building a2a3 onboard runtimes requires the managed build/pto-isa checkout."
++            "Building onboard runtimes that embed PTO-ISA host headers requires "
++            "the managed build/pto-isa checkout."
+         )
+     if actual_commit != required_commit:
+         raise RuntimeError(
+diff --git a/simpler_setup/runtime_builder.py b/simpler_setup/runtime_builder.py
+index b8e47e34..cde80cb2 100644
+--- a/simpler_setup/runtime_builder.py
++++ b/simpler_setup/runtime_builder.py
+@@ -180,29 +180,24 @@ class RuntimeBuilder:
+     def _requires_pto_isa_metadata_validation(self) -> bool:
+         """Return True when this runtime embeds PTO-ISA headers into host code.
+ 
+-        Scoped on arch/variant, not on ``SIMPLER_ENABLE_PTO_SDMA_WORKSPACE``
+-        (the actual flag that pulls pto-isa headers into the host .so). This is
+-        deliberately coarser: should a2a3 onboard ever turn that workspace off,
+-        a pto-isa bump would still invalidate this target's cache even though it
+-        no longer embeds pto-isa. That over-invalidation only costs an extra
+-        recompile — it can never serve a stale object — so erring wide is the
+-        safe direction, and keeping the scope arch/variant-based matches the
+-        cmake-side define gating in src/a2a3/platform/onboard/host/CMakeLists.txt.
++        Scoped on arch/variant, not on individual source includes. a2a3
++        onboard embeds pto-isa for SDMA workspace setup and a5 onboard embeds
++        it for URMA workspace setup, so a pto-isa bump must invalidate those
++        runtime binaries.
+         """
+-        return self._arch == "a2a3" and self._variant == "onboard"
++        return self._arch in ("a2a3", "a5") and self._variant == "onboard"
+ 
+     def _resolve_build_pto_isa_commit(self) -> str:
+         """Return the pinned pto-isa commit baked into this build.
+ 
+-        Only a2a3 onboard host code embeds pto-isa headers, so a pto-isa bump
+-        must invalidate that build's cmake cache even when the runtime repo
+-        HEAD is unchanged (issue #1139: a stale host_runtime.so compiled
+-        against the old headers otherwise survives a reinstall). For every
+-        other arch/variant the pto-isa revision does not affect the compiled
+-        objects, so return "" and leave the stamp keyed on the runtime HEAD.
++        Onboard host code that embeds pto-isa headers must be invalidated when
++        the pin changes, even when the runtime repo HEAD is unchanged (issue
++        #1139: a stale host_runtime.so compiled against the old headers
++        otherwise survives a reinstall). For variants that do not embed
++        pto-isa, return "" and leave the stamp keyed on the runtime HEAD.
+ 
+         ``pto_isa.pin`` is the single source of truth. If the pin is missing or
+-        invalid, let ``read_pto_isa_pin`` raise so an a2a3 onboard build cannot
++        invalid, let ``read_pto_isa_pin`` raise so an onboard build cannot
+         silently proceed with unknown PTO-ISA headers.
+         """
+         if not self._requires_pto_isa_metadata_validation():
+@@ -214,8 +209,9 @@ class RuntimeBuilder:
+     def _build_cache_stamp(self, pto_isa_commit: Optional[str] = None) -> str:
+         """Stamp identifying the sources this build was compiled from.
+ 
+-        Combines the runtime repo HEAD with the pto-isa commit (a2a3 onboard
+-        only) so the cmake cache is invalidated whenever either changes. An
++        Combines the runtime repo HEAD with the pto-isa commit for onboard
++        runtimes that embed PTO-ISA host headers, so the cmake cache is
++        invalidated whenever either changes. An
+         empty runtime HEAD is preserved verbatim so the
+         ``_invalidate_cache_if_stale`` 'unavailable → clean rebuild' path still
+         fires rather than being masked by a present pto-isa commit.
+diff --git a/simpler_setup/runtime_compiler.py b/simpler_setup/runtime_compiler.py
+index a73c4be5..7671a118 100644
+--- a/simpler_setup/runtime_compiler.py
++++ b/simpler_setup/runtime_compiler.py
+@@ -171,6 +171,13 @@ class RuntimeCompiler:
+     def _init_a5(self):
+         """Initialize toolchains for real a5 hardware."""
+         env_manager.ensure("ASCEND_HOME_PATH")
++        # a5 onboard host_runtime builds URMA workspace setup against pto-isa
++        # host headers. Use the same pinned managed checkout as kernel
++        # compilation and expose it through PTO_ISA_ROOT for CMake.
++        from simpler_setup.pto_isa import ensure_pto_isa_root  # noqa: PLC0415
++
++        os.environ["PTO_ISA_ROOT"] = ensure_pto_isa_root(verbose=True)
++        env_manager.ensure("PTO_ISA_ROOT")
+ 
+         # AICore: Bisheng CCE compiler with A5 platform
+         ccec = CCECToolchain(platform="a5")
+diff --git a/simpler_setup/toolchain.py b/simpler_setup/toolchain.py
+index bd667ed2..62408550 100644
+--- a/simpler_setup/toolchain.py
++++ b/simpler_setup/toolchain.py
+@@ -65,6 +65,13 @@ def _matches_pinned_name(actual: str, pinned: str) -> bool:
+     return base == pinned or base.endswith(f"-{pinned}")
+ 
+ 
++def _first_existing_file(candidates: list[str], description: str) -> str:
++    for path in candidates:
++        if os.path.isfile(path):
++            return path
++    raise FileNotFoundError(f"{description} not found; checked: {', '.join(candidates)}")
++
++
+ def _host_compiler_cmake_args(default_cc: str, default_cxx: str, pin_compiler: bool = False) -> list[str]:
+     """CMake ``-D`` args for a host GCC/G++ toolchain.
+ 
+@@ -150,13 +157,20 @@ class CCECToolchain(Toolchain):
+         if self.ascend_home_path is None:
+             raise RuntimeError("ASCEND_HOME_PATH is required for CCEC toolchain")
+ 
+-        self.cxx_path = os.path.join(self.ascend_home_path, "bin", "ccec")
+-        self.linker_path = os.path.join(self.ascend_home_path, "bin", "ld.lld")
+-
+-        if not os.path.isfile(self.cxx_path):
+-            raise FileNotFoundError(f"ccec compiler not found: {self.cxx_path}")
+-        if not os.path.isfile(self.linker_path):
+-            raise FileNotFoundError(f"ccec linker not found: {self.linker_path}")
++        self.cxx_path = _first_existing_file(
++            [
++                os.path.join(self.ascend_home_path, "bin", "ccec"),
++                os.path.join(self.ascend_home_path, "aarch64-linux", "bin", "ccec"),
++            ],
++            "ccec compiler",
++        )
++        self.linker_path = _first_existing_file(
++            [
++                os.path.join(self.ascend_home_path, "bin", "ld.lld"),
++                os.path.join(self.ascend_home_path, "aarch64-linux", "bin", "ld.lld"),
++            ],
++            "ccec linker",
++        )
+ 
+     def get_compile_flags(self, core_type: str = "aiv", **kwargs) -> list[str]:
+         # A5 uses dav-c310 architecture, A2A3 uses dav-c220
+@@ -280,24 +294,18 @@ class Aarch64GxxToolchain(Toolchain):
+         if self.ascend_home_path is None:
+             raise RuntimeError("ASCEND_HOME_PATH is required for aarch64 toolchain")
+ 
+-        self.cxx_path = os.path.join(
+-            self.ascend_home_path,
+-            "tools",
+-            "hcc",
+-            "bin",
+-            "aarch64-target-linux-gnu-g++",
++        hcc_roots = [
++            os.path.join(self.ascend_home_path, "tools", "hcc", "bin"),
++            os.path.join(os.path.dirname(self.ascend_home_path), "tools", "hcc", "bin"),
++        ]
++        self.cxx_path = _first_existing_file(
++            [os.path.join(root, "aarch64-target-linux-gnu-g++") for root in hcc_roots],
++            "aarch64 C++ compiler",
+         )
+-        self.cc_path = os.path.join(
+-            self.ascend_home_path,
+-            "tools",
+-            "hcc",
+-            "bin",
+-            "aarch64-target-linux-gnu-gcc",
++        self.cc_path = _first_existing_file(
++            [os.path.join(root, "aarch64-target-linux-gnu-gcc") for root in hcc_roots],
++            "aarch64 C compiler",
+         )
+-        if not os.path.isfile(self.cc_path):
+-            raise FileNotFoundError(f"aarch64 C compiler not found: {self.cc_path}")
+-        if not os.path.isfile(self.cxx_path):
+-            raise FileNotFoundError(f"aarch64 C++ compiler not found: {self.cxx_path}")
+         self._gcc = _is_gcc(self.cxx_path)
+ 
+     def get_compile_flags(self, **kwargs) -> list[str]:
+diff --git a/src/a5/platform/onboard/aicore/simt_anchor.h b/src/a5/platform/onboard/aicore/simt_anchor.h
+index 8b42a820..e76565b7 100644
+--- a/src/a5/platform/onboard/aicore/simt_anchor.h
++++ b/src/a5/platform/onboard/aicore/simt_anchor.h
+@@ -37,9 +37,8 @@
+  * Built purely from bisheng/cce compiler builtins — cce::async_invoke /
+  * cce::dim3 (`__clang_cce_simt.h`), __simt_vf__ / __simd_vf__ / LAUNCH_BOUND
+  * (`__clang_cce_defines.h`), threadIdx (`__clang_cce_simt_builtin_vars.h`), all
+- * auto-included by ccec for the dav-c310-vec arch. No pto-isa dependency, so
+- * the a5 platform runtime build stays pto-isa-free (only per-example incore
+- * kernels pull pto-isa, via kernel_compiler.py).
++ * auto-included by ccec for the dav-c310-vec arch. This AICore anchor adds no
++ * pto-isa dependency; onboard host communication setup may still embed pto-isa.
+  */
+ 
+ #ifndef PLATFORM_A5_AICORE_SIMT_ANCHOR_H_
+diff --git a/src/a5/platform/onboard/aicpu/CMakeLists.txt b/src/a5/platform/onboard/aicpu/CMakeLists.txt
+index fca9c6b7..cac25917 100644
+--- a/src/a5/platform/onboard/aicpu/CMakeLists.txt
++++ b/src/a5/platform/onboard/aicpu/CMakeLists.txt
+@@ -31,6 +31,8 @@ else()
+     message(FATAL_ERROR "MUST set CUSTOM_INCLUDE_DIRS to build AICPU kernel")
+ endif()
+ 
++set(ASCEND_ARCH_HOME "${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux")
++
+ # Build complete source list from CUSTOM_SOURCE_DIRS and core sources.
+ # Sources come from three buckets:
+ #   1. `${CMAKE_CURRENT_SOURCE_DIR}/*.cpp` — onboard-aicpu sources that are
+@@ -92,13 +94,19 @@ target_include_directories(aicpu_kernel
+         ${ASCEND_HOME_PATH}/include
+         ${ASCEND_HOME_PATH}/include/toolchain
+         ${ASCEND_HOME_PATH}/pkg_inc/base
++        ${ASCEND_ARCH_HOME}/include
++        ${ASCEND_ARCH_HOME}/include/toolchain
++        ${ASCEND_ARCH_HOME}/pkg_inc/base
+ )
+ 
+ target_link_directories(aicpu_kernel
+     PRIVATE
+         ${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/devlib/linux/aarch64/
+         ${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/devlib/device/
++        ${ASCEND_ARCH_HOME}/devlib/linux/aarch64/
++        ${ASCEND_ARCH_HOME}/devlib/device/
+         ${ASCEND_HOME_PATH}/lib64
++        ${ASCEND_ARCH_HOME}/lib64
+ )
+ 
+ # Output name
+@@ -130,6 +138,7 @@ target_include_directories(aicpu_dispatcher
+         # (matches a2a3 sibling; same Build-ID fingerprint protocol).
+         ${CMAKE_CURRENT_SOURCE_DIR}/../../../../common
+         ${ASCEND_HOME_PATH}/include
++        ${ASCEND_ARCH_HOME}/include
+ )
+ 
+ target_link_libraries(aicpu_dispatcher PRIVATE dl)
+diff --git a/src/a5/platform/onboard/host/CMakeLists.txt b/src/a5/platform/onboard/host/CMakeLists.txt
+index 177abdec..f38c63a0 100644
+--- a/src/a5/platform/onboard/host/CMakeLists.txt
++++ b/src/a5/platform/onboard/host/CMakeLists.txt
+@@ -32,6 +32,14 @@ if(DEFINED CUSTOM_INCLUDE_DIRS)
+ else()
+     message(FATAL_ERROR "MUST set CUSTOM_INCLUDE_DIRS to build Host runtime")
+ endif()
++if(NOT DEFINED ENV{PTO_ISA_ROOT})
++    message(FATAL_ERROR
++        "a5 onboard host_runtime requires PTO_ISA_ROOT "
++        "(URMA workspace setup uses pto-isa host headers)")
++endif()
++list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "$ENV{PTO_ISA_ROOT}/include")
++
++set(ASCEND_ARCH_HOME "${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux")
+ 
+ # Build complete source list: core host sources + sources from CUSTOM_SOURCE_DIRS
+ set(HOST_RUNTIME_SOURCES "")
+@@ -97,6 +105,13 @@ target_compile_options(host_runtime
+ # src/common/platform/shared/host/platform_compile_info.cpp.
+ target_compile_definitions(host_runtime PRIVATE SIMPLER_PLATFORM_NAME="a5")
+ 
++set(SIMPLER_PTO_ISA_BUILD_COMMIT "" CACHE STRING
++    "PTO-ISA commit used for host_runtime cache key")
++if(NOT "${SIMPLER_PTO_ISA_BUILD_COMMIT}" STREQUAL "")
++    target_compile_definitions(host_runtime PRIVATE
++        SIMPLER_PTO_ISA_BUILD_COMMIT="${SIMPLER_PTO_ISA_BUILD_COMMIT}")
++endif()
++
+ # Include directories - always include local headers
+ target_include_directories(host_runtime
+     PRIVATE
+@@ -115,18 +130,33 @@ target_include_directories(host_runtime
+         # rtsLaunchCpuKernel API used by LoadAicpuOp).
+         ${ASCEND_HOME_PATH}/pkg_inc/runtime/runtime
+         ${ASCEND_HOME_PATH}/pkg_inc/profiling
++        ${ASCEND_ARCH_HOME}/include
++        ${ASCEND_ARCH_HOME}/pkg_inc
++        ${ASCEND_ARCH_HOME}/pkg_inc/runtime
++        ${ASCEND_ARCH_HOME}/pkg_inc/runtime/runtime
++        ${ASCEND_ARCH_HOME}/pkg_inc/profiling
++        ${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/asc/include
++        ${ASCEND_ARCH_HOME}/asc/include
++        ${ASCEND_ARCH_HOME}/include/driver
+         ${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/include/driver
+ )
+ 
+ # CANN 9.x exposes the working non-V2 HCCL entry points through libhcomm.
+ # Link it explicitly so comm_hccl.cpp can follow the same initialization path
+ # as the pto-isa communication tests.
+-find_library(HCOMM_LIB NAMES hcomm PATHS ${ASCEND_HOME_PATH}/lib64 NO_DEFAULT_PATH)
++find_library(HCOMM_LIB
++    NAMES hcomm
++    PATHS
++        ${ASCEND_HOME_PATH}/lib64
++        ${ASCEND_ARCH_HOME}/lib64
++    NO_DEFAULT_PATH
++)
+ if(HCOMM_LIB)
+     set(HCCL_LINK_TARGETS ${HCOMM_LIB})
+     message(STATUS "Using HCCL library: ${HCOMM_LIB}")
+ else()
+-    message(FATAL_ERROR "libhcomm not found under ${ASCEND_HOME_PATH}/lib64")
++    message(FATAL_ERROR
++        "libhcomm not found under ${ASCEND_HOME_PATH}/lib64 or ${ASCEND_ARCH_HOME}/lib64")
+ endif()
+ 
+ # Link against CANN runtime libraries
+@@ -142,6 +172,8 @@ target_link_libraries(host_runtime
+         runtime
+         ascendcl
+         -Wl,--no-as-needed ${HCCL_LINK_TARGETS} -Wl,--as-needed
++        c_sec
++        nnopbase
+         dl
+ )
+ 
+@@ -149,6 +181,9 @@ target_link_directories(host_runtime
+     PRIVATE
+         ${ASCEND_HOME_PATH}/lib64
+         ${ASCEND_HOME_PATH}/runtime/lib64
++        ${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/lib64
++        ${ASCEND_ARCH_HOME}/lib64
++        ${ASCEND_ARCH_HOME}/runtime/lib64
+ )
+ 
+ set_target_properties(host_runtime PROPERTIES OUTPUT_NAME "host_runtime")
+diff --git a/src/a5/platform/onboard/host/comm_hccl.cpp b/src/a5/platform/onboard/host/comm_hccl.cpp
+index ae23b261..33e9dee1 100644
+--- a/src/a5/platform/onboard/host/comm_hccl.cpp
++++ b/src/a5/platform/onboard/host/comm_hccl.cpp
+@@ -45,6 +45,7 @@
+ #include "acl/acl.h"
+ #include "hccl/hccl_comm.h"
+ #include "hccl/hccl_types.h"
++#include "pto/comm/async/urma/urma_workspace_manager.hpp"
+ 
+ // Thin wrappers around the HCCL public APIs we use. Kept as a translation
+ // layer in case we need to swap (e.g., InitConfig variant) later.
+@@ -70,6 +71,7 @@ struct DomainAllocation {
+     int nranks = 0;  // subset size
+     void *local_buf = nullptr;
+     CommContext *device_ctx = nullptr;  // aclrtMalloc'd CommContext mirror
++    std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> urma_workspace;
+ };
+ 
+ struct CommHandle_ {
+@@ -87,6 +89,7 @@ struct CommHandle_ {
+     bool owns_device_ctx = false;
+     std::vector<CommContext *> derived_contexts;
+     std::unordered_map<uint64_t, std::unique_ptr<DomainAllocation>> domain_allocations;
++    std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> urma_workspace;
+ };
+ 
+ // ============================================================================
+@@ -623,25 +626,56 @@ static std::string domain_barrier_tag(uint64_t allocation_id, const char *phase)
+     return std::string("alloc_") + std::to_string(allocation_id) + "_" + phase;
+ }
+ 
+-// Idempotently provision the process-global PTO-ISA async-SDMA scratch
+-// workspace on the comm handle and mirror its address into host_ctx.  Both
+-// the base-window path and the dynamic per-domain path call this; only the
+-// first call allocates.  CANN 9.0+ feature: on 8.5 the aclnn dlsym fails by
+-// design, so we leave workSpace == 0 and SDMA demos self-skip.  No-op when
+-// the build-time PTO-ISA dependency is absent.
+-static void ensure_sdma_workspace(CommHandle h) {
+-#ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
+-    if (h->sdma_workspace) return;
+-    h->sdma_workspace = std::make_unique<pto::comm::sdma::SdmaWorkspaceManager>();
+-    if (h->sdma_workspace->Init()) {
+-        h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->sdma_workspace->GetWorkspaceAddr());
+-        h->host_ctx.workSpaceSize = 16 * 1024;
+-    } else {
+-        h->sdma_workspace.reset();
++static uint64_t urma_workspace_bytes(uint32_t rank_count) {
++    using namespace pto::comm::urma;
++    constexpr uint32_t qp_num = 1;
++    return sizeof(UrmaInfo) +
++           static_cast<uint64_t>(rank_count) *
++               (2ULL * sizeof(UrmaWQCtx) * qp_num + 2ULL * sizeof(UrmaCqCtx) * qp_num + sizeof(UrmaMemInfo) * qp_num);
++}
++
++static bool rank_ids_are_dense_prefix(const uint32_t *rank_ids, size_t rank_count) {
++    if (rank_ids == nullptr) return false;
++    for (size_t i = 0; i < rank_count; ++i) {
++        if (rank_ids[i] != static_cast<uint32_t>(i)) return false;
+     }
+-#else
+-    (void)h;
+-#endif
++    return true;
++}
++
++static bool init_urma_workspace(
++    CommHandle h, uint32_t rank_id, uint32_t rank_count, void *symmetric_addr, uint64_t symmetric_size,
++    std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> &workspace
++) {
++    if (workspace) return workspace->GetWorkspaceAddr() != nullptr;
++    if (h == nullptr || h->hccl_comm == nullptr || symmetric_addr == nullptr || symmetric_size == 0 ||
++        rank_id >= rank_count) {
++        return false;
++    }
++
++    auto manager = std::make_unique<pto::comm::urma::UrmaWorkspaceManager>();
++    if (!manager->Init(h->hccl_comm, rank_id, rank_count, symmetric_addr, symmetric_size)) {
++        LOG_WARN(
++            "[comm rank %d] URMA workspace init failed (rank_id=%u rank_count=%u size=%llu); "
++            "CommContext::workSpace remains 0",
++            h->rank, rank_id, rank_count, static_cast<unsigned long long>(symmetric_size)
++        );
++        return false;
++    }
++    workspace = std::move(manager);
++    return true;
++}
++
++static void ensure_base_urma_workspace(CommHandle h) {
++    if (h == nullptr || h->urma_workspace) return;
++    void *local_buf = reinterpret_cast<void *>(static_cast<uintptr_t>(h->host_ctx.windowsIn[h->rank]));
++    if (!init_urma_workspace(
++            h, static_cast<uint32_t>(h->rank), static_cast<uint32_t>(h->nranks), local_buf, h->host_ctx.winSize,
++            h->urma_workspace
++        )) {
++        return;
++    }
++    h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->urma_workspace->GetWorkspaceAddr());
++    h->host_ctx.workSpaceSize = urma_workspace_bytes(static_cast<uint32_t>(h->nranks));
+ }
+ 
+ // Performs the per-allocation Path-D dance for one subset rank.  rank_ids
+@@ -773,20 +807,26 @@ static int domain_alloc_via_ipc(
+     out->rank = my_dr;
+     out->nranks = subset_n;
+     out->local_buf = localBuf;
+-    // Build a host-side CommContext for the subset and upload it as device_ctx.
+-    // PTO-ISA async SDMA ops (SdmaTget) read the scratch workspace off
+-    // CommContext::workSpace.  The dynamic-domain path does not go through
+-    // comm_alloc_windows, so provision the workspace here; without it a
+-    // freshly zero-initialized per-domain ctx would leave workSpace == 0 and
+-    // those kernels early-return on the workSpace guard.
+-    ensure_sdma_workspace(h);
++    if (rank_ids_are_dense_prefix(rank_ids, rank_count)) {
++        (void)init_urma_workspace(
++            h, domain_rank, static_cast<uint32_t>(rank_count), localBuf, win_size, out->urma_workspace
++        );
++    } else {
++        LOG_WARN(
++            "[comm rank %d] alloc_domain: URMA workspace disabled for non-dense rank mapping "
++            "(first supported version requires rank_ids[i] == i)",
++            h->rank
++        );
++    }
+ 
+     CommContext ctx{};
+     ctx.rankId = domain_rank;
+     ctx.rankNum = static_cast<uint32_t>(subset_n);
+     ctx.winSize = win_size;
+-    ctx.workSpace = h->host_ctx.workSpace;
+-    ctx.workSpaceSize = h->host_ctx.workSpaceSize;
++    if (out->urma_workspace) {
++        ctx.workSpace = reinterpret_cast<uint64_t>(out->urma_workspace->GetWorkspaceAddr());
++        ctx.workSpaceSize = urma_workspace_bytes(static_cast<uint32_t>(rank_count));
++    }
+     ctx.windowsIn[my_dr] = reinterpret_cast<uint64_t>(localBuf);
+     for (int p = 0; p < subset_n; ++p) {
+         if (p == my_dr) continue;
+@@ -842,11 +882,7 @@ extern "C" int comm_alloc_windows(CommHandle h, size_t win_size, uint64_t *devic
+     const uint64_t effective_win_size = win_size != 0 ? static_cast<uint64_t>(win_size) : kDefaultIpcWinSize;
+     if (alloc_windows_via_ipc(h, effective_win_size) != 0) return -1;
+ 
+-    // Optional PTO-ISA async SDMA workspace pre-allocation (overlays the comm
+-    // backend's output; comm-side flow does not care about workSpace).  No-op
+-    // when SIMPLER_ENABLE_PTO_SDMA_WORKSPACE is undefined (this PR ships A
+-    // without the macro; the overlay PR turns it on).
+-    ensure_sdma_workspace(h);
++    ensure_base_urma_workspace(h);
+ 
+     void *newDevMem = nullptr;
+     aclError aRet = aclrtMalloc(&newDevMem, sizeof(CommContext), ACL_MEM_MALLOC_HUGE_FIRST);
+@@ -905,8 +941,16 @@ extern "C" int comm_derive_context(
+     }
+ 
+     CommContext ctx{};
+-    ctx.workSpace = h->host_ctx.workSpace;
+-    ctx.workSpaceSize = h->host_ctx.workSpaceSize;
++    if (rank_ids_are_dense_prefix(rank_ids, rank_count)) {
++        ctx.workSpace = h->host_ctx.workSpace;
++        ctx.workSpaceSize = h->host_ctx.workSpaceSize;
++    } else {
++        LOG_WARN(
++            "[comm rank %d] comm_derive_context: URMA workspace disabled for non-dense rank mapping "
++            "(first supported version requires rank_ids[i] == i)",
++            h->rank
++        );
++    }
+     ctx.rankId = domain_rank;
+     ctx.rankNum = static_cast<uint32_t>(rank_count);
+     ctx.winSize = window_size;
+@@ -1059,6 +1103,7 @@ comm_release_domain_windows(CommHandle h, uint64_t allocation_id, size_t rank_co
+         aclError aret = aclrtFree(alloc->device_ctx);
+         if (aret != ACL_SUCCESS && rc == 0) rc = -1;
+     }
++    alloc->urma_workspace.reset();
+     if (alloc->local_buf) {
+         aclError aret = aclrtFree(alloc->local_buf);
+         if (aret != ACL_SUCCESS && rc == 0) rc = -1;
+@@ -1099,9 +1144,11 @@ extern "C" int comm_destroy(CommHandle h) try {
+     for (auto &kv : h->domain_allocations) {
+         auto &alloc = kv.second;
+         if (alloc->device_ctx) aclrtFree(alloc->device_ctx);
++        alloc->urma_workspace.reset();
+         if (alloc->local_buf) aclrtFree(alloc->local_buf);
+     }
+     h->domain_allocations.clear();
++    h->urma_workspace.reset();
+     if (h->hccl_comm) {
+         HcclResult hret = hccl_comm_destroy(h->hccl_comm);
+         if (hret != HCCL_SUCCESS) {
+diff --git a/src/a5/runtime/tensormap_and_ringbuffer/runtime/aicore_completion_mailbox.h b/src/a5/runtime/tensormap_and_ringbuffer/runtime/aicore_completion_mailbox.h
+index f914bfdd..23e4d644 100644
+--- a/src/a5/runtime/tensormap_and_ringbuffer/runtime/aicore_completion_mailbox.h
++++ b/src/a5/runtime/tensormap_and_ringbuffer/runtime/aicore_completion_mailbox.h
+@@ -56,11 +56,12 @@ struct AICoreCompletionMailboxMessage {
+     // TASK_NORMAL_DONE: PTO2TaskSlotState pointer carried over to the consumer
+     //   so it can finalize the AsyncWaitEntry.slot_state binding.
+     uint64_t addr;
++    uint64_t backend_cookie;
+     uint32_t expected_value;
+     uint32_t engine;
+     int32_t completion_type;
+     uint32_t kind;
+-    uint32_t _pad[5];
++    uint32_t _pad[3];
+ };
+ 
+ static_assert(sizeof(AICoreCompletionMailboxMessage) == PTO2_ALIGN_SIZE, "AICoreCompletionMailboxMessage layout drift");
+@@ -79,6 +80,7 @@ static_assert(
+ struct AICoreCompletionMsgView {
+     PTO2TaskId task_token{PTO2TaskId::invalid()};
+     uint64_t addr{0};
++    uint64_t backend_cookie{0};
+     uint32_t expected_value{0};
+     uint32_t engine{0};
+     int32_t completion_type{0};
+@@ -114,7 +116,8 @@ struct AICoreCompletionMailbox {
+     // Safe to call concurrently from any number of producers; structurally
+     // independent of the AsyncWaitList::busy lock.
+     bool try_push_condition(
+-        PTO2TaskId task_token, uint64_t addr, uint32_t expected_value, uint32_t engine, int32_t completion_type
++        PTO2TaskId task_token, uint64_t addr, uint64_t backend_cookie, uint32_t expected_value, uint32_t engine,
++        int32_t completion_type
+     ) {
+         while (true) {
+             uint64_t h = head.load(std::memory_order_relaxed);
+@@ -125,6 +128,7 @@ struct AICoreCompletionMailbox {
+                 AICoreCompletionMailboxMessage *slot = &entries[h & AICORE_COMPLETION_MAILBOX_MASK];
+                 slot->task_token.raw = task_token.raw;
+                 slot->addr = addr;
++                slot->backend_cookie = backend_cookie;
+                 slot->expected_value = expected_value;
+                 slot->engine = engine;
+                 slot->completion_type = completion_type;
+@@ -149,6 +153,7 @@ struct AICoreCompletionMailbox {
+                 AICoreCompletionMailboxMessage *slot = &entries[h & AICORE_COMPLETION_MAILBOX_MASK];
+                 slot->task_token.raw = task_token.raw;
+                 slot->addr = slot_state_addr;
++                slot->backend_cookie = 0;
+                 slot->expected_value = 0;
+                 slot->engine = 0;
+                 slot->completion_type = 0;
+@@ -173,6 +178,7 @@ struct AICoreCompletionMailbox {
+         if (slot->seq.load(std::memory_order_acquire) != t + 1) return false;
+         out.task_token.raw = slot->task_token.raw;
+         out.addr = slot->addr;
++        out.backend_cookie = slot->backend_cookie;
+         out.expected_value = slot->expected_value;
+         out.engine = slot->engine;
+         out.completion_type = slot->completion_type;
+diff --git a/src/a5/runtime/tensormap_and_ringbuffer/runtime/aicore_completion_mailbox_types.h b/src/a5/runtime/tensormap_and_ringbuffer/runtime/aicore_completion_mailbox_types.h
+index 24c04c09..59445a7d 100644
+--- a/src/a5/runtime/tensormap_and_ringbuffer/runtime/aicore_completion_mailbox_types.h
++++ b/src/a5/runtime/tensormap_and_ringbuffer/runtime/aicore_completion_mailbox_types.h
+@@ -35,6 +35,7 @@ inline constexpr int32_t MAX_COMPLETIONS_PER_TASK = 64;
+ 
+ #define COMPLETION_TYPE_COUNTER 0
+ #define COMPLETION_TYPE_SDMA_EVENT_RECORD 1
++#define COMPLETION_TYPE_URMA_EVENT_HANDLE 2
+ 
+ // DeferredCompletionEntry / DeferredCompletionSlab back the per-task scratch
+ // area that AICore writes into to record "this completion has to be observed
+@@ -45,13 +46,14 @@ inline constexpr int32_t MAX_COMPLETIONS_PER_TASK = 64;
+ // pin the compiler against caching / reordering on either side.
+ struct DeferredCompletionEntry {
+     uint64_t addr;
++    uint64_t backend_cookie;
+     uint32_t expected_value;
+     uint32_t engine;
+     int32_t completion_type;
+     uint32_t _pad;
+ };
+ 
+-static_assert(sizeof(DeferredCompletionEntry) == 24, "DeferredCompletionEntry layout drift");
++static_assert(sizeof(DeferredCompletionEntry) == 32, "DeferredCompletionEntry layout drift");
+ 
+ struct alignas(PTO2_ALIGN_SIZE) DeferredCompletionSlab {
+     volatile uint32_t count;
+diff --git a/src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/urma_completion_abi.h b/src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/urma_completion_abi.h
+new file mode 100644
+index 00000000..87967a4e
+--- /dev/null
++++ b/src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/urma_completion_abi.h
+@@ -0,0 +1,117 @@
++/*
++ * Copyright (c) PyPTO Contributors.
++ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
++ * CANN Open Software License Agreement Version 2.0 (the "License").
++ * Please refer to the License for details. You may not use this file except in compliance with the License.
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
++ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
++ * See LICENSE in the root of the software repository for the full text of the License.
++ * -----------------------------------------------------------------------------------------------------------
++ */
++
++#ifndef SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_BACKEND_URMA_URMA_COMPLETION_ABI_H_
++#define SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_BACKEND_URMA_URMA_COMPLETION_ABI_H_
++
++#include <stddef.h>
++#include <stdint.h>
++
++namespace pto2::urma_backend {
++
++inline constexpr uint32_t kHandleRankIdShift = 32;
++inline constexpr uint32_t kCqeBytes = 64;
++inline constexpr uint32_t kMaxCqeShift = 12;
++inline constexpr uint32_t kFakeUrmaWorkspaceMagic = 0x55524D41u;  // "URMA"
++inline constexpr uint32_t kFakeUrmaWorkspaceInitializing = 0x55524D30u;
++inline constexpr uint32_t kFakeUrmaMaxRanks = 16;
++inline constexpr uint32_t kFakeUrmaCqDepth = 64;
++inline constexpr uint32_t kFakeUrmaCqeShift = 6;
++
++enum class UrmaDbMode : int32_t {
++    INVALID_DB = -1,
++    HW_DB = 0,
++    SW_DB = 1,
++};
++
++struct UrmaInfo {
++    uint32_t qp_num;
++    uint32_t local_token_id;
++    uint32_t rank_count;
++    uint64_t sq_ptr;
++    uint64_t rq_ptr;
++    uint64_t scq_ptr;
++    uint64_t rcq_ptr;
++    uint64_t mem_ptr;
++};
++
++struct UrmaWqCtx {
++    uint32_t wqn;
++    uint64_t buf_addr;
++    uint32_t wqe_shift_size;
++    uint32_t depth;
++    uint64_t head_addr;
++    uint64_t tail_addr;
++    UrmaDbMode db_mode;
++    uint64_t db_addr;
++    uint32_t sl;
++};
++
++struct UrmaCqCtx {
++    uint32_t cqn;
++    uint64_t buf_addr;
++    uint32_t cqe_shift_size;
++    uint32_t depth;
++    uint64_t head_addr;
++    uint64_t tail_addr;
++    UrmaDbMode db_mode;
++    uint64_t db_addr;
++};
++
++struct alignas(kCqeBytes) FakeUrmaCqe {
++    uint32_t dw[16];
++};
++
++struct alignas(kCqeBytes) FakeUrmaWorkspace {
++    UrmaInfo info;
++    UrmaWqCtx sq[kFakeUrmaMaxRanks];
++    UrmaCqCtx scq[kFakeUrmaMaxRanks];
++    uint32_t sq_head[kFakeUrmaMaxRanks];
++    uint32_t sq_tail[kFakeUrmaMaxRanks];
++    uint32_t cq_tail[kFakeUrmaMaxRanks];
++    uint32_t cq_doorbell[kFakeUrmaMaxRanks];
++    uint32_t sq_submit_lock[kFakeUrmaMaxRanks];
++    FakeUrmaCqe scq_entries[kFakeUrmaMaxRanks][kFakeUrmaCqDepth];
++    uint32_t magic;
++};
++
++static_assert(sizeof(UrmaInfo) == 56, "URMA info ABI drift");
++static_assert(offsetof(UrmaInfo, sq_ptr) == 16, "URMA info ABI drift");
++static_assert(sizeof(UrmaWqCtx) == 64, "URMA WQ context ABI drift");
++static_assert(offsetof(UrmaWqCtx, db_addr) == 48, "URMA WQ context ABI drift");
++static_assert(sizeof(UrmaCqCtx) == 56, "URMA CQ context ABI drift");
++static_assert(offsetof(UrmaCqCtx, db_addr) == 48, "URMA CQ context ABI drift");
++static_assert(sizeof(FakeUrmaCqe) == kCqeBytes, "fake URMA CQE must match scheduler CQE size");
++
++inline uint64_t encode_urma_event_handle(uint32_t remote_rank, uint32_t target_head) {
++    return (static_cast<uint64_t>(remote_rank) << kHandleRankIdShift) | static_cast<uint64_t>(target_head);
++}
++
++inline void decode_urma_event_handle(uint64_t handle, uint32_t &remote_rank, uint32_t &target_head) {
++    remote_rank = static_cast<uint32_t>(handle >> kHandleRankIdShift);
++    target_head = static_cast<uint32_t>(handle & 0xFFFFFFFFu);
++}
++
++inline bool fake_cqe_ready_owner(uint32_t cqe_seq) { return ((cqe_seq / kFakeUrmaCqDepth) & 1u) == 0; }
++
++inline uint32_t encode_fake_cqe_dw0(uint32_t cqe_seq, uint8_t status, uint8_t substatus) {
++    const uint32_t owner = fake_cqe_ready_owner(cqe_seq) ? 1u : 0u;
++    return (owner << 2) | (static_cast<uint32_t>(substatus) << 16) | (static_cast<uint32_t>(status) << 24);
++}
++
++inline uint32_t encode_fake_pending_cqe_dw0(uint32_t cqe_seq) {
++    const uint32_t owner = fake_cqe_ready_owner(cqe_seq) ? 0u : 1u;
++    return owner << 2;
++}
++
++}  // namespace pto2::urma_backend
++
++#endif  // SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_BACKEND_URMA_URMA_COMPLETION_ABI_H_
+diff --git a/src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/urma_completion_kernel.h b/src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/urma_completion_kernel.h
+new file mode 100644
+index 00000000..0af0125a
+--- /dev/null
++++ b/src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/urma_completion_kernel.h
+@@ -0,0 +1,440 @@
++/*
++ * Copyright (c) PyPTO Contributors.
++ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
++ * CANN Open Software License Agreement Version 2.0 (the "License").
++ * Please refer to the License for details. You may not use this file except in compliance with the License.
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
++ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
++ * See LICENSE in the root of the software repository for the full text of the License.
++ * -----------------------------------------------------------------------------------------------------------
++ */
++
++#ifndef SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_BACKEND_URMA_URMA_COMPLETION_KERNEL_H_
++#define SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_BACKEND_URMA_URMA_COMPLETION_KERNEL_H_
++
++#include <stdint.h>
++
++#if defined(__CPU_SIM)
++#include <type_traits>
++#else
++#include "pto_async_kernel_api.h"
++
++#include <pto/comm/async_common/async_event_impl.hpp>
++#if defined(PTO_URMA_SUPPORTED)
++#include <pto/comm/async/urma/urma_async_intrin.hpp>
++#endif
++#endif
++
++#include "aicore_completion_mailbox_types.h"
++#include "backend/urma/urma_completion_abi.h"
++#include "intrinsic.h"
++#include "pto_completion_token.h"
++#include "pto_runtime_status.h"
++
++#ifndef __aicore__
++#define __aicore__
++#endif
++#ifndef __gm__
++#define __gm__
++#endif
++
++#if defined(__CPU_SIM)
++namespace pto {
++
++struct GlobalTensorDim {
++    static constexpr int DIM_0 = 0;
++    static constexpr int DIM_1 = 1;
++    static constexpr int DIM_2 = 2;
++    static constexpr int DIM_3 = 3;
++    static constexpr int DIM_4 = 4;
++};
++
++enum class Layout : uint8_t {
++    ND = 0,
++    DN = 1,
++};
++
++namespace comm {
++enum class DmaEngine : uint8_t {
++    SDMA = 0,
++    URMA = 1,
++};
++}  // namespace comm
++
++}  // namespace pto
++#endif
++
++enum class UrmaOp : uint8_t {
++    TGET = 0,
++    TPUT = 1,
++};
++
++template <typename DstTensor, typename SrcTensor>
++struct UrmaRequestDescriptor {
++    UrmaOp op;
++    DstTensor dst;
++    SrcTensor src;
++    __gm__ uint8_t *workspace;
++    uint32_t remote_rank;
++};
++
++template <typename DstTensor, typename SrcTensor>
++inline __aicore__ UrmaRequestDescriptor<DstTensor, SrcTensor>
++UrmaTget(const DstTensor &dst, const SrcTensor &src, __gm__ uint8_t *workspace, uint32_t src_rank) {
++    return UrmaRequestDescriptor<DstTensor, SrcTensor>{UrmaOp::TGET, dst, src, workspace, src_rank};
++}
++
++template <typename DstTensor, typename SrcTensor>
++inline __aicore__ UrmaRequestDescriptor<DstTensor, SrcTensor>
++UrmaTput(const DstTensor &dst, const SrcTensor &src, __gm__ uint8_t *workspace, uint32_t dest_rank) {
++    return UrmaRequestDescriptor<DstTensor, SrcTensor>{UrmaOp::TPUT, dst, src, workspace, dest_rank};
++}
++
++#if defined(__CPU_SIM)
++inline __aicore__ AsyncCtx get_async_ctx(__gm__ int64_t *args) {
++    __gm__ LocalContext *lc =
++        reinterpret_cast<__gm__ LocalContext *>(static_cast<uintptr_t>(args[PAYLOAD_LOCAL_CONTEXT_INDEX]));
++    AsyncCtx ctx{};
++    ctx.completion_count = lc->async_ctx.completion_count;
++    ctx.completion_error_code = lc->async_ctx.completion_error_code;
++    ctx.completion_entries = lc->async_ctx.completion_entries;
++    ctx.completion_capacity = lc->async_ctx.completion_capacity;
++    ctx.task_token.raw = lc->async_ctx.task_token.raw;
++    return ctx;
++}
++
++inline __aicore__ bool register_completion_condition(AsyncCtx &ctx, const CompletionToken &token) {
++    if (ctx.task_token.is_invalid() || ctx.completion_count == nullptr || ctx.completion_entries == nullptr) {
++        return false;
++    }
++
++    uint32_t idx = *ctx.completion_count;
++    if (idx >= ctx.completion_capacity) {
++        if (ctx.completion_error_code != nullptr) {
++            *ctx.completion_error_code = PTO2_ERROR_ASYNC_WAIT_OVERFLOW;
++        }
++        return false;
++    }
++
++    volatile __gm__ DeferredCompletionEntry *slot = &ctx.completion_entries[idx];
++    slot->addr = token.addr;
++    slot->backend_cookie = token.backend_cookie;
++    slot->expected_value = token.expected_value;
++    slot->engine = token.engine;
++    slot->completion_type = token.completion_type;
++    slot->_pad = 0;
++    *ctx.completion_count = idx + 1;
++    return true;
++}
++#endif
++
++namespace pto2::detail {
++
++#if defined(__CPU_SIM)
++inline __aicore__ void defer_load_slab(AsyncCtx & /*ctx*/) { __asm__ __volatile__("" ::: "memory"); }
++
++inline __aicore__ void defer_error(AsyncCtx &ctx, int32_t error_code) {
++    if (ctx.task_token.is_valid() && ctx.completion_error_code != nullptr) {
++        *ctx.completion_error_code = error_code;
++    }
++}
++
++inline __aicore__ void defer_flush(AsyncCtx & /*ctx*/) { __asm__ __volatile__("" ::: "memory"); }
++#endif
++
++template <typename PtoAsyncEvent, typename PtoAsyncSession>
++inline __aicore__ void register_urma_async_event(
++    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session, __gm__ uint8_t *workspace
++) {
++    if (ctx.task_token.is_invalid() || ctx.completion_count == nullptr || ctx.completion_entries == nullptr) {
++        (void)event.Wait(session);
++        return;
++    }
++    if (event.handle == 0) {
++        return;
++    }
++
++    const uint32_t engine = static_cast<uint32_t>(event.engine);
++    if (engine != static_cast<uint32_t>(::pto::comm::DmaEngine::URMA) || workspace == nullptr) {
++        defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
++        return;
++    }
++
++    CompletionToken token{
++        event.handle,
++        0,
++        COMPLETION_ENGINE_URMA,
++        COMPLETION_TYPE_URMA_EVENT_HANDLE,
++        reinterpret_cast<uint64_t>(workspace),
++    };
++    if (!register_completion_condition(ctx, token)) {
++        defer_error(ctx, PTO2_ERROR_ASYNC_REGISTRATION_FAILED);
++    }
++}
++
++}  // namespace pto2::detail
++
++#if defined(__CPU_SIM)
++namespace pto2::urma_backend {
++
++struct FakeUrmaAsyncSession {
++    __gm__ uint8_t *workspace{nullptr};
++    uint32_t remote_rank{0};
++};
++
++inline __aicore__ bool
++build_fake_urma_session(__gm__ uint8_t *workspace, uint32_t remote_rank, FakeUrmaAsyncSession &session) {
++    if (workspace == nullptr || remote_rank >= kFakeUrmaMaxRanks) {
++        return false;
++    }
++    session.workspace = workspace;
++    session.remote_rank = remote_rank;
++    return true;
++}
++
++inline __aicore__ FakeUrmaWorkspace *fake_workspace(__gm__ uint8_t *workspace) {
++    return reinterpret_cast<FakeUrmaWorkspace *>(workspace);
++}
++
++inline __aicore__ void ensure_fake_workspace_initialized(__gm__ uint8_t *workspace) {
++    FakeUrmaWorkspace *ws = fake_workspace(workspace);
++    uint32_t magic = __atomic_load_n(&ws->magic, __ATOMIC_ACQUIRE);
++    if (magic == kFakeUrmaWorkspaceMagic) {
++        return;
++    }
++    if (magic == kFakeUrmaWorkspaceInitializing) {
++        while (__atomic_load_n(&ws->magic, __ATOMIC_ACQUIRE) != kFakeUrmaWorkspaceMagic) {}
++        return;
++    }
++    uint32_t expected = magic;
++    if (!__atomic_compare_exchange_n(
++            &ws->magic, &expected, kFakeUrmaWorkspaceInitializing, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE
++        )) {
++        while (__atomic_load_n(&ws->magic, __ATOMIC_ACQUIRE) != kFakeUrmaWorkspaceMagic) {}
++        return;
++    }
++
++    ws->info.qp_num = 1;
++    ws->info.local_token_id = 0;
++    ws->info.rank_count = kFakeUrmaMaxRanks;
++    ws->info.sq_ptr = reinterpret_cast<uint64_t>(&ws->sq[0]);
++    ws->info.rq_ptr = 0;
++    ws->info.scq_ptr = reinterpret_cast<uint64_t>(&ws->scq[0]);
++    ws->info.rcq_ptr = 0;
++    ws->info.mem_ptr = 0;
++
++    for (uint32_t rank = 0; rank < kFakeUrmaMaxRanks; ++rank) {
++        ws->sq_head[rank] = 0;
++        ws->sq_tail[rank] = 0;
++        ws->cq_tail[rank] = 0;
++        ws->cq_doorbell[rank] = 0;
++        ws->sq_submit_lock[rank] = 0;
++
++        ws->sq[rank].wqn = rank;
++        ws->sq[rank].buf_addr = 0;
++        ws->sq[rank].wqe_shift_size = 0;
++        ws->sq[rank].depth = kFakeUrmaCqDepth;
++        ws->sq[rank].head_addr = reinterpret_cast<uint64_t>(&ws->sq_head[rank]);
++        ws->sq[rank].tail_addr = reinterpret_cast<uint64_t>(&ws->sq_tail[rank]);
++        ws->sq[rank].db_mode = UrmaDbMode::SW_DB;
++        ws->sq[rank].db_addr = 0;
++        ws->sq[rank].sl = 0;
++
++        ws->scq[rank].cqn = rank;
++        ws->scq[rank].buf_addr = reinterpret_cast<uint64_t>(&ws->scq_entries[rank][0]);
++        ws->scq[rank].cqe_shift_size = kFakeUrmaCqeShift;
++        ws->scq[rank].depth = kFakeUrmaCqDepth;
++        ws->scq[rank].head_addr = 0;
++        ws->scq[rank].tail_addr = reinterpret_cast<uint64_t>(&ws->cq_tail[rank]);
++        ws->scq[rank].db_mode = UrmaDbMode::SW_DB;
++        ws->scq[rank].db_addr = reinterpret_cast<uint64_t>(&ws->cq_doorbell[rank]);
++
++        for (uint32_t slot = 0; slot < kFakeUrmaCqDepth; ++slot) {
++            ws->scq_entries[rank][slot].dw[0] = encode_fake_pending_cqe_dw0(slot);
++        }
++    }
++    __atomic_store_n(&ws->magic, kFakeUrmaWorkspaceMagic, __ATOMIC_RELEASE);
++}
++
++template <typename GlobalData>
++inline __aicore__ bool fake_is_flat_contiguous_1d(GlobalData &global_data) {
++    const int64_t shp0 = global_data.GetShape(pto::GlobalTensorDim::DIM_0);
++    const int64_t shp1 = global_data.GetShape(pto::GlobalTensorDim::DIM_1);
++    const int64_t shp2 = global_data.GetShape(pto::GlobalTensorDim::DIM_2);
++    const int64_t shp3 = global_data.GetShape(pto::GlobalTensorDim::DIM_3);
++    const int64_t shp4 = global_data.GetShape(pto::GlobalTensorDim::DIM_4);
++
++    const int64_t step0 = global_data.GetStride(pto::GlobalTensorDim::DIM_0);
++    const int64_t step1 = global_data.GetStride(pto::GlobalTensorDim::DIM_1);
++    const int64_t step2 = global_data.GetStride(pto::GlobalTensorDim::DIM_2);
++    const int64_t step3 = global_data.GetStride(pto::GlobalTensorDim::DIM_3);
++    const int64_t step4 = global_data.GetStride(pto::GlobalTensorDim::DIM_4);
++
++    const bool packed_layout = (step4 == 1) && (step3 == shp4) && (step2 == shp3 * step3) && (step1 == shp2 * step2) &&
++                               (step0 == shp1 * step1);
++    const bool one_dim_logical = (shp0 == 1 && shp1 == 1 && shp2 == 1 && shp3 == 1);
++    return packed_layout && one_dim_logical;
++}
++
++template <typename GlobalData>
++inline __aicore__ uint32_t fake_total_elem_count(GlobalData &global_data) {
++    const uint32_t d0 = static_cast<uint32_t>(global_data.GetShape(pto::GlobalTensorDim::DIM_0));
++    const uint32_t d1 = static_cast<uint32_t>(global_data.GetShape(pto::GlobalTensorDim::DIM_1));
++    const uint32_t d2 = static_cast<uint32_t>(global_data.GetShape(pto::GlobalTensorDim::DIM_2));
++    const uint32_t d3 = static_cast<uint32_t>(global_data.GetShape(pto::GlobalTensorDim::DIM_3));
++    const uint32_t d4 = static_cast<uint32_t>(global_data.GetShape(pto::GlobalTensorDim::DIM_4));
++    return (((d0 * d1) * d2) * d3) * d4;
++}
++
++template <typename DstTensor, typename SrcTensor>
++inline __aicore__ bool fake_copy_tensor(DstTensor &dst, SrcTensor &src) {
++    using SrcElem = typename SrcTensor::RawDType;
++    using DstElem = typename DstTensor::RawDType;
++    static_assert(std::is_same_v<SrcElem, DstElem>, "URMA fake submitter requires matching src/dst element types");
++    static_assert(SrcTensor::layout == DstTensor::layout, "URMA fake submitter requires matching src/dst layouts");
++
++    if (dst.data() == nullptr || src.data() == nullptr) {
++        return false;
++    }
++    if (!fake_is_flat_contiguous_1d(src) || !fake_is_flat_contiguous_1d(dst)) {
++        return false;
++    }
++
++    const uint32_t src_elems = fake_total_elem_count(src);
++    const uint32_t dst_elems = fake_total_elem_count(dst);
++    if (dst_elems < src_elems) {
++        return false;
++    }
++
++    SrcElem *src_ptr = src.data();
++    DstElem *dst_ptr = dst.data();
++    for (uint32_t i = 0; i < src_elems; ++i) {
++        dst_ptr[i] = src_ptr[i];
++    }
++    return true;
++}
++
++inline __aicore__ bool mark_fake_urma_cqe_ready(
++    __gm__ uint8_t *workspace, uint32_t remote_rank, uint32_t target_head, uint8_t status = 0, uint8_t substatus = 0
++) {
++    if (workspace == nullptr || remote_rank >= kFakeUrmaMaxRanks) {
++        return false;
++    }
++    if (target_head == 0) {
++        return true;
++    }
++
++    ensure_fake_workspace_initialized(workspace);
++    FakeUrmaWorkspace *ws = fake_workspace(workspace);
++    const uint32_t cqe_seq = target_head - 1u;
++    FakeUrmaCqe *cqe = &ws->scq_entries[remote_rank][cqe_seq & (kFakeUrmaCqDepth - 1u)];
++    for (uint32_t i = 1; i < 16; ++i) {
++        cqe->dw[i] = 0;
++    }
++    __atomic_store_n(&cqe->dw[0], encode_fake_cqe_dw0(cqe_seq, status, substatus), __ATOMIC_RELEASE);
++    return true;
++}
++
++struct FakeUrmaAsyncEvent {
++    uint64_t handle{0};
++    pto::comm::DmaEngine engine{pto::comm::DmaEngine::URMA};
++
++    inline __aicore__ bool Wait(const FakeUrmaAsyncSession &session) const {
++        uint32_t remote_rank = 0;
++        uint32_t target_head = 0;
++        decode_urma_event_handle(handle, remote_rank, target_head);
++        return mark_fake_urma_cqe_ready(session.workspace, remote_rank, target_head);
++    }
++
++    inline __aicore__ bool Test(const FakeUrmaAsyncSession & /*session*/) const { return handle == 0; }
++};
++
++template <typename DstTensor, typename SrcTensor>
++inline __aicore__ bool
++submit_fake_urma_request(UrmaRequestDescriptor<DstTensor, SrcTensor> &desc, FakeUrmaAsyncEvent &event) {
++    if (desc.workspace == nullptr || desc.remote_rank >= kFakeUrmaMaxRanks) {
++        return false;
++    }
++    if (!fake_copy_tensor(desc.dst, desc.src)) {
++        return false;
++    }
++
++    ensure_fake_workspace_initialized(desc.workspace);
++    FakeUrmaWorkspace *ws = fake_workspace(desc.workspace);
++    uint32_t unlocked = 0;
++    while (!__atomic_compare_exchange_n(
++        &ws->sq_submit_lock[desc.remote_rank], &unlocked, 1u, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED
++    )) {
++        unlocked = 0;
++    }
++    const uint32_t target_head = __atomic_load_n(&ws->sq_head[desc.remote_rank], __ATOMIC_ACQUIRE) + 1u;
++    const uint32_t cqe_seq = target_head - 1u;
++    FakeUrmaCqe *cqe = &ws->scq_entries[desc.remote_rank][cqe_seq & (kFakeUrmaCqDepth - 1u)];
++    for (uint32_t i = 1; i < 16; ++i) {
++        cqe->dw[i] = 0;
++    }
++    __atomic_store_n(&cqe->dw[0], encode_fake_pending_cqe_dw0(cqe_seq), __ATOMIC_RELEASE);
++    __atomic_store_n(&ws->sq_head[desc.remote_rank], target_head, __ATOMIC_RELEASE);
++    __atomic_store_n(&ws->sq_submit_lock[desc.remote_rank], 0u, __ATOMIC_RELEASE);
++
++    event.handle = encode_urma_event_handle(desc.remote_rank, target_head);
++    event.engine = pto::comm::DmaEngine::URMA;
++    return true;
++}
++
++}  // namespace pto2::urma_backend
++
++inline __aicore__ bool UrmaFakeComplete(
++    __gm__ uint8_t *workspace, uint32_t remote_rank, uint32_t target_head, uint8_t status = 0, uint8_t substatus = 0
++) {
++    return pto2::urma_backend::mark_fake_urma_cqe_ready(workspace, remote_rank, target_head, status, substatus);
++}
++
++inline __aicore__ void UrmaFakeReset(__gm__ uint8_t *workspace) {
++    auto *ws = pto2::urma_backend::fake_workspace(workspace);
++    __atomic_store_n(&ws->magic, 0u, __ATOMIC_RELEASE);
++    pto2::urma_backend::ensure_fake_workspace_initialized(workspace);
++}
++#endif
++
++template <typename DstTensor, typename SrcTensor>
++inline __aicore__ bool send_request_entry(AsyncCtx &ctx, UrmaRequestDescriptor<DstTensor, SrcTensor> desc) {
++#if defined(__CPU_SIM)
++    pto2::urma_backend::FakeUrmaAsyncSession session;
++    if (!pto2::urma_backend::build_fake_urma_session(desc.workspace, desc.remote_rank, session)) {
++        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
++        return false;
++    }
++
++    pto2::urma_backend::FakeUrmaAsyncEvent event;
++    if (!pto2::urma_backend::submit_fake_urma_request(desc, event)) {
++        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
++        return false;
++    }
++    pto2::detail::register_urma_async_event(ctx, event, session, desc.workspace);
++    pto2::detail::defer_flush(ctx);
++    return true;
++#elif defined(PTO_URMA_SUPPORTED)
++    pto::comm::AsyncSession session;
++    if (!pto::comm::BuildAsyncSession<pto::comm::DmaEngine::URMA>(desc.workspace, desc.remote_rank, session)) {
++        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
++        return false;
++    }
++
++    pto::comm::AsyncEvent event;
++    if (desc.op == UrmaOp::TGET) {
++        event = pto::comm::TGET_ASYNC<pto::comm::DmaEngine::URMA>(desc.dst, desc.src, session);
++    } else {
++        event = pto::comm::TPUT_ASYNC<pto::comm::DmaEngine::URMA>(desc.dst, desc.src, session);
++    }
++    pto2::detail::register_urma_async_event(ctx, event, session, desc.workspace);
++    pto2::detail::defer_flush(ctx);
++    return true;
++#else
++    (void)desc;
++    pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
++    return false;
++#endif
++}
++
++#endif  // SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_BACKEND_URMA_URMA_COMPLETION_KERNEL_H_
+diff --git a/src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/urma_completion_scheduler.h b/src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/urma_completion_scheduler.h
+new file mode 100644
+index 00000000..30839fe9
+--- /dev/null
++++ b/src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/urma_completion_scheduler.h
+@@ -0,0 +1,149 @@
++/*
++ * Copyright (c) PyPTO Contributors.
++ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
++ * CANN Open Software License Agreement Version 2.0 (the "License").
++ * Please refer to the License for details. You may not use this file except in compliance with the License.
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
++ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
++ * See LICENSE in the root of the software repository for the full text of the License.
++ * -----------------------------------------------------------------------------------------------------------
++ */
++
++#ifndef SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_BACKEND_URMA_URMA_COMPLETION_SCHEDULER_H_
++#define SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_BACKEND_URMA_URMA_COMPLETION_SCHEDULER_H_
++
++#include <cstddef>
++#include <cstdint>
++
++#include "aicpu/platform_regs.h"
++#include "aicore_completion_mailbox.h"
++#include "pto_completion_token.h"
++#include "pto_runtime_status.h"
++#include "backend/urma/urma_completion_abi.h"
++
++namespace pto2::urma_backend {
++
++inline uintptr_t cache_line(const volatile void *addr) {
++    return reinterpret_cast<uintptr_t>(addr) & ~(uintptr_t(PTO2_ALIGN_SIZE) - 1u);
++}
++
++inline bool has_reached(uint32_t current, uint32_t target) { return static_cast<int32_t>(current - target) >= 0; }
++
++inline bool is_power_of_two(uint32_t value) { return value != 0 && (value & (value - 1u)) == 0; }
++
++inline uint32_t load_device_u32(uint64_t addr) {
++    auto *ptr = reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(addr));
++    return __atomic_load_n(ptr, __ATOMIC_ACQUIRE);
++}
++
++inline void store_device_u32(uint64_t addr, uint32_t value) {
++    auto *ptr = reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(addr));
++    __atomic_store_n(ptr, value, __ATOMIC_RELEASE);
++    __asm__ __volatile__("dsb sy" ::: "memory");
++}
++
++inline uint32_t load_cqe_dw0(uint64_t cqe_addr) {
++    auto *ptr = reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(cqe_addr));
++    cache_invalidate_range(reinterpret_cast<const void *>(cache_line(ptr)), PTO2_ALIGN_SIZE);
++    return __atomic_load_n(ptr, __ATOMIC_ACQUIRE);
++}
++
++inline void update_tail_info(const UrmaCqCtx &cq_ctx, const UrmaWqCtx &wq_ctx, uint32_t cur_tail) {
++    if (cq_ctx.tail_addr != 0) {
++        store_device_u32(cq_ctx.tail_addr, cur_tail);
++    }
++    if (cq_ctx.db_addr != 0) {
++        store_device_u32(cq_ctx.db_addr, cur_tail & 0xFFFFFFu);
++    }
++    if (wq_ctx.tail_addr != 0) {
++        store_device_u32(wq_ctx.tail_addr, cur_tail);
++    }
++}
++
++inline CompletionPollResult poll_urma_event_handle(uint64_t event_handle, uint64_t workspace_addr) {
++    if (event_handle == 0) {
++        return {CompletionPollState::READY, PTO2_ERROR_NONE};
++    }
++    if (workspace_addr == 0) {
++        return {CompletionPollState::FAILED, PTO2_ERROR_ASYNC_COMPLETION_INVALID};
++    }
++
++    uint32_t remote_rank = 0;
++    uint32_t target_head = 0;
++    decode_urma_event_handle(event_handle, remote_rank, target_head);
++    if (target_head == 0) {
++        return {CompletionPollState::READY, PTO2_ERROR_NONE};
++    }
++
++    auto *info = reinterpret_cast<volatile UrmaInfo *>(static_cast<uintptr_t>(workspace_addr));
++    cache_invalidate_range(reinterpret_cast<const void *>(cache_line(info)), PTO2_ALIGN_SIZE);
++    const uint32_t qp_num = __atomic_load_n(&info->qp_num, __ATOMIC_ACQUIRE);
++    const uint32_t rank_count = __atomic_load_n(&info->rank_count, __ATOMIC_ACQUIRE);
++    const uint64_t sq_ptr = __atomic_load_n(&info->sq_ptr, __ATOMIC_ACQUIRE);
++    const uint64_t scq_ptr = __atomic_load_n(&info->scq_ptr, __ATOMIC_ACQUIRE);
++    if (qp_num == 0 || remote_rank >= rank_count || sq_ptr == 0 || scq_ptr == 0) {
++        return {CompletionPollState::FAILED, PTO2_ERROR_ASYNC_COMPLETION_INVALID};
++    }
++
++    const uint64_t ctx_index = static_cast<uint64_t>(remote_rank) * qp_num;
++    auto *cq_entry = reinterpret_cast<volatile UrmaCqCtx *>(
++        static_cast<uintptr_t>(scq_ptr + ctx_index * static_cast<uint64_t>(sizeof(UrmaCqCtx)))
++    );
++    auto *wq_entry = reinterpret_cast<volatile UrmaWqCtx *>(
++        static_cast<uintptr_t>(sq_ptr + ctx_index * static_cast<uint64_t>(sizeof(UrmaWqCtx)))
++    );
++    cache_invalidate_range(reinterpret_cast<const void *>(cache_line(cq_entry)), PTO2_ALIGN_SIZE);
++    cache_invalidate_range(reinterpret_cast<const void *>(cache_line(wq_entry)), PTO2_ALIGN_SIZE);
++
++    UrmaCqCtx cq_ctx{};
++    cq_ctx.buf_addr = __atomic_load_n(&cq_entry->buf_addr, __ATOMIC_ACQUIRE);
++    cq_ctx.cqe_shift_size = __atomic_load_n(&cq_entry->cqe_shift_size, __ATOMIC_ACQUIRE);
++    cq_ctx.depth = __atomic_load_n(&cq_entry->depth, __ATOMIC_ACQUIRE);
++    cq_ctx.tail_addr = __atomic_load_n(&cq_entry->tail_addr, __ATOMIC_ACQUIRE);
++    cq_ctx.db_addr = __atomic_load_n(&cq_entry->db_addr, __ATOMIC_ACQUIRE);
++
++    UrmaWqCtx wq_ctx{};
++    wq_ctx.tail_addr = __atomic_load_n(&wq_entry->tail_addr, __ATOMIC_ACQUIRE);
++    if (cq_ctx.buf_addr == 0 || cq_ctx.tail_addr == 0 || cq_ctx.cqe_shift_size > kMaxCqeShift ||
++        !is_power_of_two(cq_ctx.depth)) {
++        return {CompletionPollState::FAILED, PTO2_ERROR_ASYNC_COMPLETION_INVALID};
++    }
++
++    const uint32_t cqe_size = 1u << cq_ctx.cqe_shift_size;
++    uint32_t cur_tail = load_device_u32(cq_ctx.tail_addr);
++    if (has_reached(cur_tail, target_head)) {
++        return {CompletionPollState::READY, PTO2_ERROR_NONE};
++    }
++
++    uint32_t next_tail = cur_tail;
++    while (!has_reached(next_tail, target_head)) {
++        const uint64_t cqe_addr =
++            cq_ctx.buf_addr + static_cast<uint64_t>(cqe_size) * static_cast<uint64_t>(next_tail & (cq_ctx.depth - 1));
++        const uint32_t dw0 = load_cqe_dw0(cqe_addr);
++        const bool valid_owner = ((next_tail / cq_ctx.depth) & 1u) != 0;
++        const bool owner = ((dw0 >> 2) & 1u) != 0;
++        if ((valid_owner ^ owner) == 0) {
++            break;
++        }
++
++        const uint8_t substatus = static_cast<uint8_t>((dw0 >> 16) & 0xFFu);
++        const uint8_t status = static_cast<uint8_t>((dw0 >> 24) & 0xFFu);
++        if (status != 0 || substatus != 0) {
++            return {CompletionPollState::FAILED, PTO2_ERROR_ASYNC_COMPLETION_INVALID};
++        }
++        next_tail++;
++    }
++
++    if (next_tail != cur_tail) {
++        update_tail_info(cq_ctx, wq_ctx, next_tail);
++    }
++    return {
++        has_reached(next_tail, target_head) ? CompletionPollState::READY : CompletionPollState::PENDING, PTO2_ERROR_NONE
++    };
++}
++
++inline void retire_urma_event_handle(uint64_t /*event_handle*/, uint64_t /*workspace_addr*/) {}
++
++}  // namespace pto2::urma_backend
++
++#endif  // SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_BACKEND_URMA_URMA_COMPLETION_SCHEDULER_H_
+diff --git a/src/a5/runtime/tensormap_and_ringbuffer/runtime/pto_async_kernel_api.h b/src/a5/runtime/tensormap_and_ringbuffer/runtime/pto_async_kernel_api.h
+index cf6eb479..f350d7c3 100644
+--- a/src/a5/runtime/tensormap_and_ringbuffer/runtime/pto_async_kernel_api.h
++++ b/src/a5/runtime/tensormap_and_ringbuffer/runtime/pto_async_kernel_api.h
+@@ -130,6 +130,7 @@ inline __aicore__ bool register_completion_condition(AsyncCtx &ctx, const Comple
+ 
+     volatile __gm__ DeferredCompletionEntry *slot = &ctx.completion_entries[idx];
+     slot->addr = token.addr;
++    slot->backend_cookie = token.backend_cookie;
+     slot->expected_value = token.expected_value;
+     slot->engine = token.engine;
+     slot->completion_type = token.completion_type;
+diff --git a/src/a5/runtime/tensormap_and_ringbuffer/runtime/pto_async_wait.h b/src/a5/runtime/tensormap_and_ringbuffer/runtime/pto_async_wait.h
+index a14403ee..b2b7b55a 100644
+--- a/src/a5/runtime/tensormap_and_ringbuffer/runtime/pto_async_wait.h
++++ b/src/a5/runtime/tensormap_and_ringbuffer/runtime/pto_async_wait.h
+@@ -18,6 +18,7 @@
+ 
+ #include "aicpu/platform_regs.h"
+ #include "backend/sdma/sdma_completion_scheduler.h"
++#include "backend/urma/urma_completion_scheduler.h"
+ #include "intrinsic.h"
+ #include "aicore_completion_mailbox.h"
+ #include "pto_completion_token.h"
+@@ -50,6 +51,7 @@ struct CompletionCondition {
+     bool retired{false};
+     volatile uint32_t *counter_addr{nullptr};
+     uint64_t addr{0};
++    uint64_t backend_cookie{0};
+     uint32_t expected_value{0};
+ 
+     CompletionPollResult test() const;
+@@ -77,10 +79,19 @@ inline CompletionPollResult sdma_event_record_poll_op(const CompletionCondition
+ 
+ inline void sdma_event_record_retire_op(CompletionCondition &cond) { retire_sdma_event_record(cond.addr); }
+ 
++inline CompletionPollResult urma_event_handle_poll_op(const CompletionCondition &cond) {
++    return pto2::urma_backend::poll_urma_event_handle(cond.addr, cond.backend_cookie);
++}
++
++inline void urma_event_handle_retire_op(CompletionCondition &cond) {
++    pto2::urma_backend::retire_urma_event_handle(cond.addr, cond.backend_cookie);
++}
++
+ inline const CompletionBackendOps *completion_backend_ops_for(int completion_type) {
+     static const CompletionBackendOps kOps[] = {
+         {counter_poll_op, counter_retire_op},                      // COMPLETION_TYPE_COUNTER = 0
+         {sdma_event_record_poll_op, sdma_event_record_retire_op},  // COMPLETION_TYPE_SDMA_EVENT_RECORD = 1
++        {urma_event_handle_poll_op, urma_event_handle_retire_op},  // COMPLETION_TYPE_URMA_EVENT_HANDLE = 2
+     };
+     constexpr int kOpsCount = static_cast<int>(sizeof(kOps) / sizeof(kOps[0]));
+     if (completion_type < 0 || completion_type >= kOpsCount) return nullptr;
+@@ -222,8 +233,8 @@ struct AsyncWaitList {
+                     entry->normal_done = false;
+                 }
+                 if (!append_condition_locked(
+-                        *entry, msg.addr, msg.expected_value, static_cast<AsyncEngine>(msg.engine), msg.completion_type,
+-                        error_code
++                        *entry, msg.addr, msg.backend_cookie, msg.expected_value, static_cast<AsyncEngine>(msg.engine),
++                        msg.completion_type, error_code
+                     )) {
+                     return drained;
+                 }
+@@ -267,8 +278,8 @@ struct AsyncWaitList {
+     }
+ 
+     bool append_condition_locked(
+-        AsyncWaitEntry &entry, uint64_t addr, uint32_t expected_value, AsyncEngine engine, int32_t completion_type,
+-        int32_t &error_code
++        AsyncWaitEntry &entry, uint64_t addr, uint64_t backend_cookie, uint32_t expected_value, AsyncEngine engine,
++        int32_t completion_type, int32_t &error_code
+     ) {
+         if (entry.condition_count >= MAX_COMPLETIONS_PER_TASK) {
+             error_code = PTO2_ERROR_ASYNC_REGISTRATION_FAILED;
+@@ -280,6 +291,7 @@ struct AsyncWaitList {
+         cond.satisfied = false;
+         cond.retired = false;
+         cond.addr = addr;
++        cond.backend_cookie = backend_cookie;
+         cond.counter_addr = completion_type == COMPLETION_TYPE_COUNTER ?
+                                 reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(addr)) :
+                                 nullptr;
+diff --git a/src/a5/runtime/tensormap_and_ringbuffer/runtime/scheduler/scheduler_completion.cpp b/src/a5/runtime/tensormap_and_ringbuffer/runtime/scheduler/scheduler_completion.cpp
+index 276a04d3..cdfb6c11 100644
+--- a/src/a5/runtime/tensormap_and_ringbuffer/runtime/scheduler/scheduler_completion.cpp
++++ b/src/a5/runtime/tensormap_and_ringbuffer/runtime/scheduler/scheduler_completion.cpp
+@@ -116,7 +116,9 @@ void SchedulerContext::complete_slot_task(
+             const PTO2TaskId token = slot_state.task->task_id;
+             for (uint32_t i = 0; i < cond_count; ++i) {
+                 volatile DeferredCompletionEntry *e = &deferred_slab->entries[i];
+-                while (!mailbox->try_push_condition(token, e->addr, e->expected_value, e->engine, e->completion_type)) {
++                while (!mailbox->try_push_condition(
++                    token, e->addr, e->backend_cookie, e->expected_value, e->engine, e->completion_type
++                )) {
+                     sched_->async_wait_list.mpsc_skipped_count.fetch_add(1, std::memory_order_relaxed);
+                     SPIN_WAIT_HINT();
+                 }
+diff --git a/tests/ut/cpp/a5/test_aicore_completion_mailbox.cpp b/tests/ut/cpp/a5/test_aicore_completion_mailbox.cpp
+index d533c1f1..90e3804c 100644
+--- a/tests/ut/cpp/a5/test_aicore_completion_mailbox.cpp
++++ b/tests/ut/cpp/a5/test_aicore_completion_mailbox.cpp
+@@ -11,8 +11,8 @@
+ /**
+  * Unit tests for the a5 AICoreCompletionMailbox MPSC push protocol.
+  *
+- * Mirrors tests/ut/cpp/a2a3/test_aicore_completion_mailbox.cpp but adapted
+- * to a5's simpler CompletionCondition (no completion_type field; counter-only).
++ * Mirrors tests/ut/cpp/a2a3/test_aicore_completion_mailbox.cpp for the a5
++ * completion mailbox and async wait-list path.
+  */
+ 
+ #include <gtest/gtest.h>
+@@ -51,9 +51,10 @@ TEST(A5AICoreCompletionMailbox, PushConditionThenDrainCreatesEntry) {
+ 
+     PTO2TaskId token = make_token(42);
+     constexpr uint64_t kAddr = 0xCAFEBABEDEADBEEFull;
+-    ASSERT_TRUE(
+-        mb->try_push_condition(token, kAddr, /*expected=*/7, /*engine=*/COMPLETION_ENGINE_ROCE, COMPLETION_TYPE_COUNTER)
+-    );
++    constexpr uint64_t kCookie = 0x123456789ABCDEF0ull;
++    ASSERT_TRUE(mb->try_push_condition(
++        token, kAddr, kCookie, /*expected=*/7, /*engine=*/COMPLETION_ENGINE_ROCE, COMPLETION_TYPE_COUNTER
++    ));
+ 
+     int32_t err = PTO2_ERROR_NONE;
+     AsyncWaitList::DrainCompletionSink sink{};
+@@ -66,6 +67,7 @@ TEST(A5AICoreCompletionMailbox, PushConditionThenDrainCreatesEntry) {
+     EXPECT_EQ(wait_list.entries[0].slot_state, nullptr);
+     ASSERT_EQ(wait_list.entries[0].condition_count, 1);
+     EXPECT_EQ(wait_list.entries[0].conditions[0].expected_value, 7u);
++    EXPECT_EQ(wait_list.entries[0].conditions[0].backend_cookie, kCookie);
+     EXPECT_EQ(reinterpret_cast<uint64_t>(wait_list.entries[0].conditions[0].counter_addr), kAddr);
+     EXPECT_EQ(wait_list.entries[0].waiting_completion_count, 1);
+     EXPECT_FALSE(wait_list.entries[0].normal_done);
+@@ -136,12 +138,14 @@ TEST(A5AICoreCompletionMailbox, ConditionAttachesToExistingEntry) {
+     wait_list.entries[0].normal_done = false;
+     wait_list.count = 1;
+ 
+-    // a5 is counter-only (no SDMA event-record backend), so both conditions
+-    // are COUNTER and bind counter_addr / expected_value.
+     constexpr uint64_t kAddr1 = 0x1000;
+     constexpr uint64_t kAddr2 = 0x2000;
+-    ASSERT_TRUE(mb->try_push_condition(token, kAddr1, /*expected=*/3, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_COUNTER));
+-    ASSERT_TRUE(mb->try_push_condition(token, kAddr2, /*expected=*/9, COMPLETION_ENGINE_ROCE, COMPLETION_TYPE_COUNTER));
++    ASSERT_TRUE(
++        mb->try_push_condition(token, kAddr1, 0, /*expected=*/3, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_COUNTER)
++    );
++    ASSERT_TRUE(
++        mb->try_push_condition(token, kAddr2, 0, /*expected=*/9, COMPLETION_ENGINE_ROCE, COMPLETION_TYPE_COUNTER)
++    );
+ 
+     int32_t err = PTO2_ERROR_NONE;
+     AsyncWaitList::DrainCompletionSink sink{};
+@@ -165,12 +169,13 @@ TEST(A5AICoreCompletionMailbox, PushReturnsFalseWhenFull) {
+     PTO2TaskId token = make_token(1);
+     for (uint32_t i = 0; i < kCap; i++) {
+         ASSERT_TRUE(mb->try_push_condition(
+-            token, /*addr=*/0x10000 + i, /*expected=*/0, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_COUNTER
++            token, /*addr=*/0x10000 + i, /*backend_cookie=*/0, /*expected=*/0, COMPLETION_ENGINE_SDMA,
++            COMPLETION_TYPE_COUNTER
+         ));
+     }
+-    EXPECT_FALSE(
+-        mb->try_push_condition(token, /*addr=*/0x20000, /*expected=*/0, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_COUNTER)
+-    );
++    EXPECT_FALSE(mb->try_push_condition(
++        token, /*addr=*/0x20000, /*backend_cookie=*/0, /*expected=*/0, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_COUNTER
++    ));
+     EXPECT_FALSE(mb->try_push_normal_done(token, /*slot_state_addr=*/0));
+ 
+     destroy_mailbox(mb);
+@@ -191,7 +196,7 @@ TEST(A5AICoreCompletionMailbox, MultiProducerNoLossAndPerProducerOrder) {
+             for (int i = 0; i < kPerProducer; i++) {
+                 uint64_t addr = (static_cast<uint64_t>(p) << 32) | static_cast<uint64_t>(i);
+                 while (!mb->try_push_condition(
+-                    token, addr, /*expected=*/0, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_COUNTER
++                    token, addr, /*backend_cookie=*/0, /*expected=*/0, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_COUNTER
+                 )) {
+                     std::this_thread::yield();
+                 }
+@@ -262,7 +267,7 @@ TEST(A5AICoreCompletionMailbox, ProducerInterleavedWithDrain) {
+     std::thread producer([&]() {
+         for (int i = 0; i < kTotal; i++) {
+             while (!mb->try_push_condition(
+-                token, /*addr=*/i, /*expected=*/0, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_COUNTER
++                token, /*addr=*/i, /*backend_cookie=*/0, /*expected=*/0, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_COUNTER
+             )) {
+                 std::this_thread::yield();
+             }
+@@ -319,9 +324,9 @@ TEST(A5AICoreCompletionMailbox, MonotonicSeqSurvivesCapacityWrapWithoutZeroing)
+     PTO2TaskId token = make_token(7);
+     AICoreCompletionMsgView msg;
+     for (uint64_t i = 0; i < AICORE_COMPLETION_MAILBOX_CAPACITY + 17; i++) {
+-        ASSERT_TRUE(
+-            mb->try_push_condition(token, /*addr=*/i, /*expected=*/0, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_COUNTER)
+-        );
++        ASSERT_TRUE(mb->try_push_condition(
++            token, /*addr=*/i, /*backend_cookie=*/0, /*expected=*/0, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_COUNTER
++        ));
+         ASSERT_TRUE(mb->try_pop(msg));
+         EXPECT_EQ(msg.addr, i);
+     }
+@@ -331,9 +336,9 @@ TEST(A5AICoreCompletionMailbox, MonotonicSeqSurvivesCapacityWrapWithoutZeroing)
+     // push reuses it but publishes seq = head+1 (well past CAPACITY). try_pop
+     // must accept only that fresh value — proving stale seq cannot be replayed.
+     const uint64_t addr_after_wrap = 0xABCD1234ull;
+-    ASSERT_TRUE(
+-        mb->try_push_condition(token, addr_after_wrap, /*expected=*/3, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_COUNTER)
+-    );
++    ASSERT_TRUE(mb->try_push_condition(
++        token, addr_after_wrap, /*backend_cookie=*/0, /*expected=*/3, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_COUNTER
++    ));
+     ASSERT_TRUE(mb->try_pop(msg));
+     EXPECT_EQ(msg.addr, addr_after_wrap);
+     EXPECT_EQ(msg.expected_value, 3u);
+@@ -350,7 +355,8 @@ TEST(A5AICoreCompletionMailbox, TailEqualsHeadDiscardsUndrainedLeftovers) {
+     PTO2TaskId token = make_token(11);
+     for (int i = 0; i < 5; i++) {
+         ASSERT_TRUE(mb->try_push_condition(
+-            token, /*addr=*/static_cast<uint64_t>(i), /*expected=*/0, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_COUNTER
++            token, /*addr=*/static_cast<uint64_t>(i), /*backend_cookie=*/0, /*expected=*/0, COMPLETION_ENGINE_SDMA,
++            COMPLETION_TYPE_COUNTER
+         ));
+     }
+     ASSERT_TRUE(mb->has_pending());
+diff --git a/tests/ut/py/test_runtime_builder.py b/tests/ut/py/test_runtime_builder.py
+index 091229df..43bc7c62 100644
+--- a/tests/ut/py/test_runtime_builder.py
++++ b/tests/ut/py/test_runtime_builder.py
+@@ -156,15 +156,17 @@ class TestRuntimeBuilderPtoIsaValidation:
+     """Test PTO-ISA metadata validation is scoped to affected runtimes."""
+ 
+     @pytest.mark.parametrize(
+-        ("platform", "should_validate"),
++            ("platform", "should_validate"),
+         [
+             ("a2a3", True),
+             ("a2a3sim", False),
+-            ("a5", False),
++            ("a5", True),
+             ("a5sim", False),
+         ],
+     )
+-    def test_pto_isa_validation_only_runs_for_a2a3_onboard(self, tmp_path, monkeypatch, platform, should_validate):
++    def test_pto_isa_validation_only_runs_for_onboard_pto_users(
++        self, tmp_path, monkeypatch, platform, should_validate
++    ):
+         from simpler_setup import pto_isa  # noqa: PLC0415
+         from simpler_setup.platform_info import TARGETS, parse_platform  # noqa: PLC0415
+         from simpler_setup.runtime_builder import RuntimeBuilder  # noqa: PLC0415
+@@ -197,7 +199,7 @@ class TestRuntimeBuilderPtoIsaValidation:
+         if should_validate:
+             with pytest.raises(RuntimeError, match="pto-isa validation called"):
+                 builder._lookup_binaries("test_rt", tmp_path / "out")
+-            assert calls == [(builder._LIB_DIR, "a2a3/onboard/test_rt")]
++            assert calls == [(builder._LIB_DIR, f"{builder._arch}/onboard/test_rt")]
+         else:
+             with pytest.raises(FileNotFoundError, match="Pre-built runtime binaries not found"):
+                 builder._lookup_binaries("test_rt", tmp_path / "out")
+@@ -362,7 +364,7 @@ class TestRuntimeBuilderGetBinaries:
+ 
+     @patch("simpler_setup.runtime_builder.RuntimeCompiler")
+     def test_sim_direct_build_does_not_write_pto_isa_metadata(self, MockCompiler, tmp_path, monkeypatch):
+-        """get_binaries(build=True) only writes PTO-ISA metadata for onboard a2a3."""
++        """get_binaries(build=True) only writes PTO-ISA metadata for onboard pto-isa users."""
+         from simpler_setup import pto_isa  # noqa: PLC0415
+         from simpler_setup.runtime_builder import RuntimeBuilder  # noqa: PLC0415
+ 
+@@ -458,18 +460,19 @@ class TestBuildCacheStamp:
+         builder._arch, builder._variant = parse_platform(platform)
+         return builder
+ 
+-    def test_a2a3_onboard_folds_in_pto_isa_commit(self, monkeypatch):
+-        """a2a3 onboard with a resolved pto-isa commit → composite stamp."""
++    @pytest.mark.parametrize("platform", ["a2a3", "a5"])
++    def test_onboard_pto_user_folds_in_pto_isa_commit(self, monkeypatch, platform):
++        """Onboard runtime with a resolved pto-isa commit → composite stamp."""
+         import simpler_setup.runtime_builder as rb_module  # noqa: PLC0415
+         from simpler_setup import pto_isa  # noqa: PLC0415
+ 
+         monkeypatch.setattr(rb_module, "_get_git_head", lambda _root: "runtime_sha")
+         monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: "isa_sha")
+ 
+-        builder = self._make_builder("a2a3")
++        builder = self._make_builder(platform)
+         assert builder._build_cache_stamp() == "runtime_sha:pto-isa=isa_sha"
+ 
+-    def test_non_a2a3_onboard_uses_pure_runtime_sha(self, monkeypatch):
++    def test_non_pto_user_uses_pure_runtime_sha(self, monkeypatch):
+         """Other arch/variant ignores pto-isa → stamp keyed on runtime HEAD only."""
+         import simpler_setup.runtime_builder as rb_module  # noqa: PLC0415
+         from simpler_setup import pto_isa  # noqa: PLC0415
+@@ -504,7 +507,7 @@ class TestResolveBuildPtoIsaCommit:
+         builder._arch, builder._variant = parse_platform(platform)
+         return builder
+ 
+-    def test_non_a2a3_onboard_returns_empty(self, monkeypatch):
++    def test_non_pto_user_returns_empty(self, monkeypatch):
+         from simpler_setup import pto_isa  # noqa: PLC0415
+ 
+         monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: pytest.fail("unexpected pin read"))
+@@ -512,11 +515,12 @@ class TestResolveBuildPtoIsaCommit:
+         builder = self._make_builder("a2a3sim")
+         assert builder._resolve_build_pto_isa_commit() == ""
+ 
+-    def test_a2a3_onboard_reads_pin(self, monkeypatch):
++    @pytest.mark.parametrize("platform", ["a2a3", "a5"])
++    def test_onboard_pto_user_reads_pin(self, monkeypatch, platform):
+         from simpler_setup import pto_isa  # noqa: PLC0415
+ 
+         monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: "isa_sha")
+-        builder = self._make_builder("a2a3")
++        builder = self._make_builder(platform)
+         assert builder._resolve_build_pto_isa_commit() == "isa_sha"
+ 
+     def test_pin_error_propagates(self, monkeypatch):
+diff --git a/tests/ut/py/test_worker/test_platform_comm.py b/tests/ut/py/test_worker/test_platform_comm.py
+index d7631a70..77fe2004 100644
+--- a/tests/ut/py/test_worker/test_platform_comm.py
++++ b/tests/ut/py/test_worker/test_platform_comm.py
+@@ -75,6 +75,7 @@ def _rank_entry(
+     nranks: int,
+     device_id: int,
+     bins,
++    platform: str,
+     rootinfo_path: str,
+     result_queue: mp.Queue,  # type: ignore[type-arg]
+ ) -> None:
+@@ -136,6 +137,42 @@ def _rank_entry(
+         result["local_base"] = int(local_base)
+         result["rank_id"] = int(host_ctx.rankId)
+         result["rank_num"] = int(host_ctx.rankNum)
++        result["workspace"] = int(host_ctx.workSpace)
++        result["workspace_size"] = int(host_ctx.workSpaceSize)
++
++        if platform == "a5":
++            if host_ctx.workSpace == 0:
++                raise AssertionError("a5 base CommContext.workSpace is 0")
++            if host_ctx.workSpaceSize == 0:
++                raise AssertionError("a5 base CommContext.workSpaceSize is 0")
++
++            dense_ctx_ptr = worker.comm_derive_context(comm, list(range(nranks)), rank, 0, 4096)
++            dense_ctx = _CommContext()
++            worker.copy_from(ctypes.addressof(dense_ctx), dense_ctx_ptr, ctypes.sizeof(dense_ctx))
++            if dense_ctx.workSpace != host_ctx.workSpace:
++                raise AssertionError(
++                    f"dense derived workSpace=0x{dense_ctx.workSpace:x}, "
++                    f"expected base=0x{host_ctx.workSpace:x}"
++                )
++            if dense_ctx.workSpaceSize != host_ctx.workSpaceSize:
++                raise AssertionError(
++                    f"dense derived workSpaceSize={dense_ctx.workSpaceSize}, "
++                    f"expected base={host_ctx.workSpaceSize}"
++                )
++
++            non_dense_rank_ids = list(reversed(range(nranks)))
++            non_dense_domain_rank = non_dense_rank_ids.index(rank)
++            non_dense_ctx_ptr = worker.comm_derive_context(comm, non_dense_rank_ids, non_dense_domain_rank, 0, 4096)
++            non_dense_ctx = _CommContext()
++            worker.copy_from(ctypes.addressof(non_dense_ctx), non_dense_ctx_ptr, ctypes.sizeof(non_dense_ctx))
++            if non_dense_ctx.workSpace != 0 or non_dense_ctx.workSpaceSize != 0:
++                raise AssertionError(
++                    "non-dense derived context must disable URMA workspace, got "
++                    f"workSpace=0x{non_dense_ctx.workSpace:x} workSpaceSize={non_dense_ctx.workSpaceSize}"
++                )
++            result["dense_workspace"] = int(dense_ctx.workSpace)
++            result["non_dense_workspace"] = int(non_dense_ctx.workSpace)
++            result["stage"] = "a5_workspace_ok"
+ 
+         # Barrier.  The C++ HCCL UT observed CANN error 507018 here on some
+         # builds; that bug is tracked independently.  Surface the failure to
+@@ -189,6 +226,7 @@ def test_two_rank_comm_lifecycle(st_platform, st_device_ids):
+                 nranks,
+                 int(st_device_ids[rank]),
+                 bins,
++                st_platform,
+                 rootinfo_path,
+                 result_queue,
+             ),
+-- 
+2.43.0
+

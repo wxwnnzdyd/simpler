@@ -62,6 +62,12 @@ _PTO_ISA_HTTPS = "https://github.com/hw-native-sys/pto-isa.git"
 _PTO_ISA_PIN_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 PTO_ISA_PIN_FILE = "pto_isa.pin"
 PTO_ISA_BUILD_METADATA = "pto_isa_build.json"
+_PTO_ISA_REQUIRED_PATHS = (
+    "include/pto/comm",
+    "include/pto/common",
+    "include/pto/npu/a2a3",
+    "include/pto/npu/a5",
+)
 
 
 def read_pto_isa_pin(pin_path: Optional[Path] = None) -> str:
@@ -223,8 +229,8 @@ def get_pto_isa_clone_path() -> Path:
 
 
 def _is_cloned(path: Path) -> bool:
-    """Return True if `path` looks like a valid PTO-ISA clone (has include/)."""
-    return (path / "include").is_dir()
+    """Return True if `path` has the PTO-ISA headers simpler compiles against."""
+    return all((path / required).exists() for required in _PTO_ISA_REQUIRED_PATHS)
 
 
 def _is_git_available() -> bool:

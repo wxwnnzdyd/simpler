@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/mnt/data/ntlab/hdy/simpler/tests/ut/cpp/build-urma/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
