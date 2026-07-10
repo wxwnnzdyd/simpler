@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -45,7 +46,9 @@
 #include "acl/acl.h"
 #include "hccl/hccl_comm.h"
 #include "hccl/hccl_types.h"
-#include "pto/comm/async/urma/urma_workspace_manager.hpp"
+#include "pto/comm/async/urma/urma_channel_helper.hpp"
+#include "pto/comm/async/urma/urma_hccl_defs.hpp"
+#include "pto/comm/async/urma/urma_types.hpp"
 
 // Thin wrappers around the HCCL public APIs we use. Kept as a translation
 // layer in case we need to swap (e.g., InitConfig variant) later.
@@ -55,6 +58,470 @@ static inline HcclResult hccl_comm_init_root_info(uint32_t n, const HcclRootInfo
 }
 static inline HcclResult hccl_barrier(HcclComm c, aclrtStream s) { return HcclBarrier(c, s); }
 static inline HcclResult hccl_comm_destroy(HcclComm c) { return HcclCommDestroy(c); }
+
+namespace {
+
+class A5UrmaWorkspaceManager {
+public:
+    A5UrmaWorkspaceManager() = default;
+    ~A5UrmaWorkspaceManager() { Finalize(); }
+
+    A5UrmaWorkspaceManager(const A5UrmaWorkspaceManager &) = delete;
+    A5UrmaWorkspaceManager &operator=(const A5UrmaWorkspaceManager &) = delete;
+
+    bool Init(HcclComm comm, uint32_t rank_id, uint32_t rank_count, void *symmetric_addr, uint64_t symmetric_size) {
+        comm_ = comm;
+        rank_id_ = rank_id;
+        rank_count_ = rank_count;
+        symmetric_addr_ = symmetric_addr;
+        symmetric_size_ = symmetric_size;
+
+        if (!LoadDynamicSymbols()) {
+            Finalize();
+            return false;
+        }
+        if (!RegisterMemory()) {
+            Finalize();
+            return false;
+        }
+        if (!BuildChannels()) {
+            Finalize();
+            return false;
+        }
+        if (!ExtractAndFillUrmaInfo()) {
+            Finalize();
+            return false;
+        }
+
+        initialized_ = true;
+        return true;
+    }
+
+    void Finalize() {
+        ReleaseDeviceChannelEntities();
+        FreeDeviceAddr(urma_info_device_);
+        FreeDeviceAddr(eid_device_);
+        channel_handles_.clear();
+        CloseDynamicLibs();
+        initialized_ = false;
+    }
+
+    void *GetWorkspaceAddr() const { return urma_info_device_; }
+
+private:
+    using BuildChannelEntityToDeviceFn = HcclResult (*)(void *, void **);
+    using ReleaseDeviceChannelEntityFn = HcclResult (*)(void *);
+
+    bool LoadDynamicSymbols() {
+        if (build_channel_entity_to_device_ != nullptr) return true;
+
+        dlerror();
+        hcomm_handle_ = dlopen("libhcomm.so", RTLD_NOW | RTLD_NOLOAD);
+        if (hcomm_handle_ == nullptr) {
+            hcomm_handle_ = dlopen("libhcomm.so", RTLD_NOW);
+        }
+        if (hcomm_handle_ == nullptr) {
+            LOG_WARN("[comm rank %u] URMA: dlopen libhcomm.so failed: %s", rank_id_, dlerror());
+            return false;
+        }
+
+        build_channel_entity_to_device_ = reinterpret_cast<BuildChannelEntityToDeviceFn>(
+            dlsym(hcomm_handle_, "_ZN5hcomm14AivUrmaChannel26BuildChannelEntityToDeviceEPPv")
+        );
+        release_device_channel_entity_ = reinterpret_cast<ReleaseDeviceChannelEntityFn>(
+            dlsym(hcomm_handle_, "_ZN5hcomm14AivUrmaChannel26ReleaseDeviceChannelEntityEv")
+        );
+        if (build_channel_entity_to_device_ == nullptr) {
+            LOG_WARN(
+                "[comm rank %u] URMA: libhcomm lacks AivUrmaChannel::BuildChannelEntityToDevice; "
+                "opaque ChannelHandle cannot be converted",
+                rank_id_
+            );
+        }
+        return true;
+    }
+
+    void CloseDynamicLibs() {
+        build_channel_entity_to_device_ = nullptr;
+        release_device_channel_entity_ = nullptr;
+        if (hcomm_handle_ != nullptr) {
+            dlclose(hcomm_handle_);
+            hcomm_handle_ = nullptr;
+        }
+    }
+
+    bool RegisterMemory() {
+        CommMem mem{};
+        mem.type = COMM_MEM_TYPE_DEVICE;
+        mem.addr = symmetric_addr_;
+        mem.size = symmetric_size_;
+
+        HcclResult ret = HcclCommMemReg(comm_, kUrmaSymMemTag, &mem, &mem_handle_);
+        if (ret != HCCL_SUCCESS) {
+            LOG_WARN("[comm rank %u] URMA: HcclCommMemReg failed: %d", rank_id_, static_cast<int>(ret));
+            return false;
+        }
+        return true;
+    }
+
+    bool BuildChannels() {
+        std::vector<HcclChannelDesc> descs;
+        descs.reserve(rank_count_ - 1);
+
+        for (uint32_t peer = 0; peer < rank_count_; ++peer) {
+            if (peer == rank_id_) continue;
+
+            uint32_t net_layer = 0;
+            uint32_t link_num = 0;
+            CommLink *link_list = nullptr;
+            HcclResult rc = HcclRankGraphGetLinks(comm_, net_layer, rank_id_, peer, &link_list, &link_num);
+            if (rc != HCCL_SUCCESS) {
+                LOG_WARN(
+                    "[comm rank %u] URMA: HcclRankGraphGetLinks peer=%u failed: %d", rank_id_, peer,
+                    static_cast<int>(rc)
+                );
+                return false;
+            }
+
+            bool found = false;
+            for (uint32_t i = 0; i < link_num; ++i) {
+                CommProtocol proto = link_list[i].linkAttr.linkProtocol;
+                if (proto != kCommProtocolUbcCtp && proto != kCommProtocolUbcTp) continue;
+
+                HcclChannelDesc desc;
+                HcclChannelDescInit(&desc, 1);
+                desc.remoteRank = peer;
+                desc.notifyNum = 0;
+                desc.channelProtocol = proto;
+                desc.localEndpoint = link_list[i].srcEndpointDesc;
+                desc.remoteEndpoint = link_list[i].dstEndpointDesc;
+                desc.memHandles = &mem_handle_;
+                desc.memHandleNum = 1;
+                descs.push_back(desc);
+                found = true;
+                break;
+            }
+            if (!found) {
+                LOG_WARN("[comm rank %u] URMA: no UBC_TP/CTP link to peer=%u", rank_id_, peer);
+                return false;
+            }
+        }
+
+        channel_handles_.resize(descs.size());
+        HcclResult rc = HcclChannelAcquire(
+            comm_, COMM_ENGINE_AIV, descs.data(), static_cast<uint32_t>(descs.size()), channel_handles_.data()
+        );
+        if (rc != HCCL_SUCCESS) {
+            LOG_WARN("[comm rank %u] URMA: HcclChannelAcquire failed: %d", rank_id_, static_cast<int>(rc));
+            return false;
+        }
+        return true;
+    }
+
+    bool ExtractAndFillUrmaInfo() {
+        std::vector<pto::comm::urma::UrmaWQCtx> wq_list(rank_count_);
+        std::vector<pto::comm::urma::UrmaCqCtx> cq_list(rank_count_);
+        std::vector<pto::comm::urma::UrmaMemInfo> mem_list(rank_count_);
+        std::vector<uint8_t> eid_table(rank_count_ * pto::comm::urma::kUrmaEidBytes, 0);
+        uint32_t local_token_id = 0;
+
+        if (!ExtractPerPeerInfo(wq_list, cq_list, mem_list, eid_table, local_token_id)) return false;
+        if (!AllocAndCopyEidTable(eid_table, mem_list)) return false;
+        if (!BuildAndCopyUrmaInfoTable(wq_list, cq_list, mem_list, local_token_id)) return false;
+
+        LOG_INFO_V0(
+            "[comm rank %u] URMA workspace OK rank_count=%u localTokenId=0x%x", rank_id_, rank_count_, local_token_id
+        );
+        return true;
+    }
+
+    bool ExtractPerPeerInfo(
+        std::vector<pto::comm::urma::UrmaWQCtx> &wq_list, std::vector<pto::comm::urma::UrmaCqCtx> &cq_list,
+        std::vector<pto::comm::urma::UrmaMemInfo> &mem_list, std::vector<uint8_t> &eid_table, uint32_t &local_token_id
+    ) {
+        uint32_t channel_idx = 0;
+        for (uint32_t peer = 0; peer < rank_count_; ++peer) {
+            if (peer == rank_id_) {
+                mem_list[peer].addr = reinterpret_cast<uint64_t>(symmetric_addr_);
+                mem_list[peer].len = static_cast<uint32_t>(symmetric_size_);
+                continue;
+            }
+            if (!ExtractSinglePeer(peer, channel_idx, wq_list, cq_list, mem_list, eid_table, local_token_id)) {
+                return false;
+            }
+            ++channel_idx;
+        }
+        return true;
+    }
+
+    bool ExtractSinglePeer(
+        uint32_t peer, uint32_t channel_idx, std::vector<pto::comm::urma::UrmaWQCtx> &wq_list,
+        std::vector<pto::comm::urma::UrmaCqCtx> &cq_list, std::vector<pto::comm::urma::UrmaMemInfo> &mem_list,
+        std::vector<uint8_t> &eid_table, uint32_t &local_token_id
+    ) {
+        ChannelHandle handle = channel_handles_[channel_idx];
+        ChannelHandle entity_handle = ResolveDeviceChannelEntity(handle, peer);
+        if (entity_handle == 0) return false;
+
+        ChannelEntity host_entity{};
+        SqContext sq{};
+        CqContext cq{};
+        RegedBufferEntity remote_buf{};
+        RegedBufferEntity local_buf{};
+        if (!pto::comm::urma::UrmaChannelHelper::TryReadChannelEntity(
+                entity_handle, peer, host_entity, sq, cq, remote_buf, local_buf
+            )) {
+            LOG_WARN(
+                "[comm rank %u] URMA: cannot read ChannelEntity for peer=%u handle=0x%llx entity=0x%llx", rank_id_,
+                peer, static_cast<unsigned long long>(handle), static_cast<unsigned long long>(entity_handle)
+            );
+            return false;
+        }
+
+        RegedBufferEntity sym_remote_buf{};
+        uint64_t sym_rma_addr = 0;
+        uint32_t sym_rma_size = 0;
+        if (!pto::comm::urma::UrmaChannelHelper::SelectSymmetricRemoteBuffer(
+                comm_, kUrmaSymMemTag, symmetric_size_, handle, peer, host_entity, sym_remote_buf, sym_rma_addr,
+                sym_rma_size
+            )) {
+            return false;
+        }
+
+        RegedBufferEntity sym_local_buf{};
+        if (pto::comm::urma::UrmaChannelHelper::SelectSymmetricLocalBuffer(
+                symmetric_size_, host_entity, peer, sym_local_buf
+            ) &&
+            sym_local_buf.type == REGED_BUFFER_RMA) {
+            local_token_id = sym_local_buf.bufferInfo.rma.protectionInfo.memInfo.ub.tokenId;
+        }
+
+        FillWqCtx(wq_list[peer], sq);
+        FillCqCtx(cq_list[peer], cq);
+        FillMemInfo(mem_list[peer], sq, sym_remote_buf, sym_rma_addr, sym_rma_size);
+
+        (void)memcpy_s(
+            &eid_table[peer * pto::comm::urma::kUrmaEidBytes], pto::comm::urma::kUrmaEidBytes,
+            sq.contextInfo.ubJfs.remoteEID, pto::comm::urma::kUrmaEidBytes
+        );
+        return true;
+    }
+
+    ChannelHandle ResolveDeviceChannelEntity(ChannelHandle handle, uint32_t peer) {
+        void *as_ptr = reinterpret_cast<void *>(static_cast<uintptr_t>(handle));
+        if (IsLikelyA5DeviceVa(handle)) return handle;
+
+        if (build_channel_entity_to_device_ == nullptr) {
+            LOG_WARN(
+                "[comm rank %u] URMA: peer=%u ChannelHandle is opaque host object 0x%llx, but converter is missing",
+                rank_id_, peer, static_cast<unsigned long long>(handle)
+            );
+            return 0;
+        }
+
+        void *dev_entity = nullptr;
+        HcclResult rc = build_channel_entity_to_device_(as_ptr, &dev_entity);
+        if (rc != HCCL_SUCCESS || dev_entity == nullptr) {
+            LOG_WARN(
+                "[comm rank %u] URMA: BuildChannelEntityToDevice(peer=%u handle=0x%llx) failed: ret=%d entity=%p",
+                rank_id_, peer, static_cast<unsigned long long>(handle), static_cast<int>(rc), dev_entity
+            );
+            return 0;
+        }
+        converted_channel_handles_.push_back(handle);
+        LOG_INFO_V0(
+            "[comm rank %u] URMA: converted peer=%u ChannelHandle=0x%llx to device ChannelEntity=%p", rank_id_, peer,
+            static_cast<unsigned long long>(handle), dev_entity
+        );
+        return static_cast<ChannelHandle>(reinterpret_cast<uintptr_t>(dev_entity));
+    }
+
+    void ReleaseDeviceChannelEntities() {
+        if (release_device_channel_entity_ == nullptr) {
+            converted_channel_handles_.clear();
+            return;
+        }
+        for (ChannelHandle handle : converted_channel_handles_) {
+            void *as_ptr = reinterpret_cast<void *>(static_cast<uintptr_t>(handle));
+            HcclResult rc = release_device_channel_entity_(as_ptr);
+            if (rc != HCCL_SUCCESS) {
+                LOG_WARN(
+                    "[comm rank %u] URMA: ReleaseDeviceChannelEntity(handle=0x%llx) failed: %d", rank_id_,
+                    static_cast<unsigned long long>(handle), static_cast<int>(rc)
+                );
+            }
+        }
+        converted_channel_handles_.clear();
+    }
+
+    static void FillWqCtx(pto::comm::urma::UrmaWQCtx &wq, const SqContext &sq) {
+        wq.wqn = sq.contextInfo.ubJfs.jfsID;
+        wq.bufAddr = sq.contextInfo.ubJfs.sqVa;
+        wq.wqeShiftSize = Log2U32(sq.contextInfo.ubJfs.wqeSize);
+        wq.depth = sq.contextInfo.ubJfs.sqDepth;
+        wq.headAddr = sq.contextInfo.ubJfs.headAddr;
+        wq.tailAddr = sq.contextInfo.ubJfs.tailAddr;
+        wq.dbMode = pto::comm::urma::UrmaDbMode::SW_DB;
+        wq.dbAddr = sq.contextInfo.ubJfs.dbVa;
+        wq.sl = 0;
+    }
+
+    static void FillCqCtx(pto::comm::urma::UrmaCqCtx &cq_ctx, const CqContext &cq) {
+        cq_ctx.cqn = cq.contextInfo.ubJfc.jfcID;
+        cq_ctx.bufAddr = cq.contextInfo.ubJfc.scqVa;
+        cq_ctx.cqeShiftSize = Log2U32(cq.contextInfo.ubJfc.cqeSize);
+        cq_ctx.depth = cq.contextInfo.ubJfc.cqDepth;
+        cq_ctx.headAddr = cq.contextInfo.ubJfc.headAddr;
+        cq_ctx.tailAddr = cq.contextInfo.ubJfc.tailAddr;
+        cq_ctx.dbMode = pto::comm::urma::UrmaDbMode::SW_DB;
+        cq_ctx.dbAddr = cq.contextInfo.ubJfc.dbVa;
+    }
+
+    static void FillMemInfo(
+        pto::comm::urma::UrmaMemInfo &mem, const SqContext &sq, const RegedBufferEntity &sym_remote_buf,
+        uint64_t sym_rma_addr, uint32_t sym_rma_size
+    ) {
+        mem.tokenValueValid = true;
+        mem.rmtJettyType = 1;
+        mem.targetHint = 0;
+        mem.tpn = sq.contextInfo.ubJfs.tpID;
+        mem.tid = sym_remote_buf.bufferInfo.rma.protectionInfo.memInfo.ub.tokenId;
+        mem.rmtTokenValue = sym_remote_buf.bufferInfo.rma.protectionInfo.memInfo.ub.tokenValue;
+        mem.len = sym_rma_size;
+        mem.addr = sym_rma_addr;
+    }
+
+    bool
+    AllocAndCopyEidTable(const std::vector<uint8_t> &eid_table, std::vector<pto::comm::urma::UrmaMemInfo> &mem_list) {
+        size_t eid_dev_size = rank_count_ * pto::comm::urma::kUrmaEidBytes;
+        aclError err = aclrtMalloc(&eid_device_, eid_dev_size, ACL_MEM_MALLOC_HUGE_FIRST);
+        if (err != ACL_SUCCESS) {
+            LOG_WARN("[comm rank %u] URMA: aclrtMalloc(eidTable) failed: %d", rank_id_, static_cast<int>(err));
+            return false;
+        }
+        err = aclrtMemcpy(eid_device_, eid_dev_size, eid_table.data(), eid_dev_size, ACL_MEMCPY_HOST_TO_DEVICE);
+        if (err != ACL_SUCCESS) {
+            LOG_WARN("[comm rank %u] URMA: aclrtMemcpy(eidTable) failed: %d", rank_id_, static_cast<int>(err));
+            return false;
+        }
+        for (uint32_t peer = 0; peer < rank_count_; ++peer) {
+            mem_list[peer].eidAddr =
+                reinterpret_cast<uint64_t>(static_cast<uint8_t *>(eid_device_) + peer * pto::comm::urma::kUrmaEidBytes);
+        }
+        return true;
+    }
+
+    bool BuildAndCopyUrmaInfoTable(
+        const std::vector<pto::comm::urma::UrmaWQCtx> &wq_list, const std::vector<pto::comm::urma::UrmaCqCtx> &cq_list,
+        const std::vector<pto::comm::urma::UrmaMemInfo> &mem_list, uint32_t local_token_id
+    ) {
+        size_t total_size = UrmaWorkspaceBytes(rank_count_);
+        aclError err = aclrtMalloc(&urma_info_device_, total_size, ACL_MEM_MALLOC_HUGE_FIRST);
+        if (err != ACL_SUCCESS) {
+            LOG_WARN("[comm rank %u] URMA: aclrtMalloc(urmaInfo) failed: %d", rank_id_, static_cast<int>(err));
+            return false;
+        }
+
+        std::vector<uint8_t> host_buf(total_size, 0);
+        FillUrmaInfoLayout(host_buf, wq_list, cq_list, mem_list, local_token_id);
+
+        err = aclrtMemcpy(urma_info_device_, total_size, host_buf.data(), total_size, ACL_MEMCPY_HOST_TO_DEVICE);
+        if (err != ACL_SUCCESS) {
+            LOG_WARN("[comm rank %u] URMA: aclrtMemcpy(urmaInfo) failed: %d", rank_id_, static_cast<int>(err));
+            return false;
+        }
+        return true;
+    }
+
+    void FillUrmaInfoLayout(
+        std::vector<uint8_t> &host_buf, const std::vector<pto::comm::urma::UrmaWQCtx> &wq_list,
+        const std::vector<pto::comm::urma::UrmaCqCtx> &cq_list,
+        const std::vector<pto::comm::urma::UrmaMemInfo> &mem_list, uint32_t local_token_id
+    ) {
+        auto *info = reinterpret_cast<pto::comm::urma::UrmaInfo *>(host_buf.data());
+        info->qpNum = kQpNum;
+        info->localTokenId = local_token_id;
+        info->rankCount = rank_count_;
+
+        uint8_t *dev_addr = static_cast<uint8_t *>(urma_info_device_) + sizeof(pto::comm::urma::UrmaInfo);
+        info->sqPtr = reinterpret_cast<uint64_t>(dev_addr);
+        dev_addr += sizeof(pto::comm::urma::UrmaWQCtx) * rank_count_ * kQpNum;
+        info->rqPtr = reinterpret_cast<uint64_t>(dev_addr);
+        dev_addr += sizeof(pto::comm::urma::UrmaWQCtx) * rank_count_ * kQpNum;
+        info->scqPtr = reinterpret_cast<uint64_t>(dev_addr);
+        dev_addr += sizeof(pto::comm::urma::UrmaCqCtx) * rank_count_ * kQpNum;
+        info->rcqPtr = reinterpret_cast<uint64_t>(dev_addr);
+        dev_addr += sizeof(pto::comm::urma::UrmaCqCtx) * rank_count_ * kQpNum;
+        info->memPtr = reinterpret_cast<uint64_t>(dev_addr);
+
+        uint8_t *host_addr = host_buf.data() + sizeof(pto::comm::urma::UrmaInfo);
+        auto *sq_arr = reinterpret_cast<pto::comm::urma::UrmaWQCtx *>(host_addr);
+        host_addr += sizeof(pto::comm::urma::UrmaWQCtx) * rank_count_ * kQpNum;
+        auto *rq_arr = reinterpret_cast<pto::comm::urma::UrmaWQCtx *>(host_addr);
+        host_addr += sizeof(pto::comm::urma::UrmaWQCtx) * rank_count_ * kQpNum;
+        auto *scq_arr = reinterpret_cast<pto::comm::urma::UrmaCqCtx *>(host_addr);
+        host_addr += sizeof(pto::comm::urma::UrmaCqCtx) * rank_count_ * kQpNum;
+        auto *rcq_arr = reinterpret_cast<pto::comm::urma::UrmaCqCtx *>(host_addr);
+        host_addr += sizeof(pto::comm::urma::UrmaCqCtx) * rank_count_ * kQpNum;
+        auto *mem_arr = reinterpret_cast<pto::comm::urma::UrmaMemInfo *>(host_addr);
+
+        for (uint32_t rank = 0; rank < rank_count_; ++rank) {
+            sq_arr[rank] = wq_list[rank];
+            rq_arr[rank] = wq_list[rank];
+            scq_arr[rank] = cq_list[rank];
+            rcq_arr[rank] = cq_list[rank];
+            mem_arr[rank] = mem_list[rank];
+        }
+    }
+
+    static uint64_t UrmaWorkspaceBytes(uint32_t rank_count) {
+        return sizeof(pto::comm::urma::UrmaInfo) +
+               static_cast<uint64_t>(rank_count) *
+                   (2ULL * sizeof(pto::comm::urma::UrmaWQCtx) * kQpNum +
+                    2ULL * sizeof(pto::comm::urma::UrmaCqCtx) * kQpNum + sizeof(pto::comm::urma::UrmaMemInfo) * kQpNum);
+    }
+
+    static uint32_t Log2U32(uint32_t n) { return (n <= 1) ? 0 : __builtin_ctz(n); }
+
+    static bool IsLikelyA5DeviceVa(ChannelHandle handle) {
+        return handle >= kA5DeviceVaLowerBound && handle < kA5DeviceVaUpperBound;
+    }
+
+    static void FreeDeviceAddr(void *&addr) {
+        if (addr) {
+            aclrtFree(addr);
+            addr = nullptr;
+        }
+    }
+
+    static constexpr uint32_t kQpNum = 1;
+    static constexpr uint64_t kA5DeviceVaLowerBound = 0x100000000000ULL;
+    static constexpr uint64_t kA5DeviceVaUpperBound = 0x200000000000ULL;
+    static constexpr const char *kUrmaSymMemTag = "pto_urma_sym";
+    static constexpr CommProtocol kCommProtocolUbcCtp = static_cast<CommProtocol>(4);
+    static constexpr CommProtocol kCommProtocolUbcTp = static_cast<CommProtocol>(5);
+
+    HcclComm comm_{nullptr};
+    uint32_t rank_id_{0};
+    uint32_t rank_count_{0};
+    void *symmetric_addr_{nullptr};
+    uint64_t symmetric_size_{0};
+    HcclMemHandle mem_handle_{nullptr};
+
+    std::vector<ChannelHandle> channel_handles_;
+    std::vector<ChannelHandle> converted_channel_handles_;
+
+    void *urma_info_device_{nullptr};
+    void *eid_device_{nullptr};
+
+    void *hcomm_handle_{nullptr};
+    BuildChannelEntityToDeviceFn build_channel_entity_to_device_{nullptr};
+    ReleaseDeviceChannelEntityFn release_device_channel_entity_{nullptr};
+
+    bool initialized_{false};
+};
+
+}  // namespace
 
 // ============================================================================
 // Internal state
@@ -71,7 +538,7 @@ struct DomainAllocation {
     int nranks = 0;  // subset size
     void *local_buf = nullptr;
     CommContext *device_ctx = nullptr;  // aclrtMalloc'd CommContext mirror
-    std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> urma_workspace;
+    std::unique_ptr<A5UrmaWorkspaceManager> urma_workspace;
 };
 
 struct CommHandle_ {
@@ -89,7 +556,7 @@ struct CommHandle_ {
     bool owns_device_ctx = false;
     std::vector<CommContext *> derived_contexts;
     std::unordered_map<uint64_t, std::unique_ptr<DomainAllocation>> domain_allocations;
-    std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> urma_workspace;
+    std::unique_ptr<A5UrmaWorkspaceManager> urma_workspace;
 };
 
 // ============================================================================
@@ -644,7 +1111,7 @@ static bool rank_ids_are_dense_prefix(const uint32_t *rank_ids, size_t rank_coun
 
 static bool init_urma_workspace(
     CommHandle h, uint32_t rank_id, uint32_t rank_count, void *symmetric_addr, uint64_t symmetric_size,
-    std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> &workspace
+    std::unique_ptr<A5UrmaWorkspaceManager> &workspace
 ) {
     if (workspace) return workspace->GetWorkspaceAddr() != nullptr;
     if (h == nullptr || h->hccl_comm == nullptr || symmetric_addr == nullptr || symmetric_size == 0 ||
@@ -652,7 +1119,7 @@ static bool init_urma_workspace(
         return false;
     }
 
-    auto manager = std::make_unique<pto::comm::urma::UrmaWorkspaceManager>();
+    auto manager = std::make_unique<A5UrmaWorkspaceManager>();
     if (!manager->Init(h->hccl_comm, rank_id, rank_count, symmetric_addr, symmetric_size)) {
         LOG_WARN(
             "[comm rank %d] URMA workspace init failed (rank_id=%u rank_count=%u size=%llu); "
