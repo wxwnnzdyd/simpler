@@ -334,6 +334,7 @@ private:
             );
             return false;
         }
+        NormalizeChannelEntityPointers(entity_handle, host_entity);
         LOG_WARN(
             "[comm rank %u] URMA: entity peer=%u sq=%p/%u cq=%p/%u remoteBuf=%p/%u localBuf=%p/%u", rank_id_, peer,
             static_cast<void *>(host_entity.sqContextAddr), host_entity.sqNum,
@@ -363,6 +364,25 @@ private:
             return false;
         }
         return true;
+    }
+
+    void NormalizeChannelEntityPointers(ChannelHandle entity_handle, ChannelEntity &entity) {
+        const uintptr_t base = static_cast<uintptr_t>(entity_handle);
+        entity.localNotifyAddr = NormalizeEntityPointer(base, entity.localNotifyAddr);
+        entity.remoteNotifyAddr = NormalizeEntityPointer(base, entity.remoteNotifyAddr);
+        entity.localBufferAddr = static_cast<RegedBufferEntity *>(NormalizeEntityPointer(base, entity.localBufferAddr));
+        entity.remoteBufferAddr =
+            static_cast<RegedBufferEntity *>(NormalizeEntityPointer(base, entity.remoteBufferAddr));
+        entity.sqContextAddr = static_cast<SqContext *>(NormalizeEntityPointer(base, entity.sqContextAddr));
+        entity.cqContextAddr = static_cast<CqContext *>(NormalizeEntityPointer(base, entity.cqContextAddr));
+    }
+
+    void *NormalizeEntityPointer(uintptr_t entity_base, const void *ptr) {
+        uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+        if (addr == 0 || IsLikelyA5DeviceVa(static_cast<ChannelHandle>(addr))) {
+            return const_cast<void *>(ptr);
+        }
+        return reinterpret_cast<void *>(entity_base + addr);
     }
 
     bool CopyDeviceStruct(const void *src, void *dst, size_t size, uint32_t peer, const char *name) {
