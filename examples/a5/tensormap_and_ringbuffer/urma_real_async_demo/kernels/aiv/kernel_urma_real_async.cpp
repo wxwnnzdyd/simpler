@@ -213,6 +213,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         status, UrmaRealStatus::kProbeFillSqeDone, static_cast<int32_t>(remote_mem->tpn),
         static_cast<int32_t>(remote_mem->tid)
     );
+    __gm__ uint64_t *remote_eid_probe = reinterpret_cast<__gm__ uint64_t *>(remote_mem->eidAddr);
+    uint64_t eid0 = remote_eid_probe[0];
+    uint64_t eid1 = remote_eid_probe[1];
+    SetStatus(
+        status, UrmaRealStatus::kProbeDcciDone, static_cast<int32_t>(eid0 & 0xFFFFFFFFu),
+        static_cast<int32_t>(eid1 & 0xFFFFFFFFu)
+    );
     return;
     __gm__ pto::comm::urma::UrmaSqeCtx *sqe = reinterpret_cast<__gm__ pto::comm::urma::UrmaSqeCtx *>(wqe_addr);
     sqe->sqeBbIdx = static_cast<uint16_t>(head % wq_ctx->depth);
