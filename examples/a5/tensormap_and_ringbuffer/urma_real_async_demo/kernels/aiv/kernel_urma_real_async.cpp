@@ -41,9 +41,15 @@ enum class UrmaRealStatus : int32_t {
     kInvalidElementCount = 4,
     kTgetWaitFailed = 10,
     kTputWaitFailed = 20,
+    kTgetPostBegin = 30,
+    kTgetPostDone = 31,
+    kTputPostBegin = 40,
+    kTputPostDone = 41,
     kTgetMismatch = 100,
     kTputMismatch = 200,
 };
+
+constexpr uint32_t kMaxUrmaPollIters = 1000000;
 
 template <typename T>
 AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_ptr, int peer) {
@@ -56,6 +62,18 @@ AICORE inline void SetStatus(__gm__ int32_t *status, UrmaRealStatus code, int32_
     status[0] = static_cast<int32_t>(code);
     status[1] = detail0;
     status[2] = detail1;
+}
+
+template <typename Event, typename Session>
+AICORE inline bool
+WaitUrmaBounded(const Event &event, const Session &session, __gm__ int32_t *status, UrmaRealStatus timeout_code) {
+    for (uint32_t i = 0; i < kMaxUrmaPollIters; ++i) {
+        if (event.Test(session)) {
+            return true;
+        }
+    }
+    SetStatus(status, timeout_code, static_cast<int32_t>(kMaxUrmaPollIters));
+    return false;
 }
 
 AICORE inline void DeviceBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_base, int my_rank, int nranks) {
@@ -136,9 +154,10 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     pto::comm::BuildAsyncSession<pto::comm::DmaEngine::URMA>(workspace, static_cast<uint32_t>(peer), tget_session);
     Global local_tget_g(tget_recv, shape, stride);
     Global remote_send_g(remote_send, shape, stride);
+    SetStatus(status, UrmaRealStatus::kTgetPostBegin, my_rank, peer);
     auto tget_event = pto::comm::TGET_ASYNC<pto::comm::DmaEngine::URMA>(local_tget_g, remote_send_g, tget_session);
-    if (!tget_event.Wait(tget_session)) {
-        SetStatus(status, UrmaRealStatus::kTgetWaitFailed);
+    SetStatus(status, UrmaRealStatus::kTgetPostDone, static_cast<int32_t>(tget_event.handle & 0xFFFFFFFFu), peer);
+    if (!WaitUrmaBounded(tget_event, tget_session, status, UrmaRealStatus::kTgetWaitFailed)) {
         return;
     }
 
@@ -146,9 +165,10 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     pto::comm::BuildAsyncSession<pto::comm::DmaEngine::URMA>(workspace, static_cast<uint32_t>(peer), tput_session);
     Global remote_tput_g(remote_tput_slot, shape, stride);
     Global local_send_g(send, shape, stride);
+    SetStatus(status, UrmaRealStatus::kTputPostBegin, my_rank, peer);
     auto tput_event = pto::comm::TPUT_ASYNC<pto::comm::DmaEngine::URMA>(remote_tput_g, local_send_g, tput_session);
-    if (!tput_event.Wait(tput_session)) {
-        SetStatus(status, UrmaRealStatus::kTputWaitFailed);
+    SetStatus(status, UrmaRealStatus::kTputPostDone, static_cast<int32_t>(tput_event.handle & 0xFFFFFFFFu), peer);
+    if (!WaitUrmaBounded(tput_event, tput_session, status, UrmaRealStatus::kTputWaitFailed)) {
         return;
     }
 
