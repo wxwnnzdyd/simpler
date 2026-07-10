@@ -113,6 +113,29 @@ private:
     using ReleaseDeviceChannelEntityFn = HcclResult (*)(void *);
     using GetUserRemoteMemFn = HcclResult (*)(void *, CommMem **, char ***, uint32_t *);
 
+    struct RoceSqContextInfo {
+        uint64_t sqVa;
+        uint64_t headAddr;
+        uint64_t tailAddr;
+        uint64_t dbVa;
+        uint32_t qpn;
+        uint32_t wqeSize;
+        uint32_t depth;
+        int8_t dbMode;
+        uint8_t sl;
+    };
+
+    struct RoceCqContextInfo {
+        uint64_t cqVa;
+        uint64_t headAddr;
+        uint64_t tailAddr;
+        uint64_t dbVa;
+        uint32_t cqn;
+        uint32_t cqeSize;
+        uint32_t cqDepth;
+        int8_t dbMode;
+    };
+
     bool LoadDynamicSymbols() {
         if (build_channel_entity_to_device_ != nullptr) return true;
 
@@ -303,9 +326,11 @@ private:
             local_token_id = sym_local_buf.bufferInfo.rma.protectionInfo.memInfo.ub.tokenId;
         }
 
-        FillWqCtx(wq_list[peer], sq);
-        FillCqCtx(cq_list[peer], cq);
-        FillMemInfo(mem_list[peer], sq, sym_remote_buf, sym_rma_addr, sym_rma_size);
+        if (!FillWqCtx(wq_list[peer], sq, peer) || !FillCqCtx(cq_list[peer], cq, peer) ||
+            !FillMemInfo(mem_list[peer], sq, sym_remote_buf, sym_rma_addr, sym_rma_size, peer) ||
+            !ValidatePeerContext(peer, wq_list[peer], cq_list[peer])) {
+            return false;
+        }
         LOG_WARN(
             "[comm rank %u] URMA: peer=%u wq{wqn=%u buf=0x%llx head=0x%llx tail=0x%llx db=0x%llx "
             "wqeShift=%u depth=%u tp=%u} cq{cqn=%u buf=0x%llx head=0x%llx tail=0x%llx db=0x%llx "
@@ -379,6 +404,8 @@ private:
             return false;
         }
         NormalizeChannelSubStructAddresses(entity_handle, sq, cq, remote_buf, local_buf);
+        LogContextRaw(peer, sq, cq);
+        BackfillQueueIndexAddresses(entity_handle, host_entity, sq, cq, peer);
         return true;
     }
 
@@ -421,6 +448,62 @@ private:
         }
         if (local_buf.type == REGED_BUFFER_RMA) {
             local_buf.bufferInfo.rma.addr = NormalizeDeviceAddress(base, local_buf.bufferInfo.rma.addr);
+        }
+    }
+
+    void BackfillQueueIndexAddresses(
+        ChannelHandle entity_handle, const ChannelEntity &entity, SqContext &sq, CqContext &cq, uint32_t peer
+    ) {
+        if (entity.sqNum == 0 || entity.cqNum == 0 || entity.sqContextAddr == nullptr ||
+            entity.cqContextAddr == nullptr) {
+            return;
+        }
+
+        const uintptr_t base = static_cast<uintptr_t>(entity_handle);
+        uintptr_t offset = reinterpret_cast<uintptr_t>(entity.cqContextAddr) - base;
+        offset += static_cast<uintptr_t>(entity.cqNum) * sizeof(CqContext);
+        const uintptr_t sq_pi_base = base + AlignUp(offset, kAivUrmaEntityAlignSize);
+        const uintptr_t sq_ci_base =
+            base + AlignUp(
+                       (sq_pi_base - base) + static_cast<uintptr_t>(entity.sqNum) * kQueueIndexMemUnitSize,
+                       kAivUrmaEntityAlignSize
+                   );
+        const uintptr_t cq_pi_base =
+            base + AlignUp(
+                       (sq_ci_base - base) + static_cast<uintptr_t>(entity.sqNum) * kQueueIndexMemUnitSize,
+                       kAivUrmaEntityAlignSize
+                   );
+        const uintptr_t cq_ci_base =
+            base + AlignUp(
+                       (cq_pi_base - base) + static_cast<uintptr_t>(entity.cqNum) * kQueueIndexMemUnitSize,
+                       kAivUrmaEntityAlignSize
+                   );
+
+        bool backfilled = false;
+        if (sq.contextInfo.ubJfs.headAddr == 0) {
+            sq.contextInfo.ubJfs.headAddr = static_cast<uint64_t>(sq_pi_base);
+            backfilled = true;
+        }
+        if (sq.contextInfo.ubJfs.tailAddr == 0) {
+            sq.contextInfo.ubJfs.tailAddr = static_cast<uint64_t>(sq_ci_base);
+            backfilled = true;
+        }
+        if (cq.contextInfo.ubJfc.headAddr == 0) {
+            cq.contextInfo.ubJfc.headAddr = static_cast<uint64_t>(cq_pi_base);
+            backfilled = true;
+        }
+        if (cq.contextInfo.ubJfc.tailAddr == 0) {
+            cq.contextInfo.ubJfc.tailAddr = static_cast<uint64_t>(cq_ci_base);
+            backfilled = true;
+        }
+        if (backfilled) {
+            LOG_WARN(
+                "[comm rank %u] URMA: peer=%u backfilled queue-index addrs "
+                "sqPi=0x%llx sqCi=0x%llx cqPi=0x%llx cqCi=0x%llx",
+                rank_id_, peer, static_cast<unsigned long long>(sq_pi_base),
+                static_cast<unsigned long long>(sq_ci_base), static_cast<unsigned long long>(cq_pi_base),
+                static_cast<unsigned long long>(cq_ci_base)
+            );
         }
     }
 
@@ -567,33 +650,70 @@ private:
         converted_channel_handles_.clear();
     }
 
-    static void FillWqCtx(pto::comm::urma::UrmaWQCtx &wq, const SqContext &sq) {
-        wq.wqn = sq.contextInfo.ubJfs.jfsID;
-        wq.bufAddr = sq.contextInfo.ubJfs.sqVa;
-        wq.wqeShiftSize = Log2U32(sq.contextInfo.ubJfs.wqeSize);
-        wq.depth = sq.contextInfo.ubJfs.sqDepth;
-        wq.headAddr = sq.contextInfo.ubJfs.headAddr;
-        wq.tailAddr = sq.contextInfo.ubJfs.tailAddr;
-        wq.dbMode = pto::comm::urma::UrmaDbMode::SW_DB;
-        wq.dbAddr = sq.contextInfo.ubJfs.dbVa;
-        wq.sl = 0;
+    bool FillWqCtx(pto::comm::urma::UrmaWQCtx &wq, const SqContext &sq, uint32_t peer) {
+        if (sq.type == kSqContextTypeRoce) {
+            const RoceSqContextInfo &roce_sq = RoceSq(sq);
+            wq.wqn = roce_sq.qpn;
+            wq.bufAddr = roce_sq.sqVa;
+            wq.wqeShiftSize = Log2U32(roce_sq.wqeSize);
+            wq.depth = roce_sq.depth;
+            wq.headAddr = roce_sq.headAddr;
+            wq.tailAddr = roce_sq.tailAddr;
+            wq.dbMode = ToUrmaDbMode(roce_sq.dbMode);
+            wq.dbAddr = roce_sq.dbVa;
+            wq.sl = roce_sq.sl;
+        } else if (sq.type == kSqContextTypeUbJfs) {
+            wq.wqn = sq.contextInfo.ubJfs.jfsID;
+            wq.bufAddr = sq.contextInfo.ubJfs.sqVa;
+            wq.wqeShiftSize = Log2U32(sq.contextInfo.ubJfs.wqeSize);
+            wq.depth = sq.contextInfo.ubJfs.sqDepth;
+            wq.headAddr = sq.contextInfo.ubJfs.headAddr;
+            wq.tailAddr = sq.contextInfo.ubJfs.tailAddr;
+            wq.dbMode = pto::comm::urma::UrmaDbMode::SW_DB;
+            wq.dbAddr = sq.contextInfo.ubJfs.dbVa;
+            wq.sl = 0;
+        } else {
+            LOG_WARN("[comm rank %u] URMA: peer=%u unsupported SqContext type=%d", rank_id_, peer, sq.type);
+            return false;
+        }
+        return true;
     }
 
-    static void FillCqCtx(pto::comm::urma::UrmaCqCtx &cq_ctx, const CqContext &cq) {
-        cq_ctx.cqn = cq.contextInfo.ubJfc.jfcID;
-        cq_ctx.bufAddr = cq.contextInfo.ubJfc.scqVa;
-        cq_ctx.cqeShiftSize = Log2U32(cq.contextInfo.ubJfc.cqeSize);
-        cq_ctx.depth = cq.contextInfo.ubJfc.cqDepth;
-        cq_ctx.headAddr = cq.contextInfo.ubJfc.headAddr;
-        cq_ctx.tailAddr = cq.contextInfo.ubJfc.tailAddr;
-        cq_ctx.dbMode = pto::comm::urma::UrmaDbMode::SW_DB;
-        cq_ctx.dbAddr = cq.contextInfo.ubJfc.dbVa;
+    bool FillCqCtx(pto::comm::urma::UrmaCqCtx &cq_ctx, const CqContext &cq, uint32_t peer) {
+        if (cq.type == kCqContextTypeRoce) {
+            const RoceCqContextInfo &roce_cq = RoceCq(cq);
+            cq_ctx.cqn = roce_cq.cqn;
+            cq_ctx.bufAddr = roce_cq.cqVa;
+            cq_ctx.cqeShiftSize = Log2U32(roce_cq.cqeSize);
+            cq_ctx.depth = roce_cq.cqDepth;
+            cq_ctx.headAddr = roce_cq.headAddr;
+            cq_ctx.tailAddr = roce_cq.tailAddr;
+            cq_ctx.dbMode = ToUrmaDbMode(roce_cq.dbMode);
+            cq_ctx.dbAddr = roce_cq.dbVa;
+        } else if (cq.type == kCqContextTypeUbJfc) {
+            cq_ctx.cqn = cq.contextInfo.ubJfc.jfcID;
+            cq_ctx.bufAddr = cq.contextInfo.ubJfc.scqVa;
+            cq_ctx.cqeShiftSize = Log2U32(cq.contextInfo.ubJfc.cqeSize);
+            cq_ctx.depth = cq.contextInfo.ubJfc.cqDepth;
+            cq_ctx.headAddr = cq.contextInfo.ubJfc.headAddr;
+            cq_ctx.tailAddr = cq.contextInfo.ubJfc.tailAddr;
+            cq_ctx.dbMode = pto::comm::urma::UrmaDbMode::SW_DB;
+            cq_ctx.dbAddr = cq.contextInfo.ubJfc.dbVa;
+        } else {
+            LOG_WARN("[comm rank %u] URMA: peer=%u unsupported CqContext type=%d", rank_id_, peer, cq.type);
+            return false;
+        }
+        return true;
     }
 
-    static void FillMemInfo(
+    bool FillMemInfo(
         pto::comm::urma::UrmaMemInfo &mem, const SqContext &sq, const RegedBufferEntity &sym_remote_buf,
-        uint64_t sym_rma_addr, uint32_t sym_rma_size
+        uint64_t sym_rma_addr, uint32_t sym_rma_size, uint32_t peer
     ) {
+        if (sq.type != kSqContextTypeUbJfs) {
+            LOG_WARN("[comm rank %u] URMA: peer=%u unsupported SqContext type=%d for UB WQE", rank_id_, peer, sq.type);
+            return false;
+        }
         mem.tokenValueValid = true;
         mem.rmtJettyType = 1;
         mem.targetHint = 0;
@@ -602,6 +722,7 @@ private:
         mem.rmtTokenValue = sym_remote_buf.bufferInfo.rma.protectionInfo.memInfo.ub.tokenValue;
         mem.len = sym_rma_size;
         mem.addr = sym_rma_addr;
+        return true;
     }
 
     bool
@@ -694,6 +815,81 @@ private:
                     2ULL * sizeof(pto::comm::urma::UrmaCqCtx) * kQpNum + sizeof(pto::comm::urma::UrmaMemInfo) * kQpNum);
     }
 
+    void LogContextRaw(uint32_t peer, const SqContext &sq, const CqContext &cq) const {
+        LOG_WARN(
+            "[comm rank %u] URMA: peer=%u SqContext type=%d raw64=[0x%llx 0x%llx 0x%llx 0x%llx "
+            "0x%llx 0x%llx 0x%llx 0x%llx]",
+            rank_id_, peer, sq.type, static_cast<unsigned long long>(RawU64(sq.contextInfo.raws, 0)),
+            static_cast<unsigned long long>(RawU64(sq.contextInfo.raws, 1)),
+            static_cast<unsigned long long>(RawU64(sq.contextInfo.raws, 2)),
+            static_cast<unsigned long long>(RawU64(sq.contextInfo.raws, 3)),
+            static_cast<unsigned long long>(RawU64(sq.contextInfo.raws, 4)),
+            static_cast<unsigned long long>(RawU64(sq.contextInfo.raws, 5)),
+            static_cast<unsigned long long>(RawU64(sq.contextInfo.raws, 6)),
+            static_cast<unsigned long long>(RawU64(sq.contextInfo.raws, 7))
+        );
+        LOG_WARN(
+            "[comm rank %u] URMA: peer=%u CqContext type=%d raw64=[0x%llx 0x%llx 0x%llx 0x%llx "
+            "0x%llx 0x%llx 0x%llx 0x%llx]",
+            rank_id_, peer, cq.type, static_cast<unsigned long long>(RawU64(cq.contextInfo.raws, 0)),
+            static_cast<unsigned long long>(RawU64(cq.contextInfo.raws, 1)),
+            static_cast<unsigned long long>(RawU64(cq.contextInfo.raws, 2)),
+            static_cast<unsigned long long>(RawU64(cq.contextInfo.raws, 3)),
+            static_cast<unsigned long long>(RawU64(cq.contextInfo.raws, 4)),
+            static_cast<unsigned long long>(RawU64(cq.contextInfo.raws, 5)),
+            static_cast<unsigned long long>(RawU64(cq.contextInfo.raws, 6)),
+            static_cast<unsigned long long>(RawU64(cq.contextInfo.raws, 7))
+        );
+    }
+
+    bool ValidatePeerContext(
+        uint32_t peer, const pto::comm::urma::UrmaWQCtx &wq, const pto::comm::urma::UrmaCqCtx &cq
+    ) const {
+        if (wq.bufAddr != 0 && wq.headAddr != 0 && wq.tailAddr != 0 && wq.dbAddr != 0 && wq.depth != 0 &&
+            cq.bufAddr != 0 && cq.headAddr != 0 && cq.tailAddr != 0 && cq.dbAddr != 0 && cq.depth != 0) {
+            return true;
+        }
+        LOG_WARN(
+            "[comm rank %u] URMA: peer=%u invalid WQ/CQ context; refusing to launch URMA kernel "
+            "wq{buf=0x%llx head=0x%llx tail=0x%llx db=0x%llx depth=%u} "
+            "cq{buf=0x%llx head=0x%llx tail=0x%llx db=0x%llx depth=%u}",
+            rank_id_, peer, static_cast<unsigned long long>(wq.bufAddr), static_cast<unsigned long long>(wq.headAddr),
+            static_cast<unsigned long long>(wq.tailAddr), static_cast<unsigned long long>(wq.dbAddr), wq.depth,
+            static_cast<unsigned long long>(cq.bufAddr), static_cast<unsigned long long>(cq.headAddr),
+            static_cast<unsigned long long>(cq.tailAddr), static_cast<unsigned long long>(cq.dbAddr), cq.depth
+        );
+        return false;
+    }
+
+    static RoceSqContextInfo RoceSq(const SqContext &sq) {
+        RoceSqContextInfo out{};
+        std::memcpy(&out, sq.contextInfo.raws, sizeof(out));
+        return out;
+    }
+
+    static RoceCqContextInfo RoceCq(const CqContext &cq) {
+        RoceCqContextInfo out{};
+        std::memcpy(&out, cq.contextInfo.raws, sizeof(out));
+        return out;
+    }
+
+    static pto::comm::urma::UrmaDbMode ToUrmaDbMode(int8_t db_mode) {
+        if (db_mode == static_cast<int8_t>(pto::comm::urma::UrmaDbMode::HW_DB)) {
+            return pto::comm::urma::UrmaDbMode::HW_DB;
+        }
+        return pto::comm::urma::UrmaDbMode::SW_DB;
+    }
+
+    static uint64_t RawU64(const uint8_t *raw, size_t idx) {
+        uint64_t out = 0;
+        std::memcpy(&out, raw + idx * sizeof(out), sizeof(out));
+        return out;
+    }
+
+    static uintptr_t AlignUp(uintptr_t value, uintptr_t alignment) {
+        return ((value + alignment - 1) / alignment) * alignment;
+    }
+
     static uint32_t Log2U32(uint32_t n) { return (n <= 1) ? 0 : __builtin_ctz(n); }
 
     static bool IsLikelyA5DeviceVa(ChannelHandle handle) {
@@ -708,6 +904,12 @@ private:
     }
 
     static constexpr uint32_t kQpNum = 1;
+    static constexpr int32_t kSqContextTypeUbJfs = 0;
+    static constexpr int32_t kSqContextTypeRoce = 1;
+    static constexpr int32_t kCqContextTypeUbJfc = 0;
+    static constexpr int32_t kCqContextTypeRoce = 1;
+    static constexpr uintptr_t kAivUrmaEntityAlignSize = 64;
+    static constexpr uintptr_t kQueueIndexMemUnitSize = sizeof(void *);
     static constexpr uint64_t kA5DeviceVaLowerBound = 0x100000000000ULL;
     static constexpr uint64_t kA5DeviceVaUpperBound = 0x200000000000ULL;
     static constexpr const char *kUrmaSymMemTag = "pto_urma_sym";
