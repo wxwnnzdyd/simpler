@@ -43,6 +43,10 @@ enum class UrmaRealStatus : int32_t {
     kTputWaitFailed = 20,
     kTgetPostBegin = 30,
     kTgetPostDone = 31,
+    kProbeWorkspaceInfo = 32,
+    kProbeWqCtx = 33,
+    kProbeQueueIndexBegin = 34,
+    kProbeQueueIndexDone = 35,
     kTputPostBegin = 40,
     kTputPostDone = 41,
     kTgetMismatch = 100,
@@ -155,6 +159,26 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     Global local_tget_g(tget_recv, shape, stride);
     Global remote_send_g(remote_send, shape, stride);
     SetStatus(status, UrmaRealStatus::kTgetPostBegin, my_rank, peer);
+    __gm__ pto::comm::urma::UrmaInfo *urma_info = reinterpret_cast<__gm__ pto::comm::urma::UrmaInfo *>(workspace);
+    uint32_t qp_num = urma_info->qpNum;
+    uint64_t sq_ptr = urma_info->sqPtr;
+    SetStatus(status, UrmaRealStatus::kProbeWorkspaceInfo, static_cast<int32_t>(qp_num), peer);
+    __gm__ pto::comm::urma::UrmaWQCtx *wq_ctx = reinterpret_cast<__gm__ pto::comm::urma::UrmaWQCtx *>(
+        sq_ptr + (static_cast<uint32_t>(peer) * qp_num) * sizeof(pto::comm::urma::UrmaWQCtx)
+    );
+    uint64_t head_addr = wq_ctx->headAddr;
+    uint64_t tail_addr = wq_ctx->tailAddr;
+    SetStatus(
+        status, UrmaRealStatus::kProbeWqCtx, static_cast<int32_t>(wq_ctx->depth),
+        static_cast<int32_t>(wq_ctx->wqeShiftSize)
+    );
+    SetStatus(
+        status, UrmaRealStatus::kProbeQueueIndexBegin, static_cast<int32_t>(head_addr & 0xFFFFFFFFu),
+        static_cast<int32_t>(tail_addr & 0xFFFFFFFFu)
+    );
+    uint32_t head = *reinterpret_cast<__gm__ uint32_t *>(head_addr);
+    uint32_t tail = *reinterpret_cast<__gm__ uint32_t *>(tail_addr);
+    SetStatus(status, UrmaRealStatus::kProbeQueueIndexDone, static_cast<int32_t>(head), static_cast<int32_t>(tail));
     return;
     auto tget_event = pto::comm::TGET_ASYNC<pto::comm::DmaEngine::URMA>(local_tget_g, remote_send_g, tget_session);
     SetStatus(status, UrmaRealStatus::kTgetPostDone, static_cast<int32_t>(tget_event.handle & 0xFFFFFFFFu), peer);
