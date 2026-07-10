@@ -53,6 +53,8 @@ enum class UrmaRealStatus : int32_t {
     kProbeQueueIndexStoreDone = 39,
     kTputPostBegin = 40,
     kTputPostDone = 41,
+    kProbeFillSqeDone = 42,
+    kProbeDcciDone = 43,
     kTgetMismatch = 100,
     kTputMismatch = 200,
 };
@@ -205,6 +207,44 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     SetStatus(
         status, UrmaRealStatus::kProbeQueueIndexStoreDone, static_cast<int32_t>(head), static_cast<int32_t>(tail)
     );
+    __gm__ pto::comm::urma::UrmaMemInfo *remote_mem =
+        reinterpret_cast<__gm__ pto::comm::urma::UrmaMemInfo *>(urma_info->memPtr) + peer;
+    __gm__ pto::comm::urma::UrmaSqeCtx *sqe = reinterpret_cast<__gm__ pto::comm::urma::UrmaSqeCtx *>(wqe_addr);
+    sqe->sqeBbIdx = static_cast<uint16_t>(head % wq_ctx->depth);
+    sqe->opcode = static_cast<uint32_t>(pto::comm::urma::UrmaOpcode::READ);
+    sqe->flag = 0x20;
+    sqe->nf = 0;
+    sqe->tokenEn = remote_mem->tokenValueValid ? 1U : 0U;
+    sqe->rmtJettyType = remote_mem->rmtJettyType;
+    sqe->owner = (head & wq_ctx->depth) == 0U ? 1U : 0U;
+    sqe->targetHint = remote_mem->targetHint;
+    sqe->inlineMsgLen = 0;
+    sqe->tpId = remote_mem->tpn;
+    sqe->sgeNum = 1;
+    sqe->rmtJettyOrSegId = remote_mem->tid;
+    sqe->rmtTokenValue = remote_mem->rmtTokenValue;
+    uint64_t remote_addr_value = reinterpret_cast<uint64_t>(remote_send);
+    __gm__ uint64_t *remote_eid = reinterpret_cast<__gm__ uint64_t *>(remote_mem->eidAddr);
+    sqe->rmtEidL = remote_eid[0];
+    sqe->rmtEidH = remote_eid[1];
+    sqe->rmtAddrLOrTokenId = static_cast<uint32_t>(remote_addr_value & 0xFFFFFFFFU);
+    sqe->rmtAddrHOrTokenValue = static_cast<uint32_t>((remote_addr_value >> 32) & 0xFFFFFFFFU);
+    __gm__ pto::comm::urma::UrmaSgeCtx *sge = reinterpret_cast<__gm__ pto::comm::urma::UrmaSgeCtx *>(
+        reinterpret_cast<__gm__ uint8_t *>(sqe) + pto::comm::urma::kUrmaSqeSizeBytes
+    );
+    sge->len = elem_count * 4U;
+    sge->tokenId = urma_info->localTokenId;
+    sge->va = reinterpret_cast<uint64_t>(tget_recv);
+    SetStatus(
+        status, UrmaRealStatus::kProbeFillSqeDone, static_cast<int32_t>(remote_mem->tpn),
+        static_cast<int32_t>(remote_mem->tid)
+    );
+    pipe_barrier(PIPE_ALL);
+    pto::comm::urma::DcciCachelines(
+        reinterpret_cast<__gm__ uint8_t *>(sqe), pto::comm::urma::kUrmaSqeSizeBytes + pto::comm::urma::kUrmaSgeSizeBytes
+    );
+    pipe_barrier(PIPE_ALL);
+    SetStatus(status, UrmaRealStatus::kProbeDcciDone, static_cast<int32_t>(head), static_cast<int32_t>(tail));
     return;
     auto tget_event = pto::comm::TGET_ASYNC<pto::comm::DmaEngine::URMA>(local_tget_g, remote_send_g, tget_session);
     SetStatus(status, UrmaRealStatus::kTgetPostDone, static_cast<int32_t>(tget_event.handle & 0xFFFFFFFFu), peer);
