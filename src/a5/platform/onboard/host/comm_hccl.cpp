@@ -280,9 +280,7 @@ private:
         CqContext cq{};
         RegedBufferEntity remote_buf{};
         RegedBufferEntity local_buf{};
-        if (!pto::comm::urma::UrmaChannelHelper::TryReadChannelEntity(
-                entity_handle, peer, host_entity, sq, cq, remote_buf, local_buf
-            )) {
+        if (!TryReadChannelEntity(entity_handle, peer, host_entity, sq, cq, remote_buf, local_buf)) {
             LOG_WARN(
                 "[comm rank %u] URMA: cannot read ChannelEntity for peer=%u handle=0x%llx entity=0x%llx", rank_id_,
                 peer, static_cast<unsigned long long>(handle), static_cast<unsigned long long>(entity_handle)
@@ -313,6 +311,73 @@ private:
             &eid_table[peer * pto::comm::urma::kUrmaEidBytes], pto::comm::urma::kUrmaEidBytes,
             sq.contextInfo.ubJfs.remoteEID, pto::comm::urma::kUrmaEidBytes
         );
+        return true;
+    }
+
+    bool TryReadChannelEntity(
+        ChannelHandle entity_handle, uint32_t peer, ChannelEntity &host_entity, SqContext &sq, CqContext &cq,
+        RegedBufferEntity &remote_buf, RegedBufferEntity &local_buf
+    ) {
+        void *dev_entity = reinterpret_cast<void *>(static_cast<uintptr_t>(entity_handle));
+        LOG_WARN("[comm rank %u] URMA: read ChannelEntity begin peer=%u entity=%p", rank_id_, peer, dev_entity);
+        aclError err = aclrtMemcpy(
+            &host_entity, sizeof(ChannelEntity), dev_entity, sizeof(ChannelEntity), ACL_MEMCPY_DEVICE_TO_HOST
+        );
+        if (err != ACL_SUCCESS) {
+            LOG_WARN("[comm rank %u] URMA: aclrtMemcpy(ChannelEntity) peer=%u err=%d", rank_id_, peer, err);
+            return false;
+        }
+        if (!pto::comm::urma::UrmaChannelHelper::IsValidChannelEntityHeader(host_entity)) {
+            LOG_WARN(
+                "[comm rank %u] URMA: invalid ChannelEntity peer=%u magic=0x%x engine=%d", rank_id_, peer,
+                host_entity.abiHeader.magicWord, static_cast<int>(host_entity.engine)
+            );
+            return false;
+        }
+        LOG_WARN(
+            "[comm rank %u] URMA: entity peer=%u sq=%p/%u cq=%p/%u remoteBuf=%p/%u localBuf=%p/%u", rank_id_, peer,
+            static_cast<void *>(host_entity.sqContextAddr), host_entity.sqNum,
+            static_cast<void *>(host_entity.cqContextAddr), host_entity.cqNum,
+            static_cast<void *>(host_entity.remoteBufferAddr), host_entity.remoteBufferNum,
+            static_cast<void *>(host_entity.localBufferAddr), host_entity.localBufferNum
+        );
+
+        if (host_entity.sqContextAddr != nullptr && host_entity.sqNum > 0 &&
+            !CopyDeviceStruct(host_entity.sqContextAddr, &sq, sizeof(SqContext), peer, "SqContext")) {
+            return false;
+        }
+        if (host_entity.cqContextAddr != nullptr && host_entity.cqNum > 0 &&
+            !CopyDeviceStruct(host_entity.cqContextAddr, &cq, sizeof(CqContext), peer, "CqContext")) {
+            return false;
+        }
+        if (host_entity.remoteBufferAddr != nullptr && host_entity.remoteBufferNum > 0 &&
+            !CopyDeviceStruct(
+                host_entity.remoteBufferAddr, &remote_buf, sizeof(RegedBufferEntity), peer, "RemoteBuffer"
+            )) {
+            return false;
+        }
+        if (host_entity.localBufferAddr != nullptr && host_entity.localBufferNum > 0 &&
+            !CopyDeviceStruct(
+                host_entity.localBufferAddr, &local_buf, sizeof(RegedBufferEntity), peer, "LocalBuffer"
+            )) {
+            return false;
+        }
+        return true;
+    }
+
+    bool CopyDeviceStruct(const void *src, void *dst, size_t size, uint32_t peer, const char *name) {
+        const uintptr_t addr = reinterpret_cast<uintptr_t>(src);
+        if (!IsLikelyA5DeviceVa(static_cast<ChannelHandle>(addr))) {
+            LOG_WARN(
+                "[comm rank %u] URMA: %s peer=%u has non-device ptr=%p; refusing host memcpy", rank_id_, name, peer, src
+            );
+            return false;
+        }
+        aclError err = aclrtMemcpy(dst, size, src, size, ACL_MEMCPY_DEVICE_TO_HOST);
+        if (err != ACL_SUCCESS) {
+            LOG_WARN("[comm rank %u] URMA: aclrtMemcpy(%s) peer=%u err=%d", rank_id_, name, peer, err);
+            return false;
+        }
         return true;
     }
 
