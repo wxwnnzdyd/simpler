@@ -226,9 +226,17 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     uint64_t remote_addr_value = reinterpret_cast<uint64_t>(remote_send);
     __gm__ uint8_t *sqe_bytes = reinterpret_cast<__gm__ uint8_t *>(wqe_addr);
     __gm__ uint32_t *sqe_dw = reinterpret_cast<__gm__ uint32_t *>(sqe_bytes);
-    uint32_t sqe_dw0 = static_cast<uint32_t>(head % wq_ctx->depth) | (0x20U << 16) |
-                       ((remote_mem->tokenValueValid ? 1U : 0U) << 28) | ((remote_mem->rmtJettyType & 0x3U) << 29) |
-                       (((head & wq_ctx->depth) == 0U ? 1U : 0U) << 31);
+    uint32_t sqe_dw0_without_owner = static_cast<uint32_t>(head % wq_ctx->depth) | (0x20U << 16) |
+                                     ((remote_mem->tokenValueValid ? 1U : 0U) << 28) |
+                                     ((remote_mem->rmtJettyType & 0x3U) << 29);
+    sqe_dw[0] = sqe_dw0_without_owner;
+    SetStatus(
+        status, UrmaRealStatus::kProbeRawSqeHeaderDone, static_cast<int32_t>(sqe_dw0_without_owner),
+        static_cast<int32_t>(head)
+    );
+    return;
+    uint32_t sqe_owner = ((head & wq_ctx->depth) == 0U ? 1U : 0U);
+    uint32_t sqe_dw0 = sqe_dw0_without_owner | (sqe_owner << 31);
     uint32_t sqe_dw1 = (static_cast<uint32_t>(remote_mem->targetHint) & 0xFFU) |
                        (static_cast<uint32_t>(pto::comm::urma::UrmaOpcode::READ) << 8);
     uint32_t sqe_dw2 = (remote_mem->tpn & 0xFFFFFFU) | (1U << 24);
@@ -237,10 +245,6 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     sqe_dw[1] = sqe_dw1;
     sqe_dw[2] = sqe_dw2;
     sqe_dw[3] = sqe_dw3;
-    SetStatus(
-        status, UrmaRealStatus::kProbeRawSqeHeaderDone, static_cast<int32_t>(sqe_dw0), static_cast<int32_t>(sqe_dw1)
-    );
-    return;
     sqe_dw[4] = static_cast<uint32_t>(eid0 & 0xFFFFFFFFU);
     sqe_dw[5] = static_cast<uint32_t>((eid0 >> 32) & 0xFFFFFFFFU);
     sqe_dw[6] = static_cast<uint32_t>(eid1 & 0xFFFFFFFFU);
