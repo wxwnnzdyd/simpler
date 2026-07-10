@@ -47,6 +47,10 @@ enum class UrmaRealStatus : int32_t {
     kProbeWqCtx = 33,
     kProbeQueueIndexBegin = 34,
     kProbeQueueIndexDone = 35,
+    kProbeWqeWriteBegin = 36,
+    kProbeWqeWriteDone = 37,
+    kProbeQueueIndexStoreBegin = 38,
+    kProbeQueueIndexStoreDone = 39,
     kTputPostBegin = 40,
     kTputPostDone = 41,
     kTgetMismatch = 100,
@@ -179,6 +183,28 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     uint32_t head = *reinterpret_cast<__gm__ uint32_t *>(head_addr);
     uint32_t tail = *reinterpret_cast<__gm__ uint32_t *>(tail_addr);
     SetStatus(status, UrmaRealStatus::kProbeQueueIndexDone, static_cast<int32_t>(head), static_cast<int32_t>(tail));
+    uint32_t wqe_size = 1U << wq_ctx->wqeShiftSize;
+    uint64_t wqe_addr = wq_ctx->bufAddr + static_cast<uint64_t>(wqe_size) * (head % wq_ctx->depth);
+    SetStatus(
+        status, UrmaRealStatus::kProbeWqeWriteBegin, static_cast<int32_t>(wqe_addr & 0xFFFFFFFFu),
+        static_cast<int32_t>(wqe_size)
+    );
+    __gm__ uint64_t *wqe_word0 = reinterpret_cast<__gm__ uint64_t *>(wqe_addr);
+    uint64_t old_wqe_word0 = *wqe_word0;
+    *wqe_word0 = old_wqe_word0 ^ 1ULL;
+    *wqe_word0 = old_wqe_word0;
+    SetStatus(
+        status, UrmaRealStatus::kProbeWqeWriteDone, static_cast<int32_t>(old_wqe_word0 & 0xFFFFFFFFu),
+        static_cast<int32_t>(head)
+    );
+    SetStatus(
+        status, UrmaRealStatus::kProbeQueueIndexStoreBegin, static_cast<int32_t>(head), static_cast<int32_t>(tail)
+    );
+    *reinterpret_cast<__gm__ uint32_t *>(head_addr) = head;
+    *reinterpret_cast<__gm__ uint32_t *>(tail_addr) = tail;
+    SetStatus(
+        status, UrmaRealStatus::kProbeQueueIndexStoreDone, static_cast<int32_t>(head), static_cast<int32_t>(tail)
+    );
     return;
     auto tget_event = pto::comm::TGET_ASYNC<pto::comm::DmaEngine::URMA>(local_tget_g, remote_send_g, tget_session);
     SetStatus(status, UrmaRealStatus::kTgetPostDone, static_cast<int32_t>(tget_event.handle & 0xFFFFFFFFu), peer);
