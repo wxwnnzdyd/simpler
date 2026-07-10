@@ -306,6 +306,21 @@ private:
         FillWqCtx(wq_list[peer], sq);
         FillCqCtx(cq_list[peer], cq);
         FillMemInfo(mem_list[peer], sq, sym_remote_buf, sym_rma_addr, sym_rma_size);
+        LOG_WARN(
+            "[comm rank %u] URMA: peer=%u wq{wqn=%u buf=0x%llx head=0x%llx tail=0x%llx db=0x%llx "
+            "wqeShift=%u depth=%u tp=%u} cq{cqn=%u buf=0x%llx head=0x%llx tail=0x%llx db=0x%llx "
+            "cqeShift=%u depth=%u} mem{addr=0x%llx len=%u tid=0x%x token=0x%x localToken=0x%x}",
+            rank_id_, peer, wq_list[peer].wqn, static_cast<unsigned long long>(wq_list[peer].bufAddr),
+            static_cast<unsigned long long>(wq_list[peer].headAddr),
+            static_cast<unsigned long long>(wq_list[peer].tailAddr),
+            static_cast<unsigned long long>(wq_list[peer].dbAddr), wq_list[peer].wqeShiftSize, wq_list[peer].depth,
+            mem_list[peer].tpn, cq_list[peer].cqn, static_cast<unsigned long long>(cq_list[peer].bufAddr),
+            static_cast<unsigned long long>(cq_list[peer].headAddr),
+            static_cast<unsigned long long>(cq_list[peer].tailAddr),
+            static_cast<unsigned long long>(cq_list[peer].dbAddr), cq_list[peer].cqeShiftSize, cq_list[peer].depth,
+            static_cast<unsigned long long>(mem_list[peer].addr), mem_list[peer].len, mem_list[peer].tid,
+            mem_list[peer].rmtTokenValue, local_token_id
+        );
 
         (void)memcpy_s(
             &eid_table[peer * pto::comm::urma::kUrmaEidBytes], pto::comm::urma::kUrmaEidBytes,
@@ -363,6 +378,7 @@ private:
             )) {
             return false;
         }
+        NormalizeChannelSubStructAddresses(entity_handle, sq, cq, remote_buf, local_buf);
         return true;
     }
 
@@ -383,6 +399,36 @@ private:
             return const_cast<void *>(ptr);
         }
         return reinterpret_cast<void *>(entity_base + addr);
+    }
+
+    void NormalizeChannelSubStructAddresses(
+        ChannelHandle entity_handle, SqContext &sq, CqContext &cq, RegedBufferEntity &remote_buf,
+        RegedBufferEntity &local_buf
+    ) {
+        const uintptr_t base = static_cast<uintptr_t>(entity_handle);
+        sq.contextInfo.ubJfs.sqVa = NormalizeDeviceAddress(base, sq.contextInfo.ubJfs.sqVa);
+        sq.contextInfo.ubJfs.headAddr = NormalizeDeviceAddress(base, sq.contextInfo.ubJfs.headAddr);
+        sq.contextInfo.ubJfs.tailAddr = NormalizeDeviceAddress(base, sq.contextInfo.ubJfs.tailAddr);
+        sq.contextInfo.ubJfs.dbVa = NormalizeDeviceAddress(base, sq.contextInfo.ubJfs.dbVa);
+
+        cq.contextInfo.ubJfc.scqVa = NormalizeDeviceAddress(base, cq.contextInfo.ubJfc.scqVa);
+        cq.contextInfo.ubJfc.headAddr = NormalizeDeviceAddress(base, cq.contextInfo.ubJfc.headAddr);
+        cq.contextInfo.ubJfc.tailAddr = NormalizeDeviceAddress(base, cq.contextInfo.ubJfc.tailAddr);
+        cq.contextInfo.ubJfc.dbVa = NormalizeDeviceAddress(base, cq.contextInfo.ubJfc.dbVa);
+
+        if (remote_buf.type == REGED_BUFFER_RMA) {
+            remote_buf.bufferInfo.rma.addr = NormalizeDeviceAddress(base, remote_buf.bufferInfo.rma.addr);
+        }
+        if (local_buf.type == REGED_BUFFER_RMA) {
+            local_buf.bufferInfo.rma.addr = NormalizeDeviceAddress(base, local_buf.bufferInfo.rma.addr);
+        }
+    }
+
+    uint64_t NormalizeDeviceAddress(uintptr_t entity_base, uint64_t addr) {
+        if (addr == 0 || IsLikelyA5DeviceVa(static_cast<ChannelHandle>(addr))) {
+            return addr;
+        }
+        return entity_base + addr;
     }
 
     bool CopyDeviceStruct(const void *src, void *dst, size_t size, uint32_t peer, const char *name) {
