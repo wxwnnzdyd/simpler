@@ -111,6 +111,7 @@ public:
 private:
     using BuildChannelEntityToDeviceFn = HcclResult (*)(void *, void **);
     using ReleaseDeviceChannelEntityFn = HcclResult (*)(void *);
+    using GetUserRemoteMemFn = HcclResult (*)(void *, CommMem **, char ***, uint32_t *);
 
     bool LoadDynamicSymbols() {
         if (build_channel_entity_to_device_ != nullptr) return true;
@@ -131,10 +132,20 @@ private:
         release_device_channel_entity_ = reinterpret_cast<ReleaseDeviceChannelEntityFn>(
             dlsym(hcomm_handle_, "_ZN5hcomm14AivUrmaChannel26ReleaseDeviceChannelEntityEv")
         );
+        get_user_remote_mem_ = reinterpret_cast<GetUserRemoteMemFn>(
+            dlsym(hcomm_handle_, "_ZN5hcomm14AivUrmaChannel16GetUserRemoteMemEPP7CommMemPPPcPj")
+        );
         if (build_channel_entity_to_device_ == nullptr) {
             LOG_WARN(
                 "[comm rank %u] URMA: libhcomm lacks AivUrmaChannel::BuildChannelEntityToDevice; "
                 "opaque ChannelHandle cannot be converted",
+                rank_id_
+            );
+        }
+        if (get_user_remote_mem_ == nullptr) {
+            LOG_WARN(
+                "[comm rank %u] URMA: libhcomm lacks AivUrmaChannel::GetUserRemoteMem; "
+                "opaque ChannelHandle remote mem cannot be queried safely",
                 rank_id_
             );
         }
@@ -144,6 +155,7 @@ private:
     void CloseDynamicLibs() {
         build_channel_entity_to_device_ = nullptr;
         release_device_channel_entity_ = nullptr;
+        get_user_remote_mem_ = nullptr;
         if (hcomm_handle_ != nullptr) {
             dlclose(hcomm_handle_);
             hcomm_handle_ = nullptr;
@@ -281,10 +293,7 @@ private:
         RegedBufferEntity sym_remote_buf{};
         uint64_t sym_rma_addr = 0;
         uint32_t sym_rma_size = 0;
-        if (!pto::comm::urma::UrmaChannelHelper::SelectSymmetricRemoteBuffer(
-                comm_, kUrmaSymMemTag, symmetric_size_, handle, peer, host_entity, sym_remote_buf, sym_rma_addr,
-                sym_rma_size
-            )) {
+        if (!SelectSymmetricRemoteBuffer(handle, peer, host_entity, sym_remote_buf, sym_rma_addr, sym_rma_size)) {
             return false;
         }
 
@@ -305,6 +314,79 @@ private:
             sq.contextInfo.ubJfs.remoteEID, pto::comm::urma::kUrmaEidBytes
         );
         return true;
+    }
+
+    bool SelectSymmetricRemoteBuffer(
+        ChannelHandle handle, uint32_t peer, const ChannelEntity &entity, RegedBufferEntity &selected,
+        uint64_t &rma_addr, uint32_t &rma_size
+    ) {
+        void *sym_addr = nullptr;
+        uint64_t sym_size = 0;
+        if (!GetRemoteMemByTag(handle, peer, &sym_addr, &sym_size)) {
+            return false;
+        }
+        rma_addr = reinterpret_cast<uint64_t>(sym_addr);
+        rma_size = static_cast<uint32_t>(sym_size);
+
+        if (entity.remoteBufferAddr == nullptr || entity.remoteBufferNum == 0) {
+            LOG_WARN("[comm rank %u] URMA: peer=%u ChannelEntity has no remote buffers", rank_id_, peer);
+            return false;
+        }
+
+        for (uint32_t i = 0; i < entity.remoteBufferNum; ++i) {
+            RegedBufferEntity buf{};
+            if (!pto::comm::urma::UrmaChannelHelper::ReadRegedBufferEntityAt(
+                    entity.remoteBufferAddr, entity.remoteBufferNum, i, peer, buf
+                )) {
+                continue;
+            }
+            if (buf.type != REGED_BUFFER_RMA) continue;
+            if (buf.bufferInfo.rma.addr != rma_addr || buf.bufferInfo.rma.size != symmetric_size_) continue;
+
+            selected = buf;
+            LOG_INFO_V0(
+                "[comm rank %u] URMA: selected remote buffer peer=%u addr=0x%llx size=%llu token=0x%x", rank_id_, peer,
+                static_cast<unsigned long long>(rma_addr), static_cast<unsigned long long>(sym_size),
+                selected.bufferInfo.rma.protectionInfo.memInfo.ub.tokenId
+            );
+            return true;
+        }
+
+        LOG_WARN(
+            "[comm rank %u] URMA: peer=%u no RegedBufferEntity matches %s addr=0x%llx size=%llu", rank_id_, peer,
+            kUrmaSymMemTag, static_cast<unsigned long long>(rma_addr), static_cast<unsigned long long>(sym_size)
+        );
+        return false;
+    }
+
+    bool GetRemoteMemByTag(ChannelHandle handle, uint32_t peer, void **out_addr, uint64_t *out_size) {
+        if (get_user_remote_mem_ == nullptr) {
+            LOG_WARN("[comm rank %u] URMA: GetUserRemoteMem symbol missing for peer=%u", rank_id_, peer);
+            return false;
+        }
+
+        CommMem *remote_mems = nullptr;
+        char **mem_tags = nullptr;
+        uint32_t mem_num = 0;
+        void *as_ptr = reinterpret_cast<void *>(static_cast<uintptr_t>(handle));
+        HcclResult rc = get_user_remote_mem_(as_ptr, &remote_mems, &mem_tags, &mem_num);
+        if (rc != HCCL_SUCCESS) {
+            LOG_WARN("[comm rank %u] URMA: GetUserRemoteMem peer=%u failed: %d", rank_id_, peer, static_cast<int>(rc));
+            return false;
+        }
+
+        for (uint32_t i = 0; i < mem_num; ++i) {
+            const char *tag = (mem_tags != nullptr && mem_tags[i] != nullptr) ? mem_tags[i] : "";
+            if (std::strcmp(tag, kUrmaSymMemTag) != 0) continue;
+            *out_addr = remote_mems[i].addr;
+            *out_size = remote_mems[i].size;
+            return true;
+        }
+
+        LOG_WARN(
+            "[comm rank %u] URMA: peer=%u tag %s not found in %u remote mems", rank_id_, peer, kUrmaSymMemTag, mem_num
+        );
+        return false;
     }
 
     ChannelHandle ResolveDeviceChannelEntity(ChannelHandle handle, uint32_t peer) {
@@ -517,6 +599,7 @@ private:
     void *hcomm_handle_{nullptr};
     BuildChannelEntityToDeviceFn build_channel_entity_to_device_{nullptr};
     ReleaseDeviceChannelEntityFn release_device_channel_entity_{nullptr};
+    GetUserRemoteMemFn get_user_remote_mem_{nullptr};
 
     bool initialized_{false};
 };
