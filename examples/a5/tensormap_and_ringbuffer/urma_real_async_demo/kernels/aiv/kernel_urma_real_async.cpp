@@ -209,6 +209,11 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     );
     __gm__ pto::comm::urma::UrmaMemInfo *remote_mem =
         reinterpret_cast<__gm__ pto::comm::urma::UrmaMemInfo *>(urma_info->memPtr) + peer;
+    SetStatus(
+        status, UrmaRealStatus::kProbeFillSqeDone, static_cast<int32_t>(remote_mem->tpn),
+        static_cast<int32_t>(remote_mem->tid)
+    );
+    return;
     __gm__ pto::comm::urma::UrmaSqeCtx *sqe = reinterpret_cast<__gm__ pto::comm::urma::UrmaSqeCtx *>(wqe_addr);
     sqe->sqeBbIdx = static_cast<uint16_t>(head % wq_ctx->depth);
     sqe->opcode = static_cast<uint32_t>(pto::comm::urma::UrmaOpcode::READ);
