@@ -55,8 +55,9 @@ enum class UrmaRealStatus : int32_t {
     kTputPostDone = 41,
     kProbeFillSqeDone = 42,
     kProbeEidReadDone = 43,
-    kProbeFullSqeDone = 44,
-    kProbeDcciDone = 45,
+    kProbeRawSqeHeaderDone = 44,
+    kProbeFullSqeDone = 45,
+    kProbeDcciDone = 46,
     kTgetMismatch = 100,
     kTputMismatch = 200,
 };
@@ -222,28 +223,34 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         status, UrmaRealStatus::kProbeEidReadDone, static_cast<int32_t>(eid0 & 0xFFFFFFFFu),
         static_cast<int32_t>(eid1 & 0xFFFFFFFFu)
     );
-    __gm__ pto::comm::urma::UrmaSqeCtx *sqe = reinterpret_cast<__gm__ pto::comm::urma::UrmaSqeCtx *>(wqe_addr);
-    sqe->sqeBbIdx = static_cast<uint16_t>(head % wq_ctx->depth);
-    sqe->opcode = static_cast<uint32_t>(pto::comm::urma::UrmaOpcode::READ);
-    sqe->flag = 0x20;
-    sqe->nf = 0;
-    sqe->tokenEn = remote_mem->tokenValueValid ? 1U : 0U;
-    sqe->rmtJettyType = remote_mem->rmtJettyType;
-    sqe->owner = (head & wq_ctx->depth) == 0U ? 1U : 0U;
-    sqe->targetHint = remote_mem->targetHint;
-    sqe->inlineMsgLen = 0;
-    sqe->tpId = remote_mem->tpn;
-    sqe->sgeNum = 1;
-    sqe->rmtJettyOrSegId = remote_mem->tid;
-    sqe->rmtTokenValue = remote_mem->rmtTokenValue;
     uint64_t remote_addr_value = reinterpret_cast<uint64_t>(remote_send);
-    sqe->rmtEidL = eid0;
-    sqe->rmtEidH = eid1;
-    sqe->rmtAddrLOrTokenId = static_cast<uint32_t>(remote_addr_value & 0xFFFFFFFFU);
-    sqe->rmtAddrHOrTokenValue = static_cast<uint32_t>((remote_addr_value >> 32) & 0xFFFFFFFFU);
-    __gm__ pto::comm::urma::UrmaSgeCtx *sge = reinterpret_cast<__gm__ pto::comm::urma::UrmaSgeCtx *>(
-        reinterpret_cast<__gm__ uint8_t *>(sqe) + pto::comm::urma::kUrmaSqeSizeBytes
+    __gm__ uint8_t *sqe_bytes = reinterpret_cast<__gm__ uint8_t *>(wqe_addr);
+    __gm__ uint32_t *sqe_dw = reinterpret_cast<__gm__ uint32_t *>(sqe_bytes);
+    uint32_t sqe_dw0 = static_cast<uint32_t>(head % wq_ctx->depth) | (0x20U << 16) |
+                       ((remote_mem->tokenValueValid ? 1U : 0U) << 28) | ((remote_mem->rmtJettyType & 0x3U) << 29) |
+                       (((head & wq_ctx->depth) == 0U ? 1U : 0U) << 31);
+    uint32_t sqe_dw1 = (static_cast<uint32_t>(remote_mem->targetHint) & 0xFFU) |
+                       (static_cast<uint32_t>(pto::comm::urma::UrmaOpcode::READ) << 8);
+    uint32_t sqe_dw2 = (remote_mem->tpn & 0xFFFFFFU) | (1U << 24);
+    uint32_t sqe_dw3 = remote_mem->tid & 0xFFFFFU;
+    sqe_dw[0] = sqe_dw0;
+    sqe_dw[1] = sqe_dw1;
+    sqe_dw[2] = sqe_dw2;
+    sqe_dw[3] = sqe_dw3;
+    SetStatus(
+        status, UrmaRealStatus::kProbeRawSqeHeaderDone, static_cast<int32_t>(sqe_dw0), static_cast<int32_t>(sqe_dw1)
     );
+    return;
+    sqe_dw[4] = static_cast<uint32_t>(eid0 & 0xFFFFFFFFU);
+    sqe_dw[5] = static_cast<uint32_t>((eid0 >> 32) & 0xFFFFFFFFU);
+    sqe_dw[6] = static_cast<uint32_t>(eid1 & 0xFFFFFFFFU);
+    sqe_dw[7] = static_cast<uint32_t>((eid1 >> 32) & 0xFFFFFFFFU);
+    sqe_dw[8] = remote_mem->rmtTokenValue;
+    sqe_dw[9] = 0;
+    sqe_dw[10] = static_cast<uint32_t>(remote_addr_value & 0xFFFFFFFFU);
+    sqe_dw[11] = static_cast<uint32_t>((remote_addr_value >> 32) & 0xFFFFFFFFU);
+    __gm__ pto::comm::urma::UrmaSgeCtx *sge =
+        reinterpret_cast<__gm__ pto::comm::urma::UrmaSgeCtx *>(sqe_bytes + pto::comm::urma::kUrmaSqeSizeBytes);
     sge->len = elem_count * 4U;
     sge->tokenId = urma_info->localTokenId;
     sge->va = reinterpret_cast<uint64_t>(tget_recv);
@@ -253,9 +260,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     );
     return;
     pipe_barrier(PIPE_ALL);
-    pto::comm::urma::DcciCachelines(
-        reinterpret_cast<__gm__ uint8_t *>(sqe), pto::comm::urma::kUrmaSqeSizeBytes + pto::comm::urma::kUrmaSgeSizeBytes
-    );
+    pto::comm::urma::DcciCachelines(sqe_bytes, pto::comm::urma::kUrmaSqeSizeBytes + pto::comm::urma::kUrmaSgeSizeBytes);
     pipe_barrier(PIPE_ALL);
     SetStatus(status, UrmaRealStatus::kProbeDcciDone, static_cast<int32_t>(head), static_cast<int32_t>(tail));
     return;
