@@ -116,9 +116,13 @@ def test_phase2_comm_hccl_initializes_and_propagates_urma_workspace() -> None:
     assert "URMA workspace disabled for non-dense rank mapping" in source
 
 
-def test_phase3_comm_hccl_handles_opaque_aiv_channel_handles() -> None:
+def test_phase3_comm_hccl_requires_device_aiv_channel_handles() -> None:
     source = (REPO_ROOT / "src/a5/platform/onboard/host/comm_hccl.cpp").read_text()
+    cmake = (REPO_ROOT / "src/a5/platform/onboard/host/CMakeLists.txt").read_text()
     assert "class A5UrmaWorkspaceManager" in source
     assert "ResolveDeviceChannelEntity" in source
-    assert "BuildChannelEntityToDevice" in source
-    assert "GetUserRemoteMem" in source
+    assert "refusing private conversion" in source
+    assert "HcclChannelGetRemoteMems" in source
+    assert "BuildChannelEntityToDevice" not in source
+    assert "GetUserRemoteMem" not in source
+    assert "set(HCCL_LINK_TARGETS ${HCCL_LIB} ${HCOMM_LIB})" in cmake

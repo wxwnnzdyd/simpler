@@ -141,9 +141,17 @@ target_include_directories(host_runtime
         ${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/include/driver
 )
 
-# CANN 9.x exposes the working non-V2 HCCL entry points through libhcomm.
-# Link it explicitly so comm_hccl.cpp can follow the same initialization path
-# as the pto-isa communication tests.
+# Match pto-isa A5 communication tests: link libhccl before libhcomm.
+# The libhccl HcclChannelAcquire path converts AIV URMA channel handles to
+# device ChannelEntity pointers; using libhcomm alone returns opaque host
+# AivUrmaChannel handles that cannot be submitted from AIV.
+find_library(HCCL_LIB
+    NAMES hccl
+    PATHS
+        ${ASCEND_HOME_PATH}/lib64
+        ${ASCEND_ARCH_HOME}/lib64
+    NO_DEFAULT_PATH
+)
 find_library(HCOMM_LIB
     NAMES hcomm
     PATHS
@@ -151,12 +159,12 @@ find_library(HCOMM_LIB
         ${ASCEND_ARCH_HOME}/lib64
     NO_DEFAULT_PATH
 )
-if(HCOMM_LIB)
-    set(HCCL_LINK_TARGETS ${HCOMM_LIB})
-    message(STATUS "Using HCCL library: ${HCOMM_LIB}")
+if(HCCL_LIB AND HCOMM_LIB)
+    set(HCCL_LINK_TARGETS ${HCCL_LIB} ${HCOMM_LIB})
+    message(STATUS "Using HCCL libraries: ${HCCL_LIB};${HCOMM_LIB}")
 else()
     message(FATAL_ERROR
-        "libhcomm not found under ${ASCEND_HOME_PATH}/lib64 or ${ASCEND_ARCH_HOME}/lib64")
+        "libhccl/libhcomm not found under ${ASCEND_HOME_PATH}/lib64 or ${ASCEND_ARCH_HOME}/lib64")
 endif()
 
 # Link against CANN runtime libraries

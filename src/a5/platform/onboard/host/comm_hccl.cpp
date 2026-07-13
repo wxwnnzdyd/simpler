@@ -31,7 +31,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -94,21 +93,15 @@ public:
     }
 
     void Finalize() {
-        ReleaseDeviceChannelEntities();
         FreeDeviceAddr(urma_info_device_);
         FreeDeviceAddr(eid_device_);
         channel_handles_.clear();
-        CloseDynamicLibs();
         initialized_ = false;
     }
 
     void *GetWorkspaceAddr() const { return urma_info_device_; }
 
 private:
-    using BuildChannelEntityToDeviceFn = HcclResult (*)(void *, void **);
-    using ReleaseDeviceChannelEntityFn = HcclResult (*)(void *);
-    using GetUserRemoteMemFn = HcclResult (*)(void *, CommMem **, char ***, uint32_t *);
-
     struct RoceSqContextInfo {
         uint64_t sqVa;
         uint64_t headAddr;
@@ -131,55 +124,6 @@ private:
         uint32_t cqDepth;
         int8_t dbMode;
     };
-
-    bool LoadDynamicSymbols() {
-        if (build_channel_entity_to_device_ != nullptr) return true;
-
-        dlerror();
-        hcomm_handle_ = dlopen("libhcomm.so", RTLD_NOW | RTLD_NOLOAD);
-        if (hcomm_handle_ == nullptr) {
-            hcomm_handle_ = dlopen("libhcomm.so", RTLD_NOW);
-        }
-        if (hcomm_handle_ == nullptr) {
-            LOG_WARN("[comm rank %u] URMA: dlopen libhcomm.so failed: %s", rank_id_, dlerror());
-            return false;
-        }
-
-        build_channel_entity_to_device_ = reinterpret_cast<BuildChannelEntityToDeviceFn>(
-            dlsym(hcomm_handle_, "_ZN5hcomm14AivUrmaChannel26BuildChannelEntityToDeviceEPPv")
-        );
-        release_device_channel_entity_ = reinterpret_cast<ReleaseDeviceChannelEntityFn>(
-            dlsym(hcomm_handle_, "_ZN5hcomm14AivUrmaChannel26ReleaseDeviceChannelEntityEv")
-        );
-        get_user_remote_mem_ = reinterpret_cast<GetUserRemoteMemFn>(
-            dlsym(hcomm_handle_, "_ZN5hcomm14AivUrmaChannel16GetUserRemoteMemEPP7CommMemPPPcPj")
-        );
-        if (build_channel_entity_to_device_ == nullptr) {
-            LOG_WARN(
-                "[comm rank %u] URMA: libhcomm lacks AivUrmaChannel::BuildChannelEntityToDevice; "
-                "opaque ChannelHandle cannot be converted",
-                rank_id_
-            );
-        }
-        if (get_user_remote_mem_ == nullptr) {
-            LOG_WARN(
-                "[comm rank %u] URMA: libhcomm lacks AivUrmaChannel::GetUserRemoteMem; "
-                "opaque ChannelHandle remote mem cannot be queried safely",
-                rank_id_
-            );
-        }
-        return true;
-    }
-
-    void CloseDynamicLibs() {
-        build_channel_entity_to_device_ = nullptr;
-        release_device_channel_entity_ = nullptr;
-        get_user_remote_mem_ = nullptr;
-        if (hcomm_handle_ != nullptr) {
-            dlclose(hcomm_handle_);
-            hcomm_handle_ = nullptr;
-        }
-    }
 
     bool RegisterMemory() {
         CommMem mem{};
@@ -621,24 +565,6 @@ private:
         return 0;
     }
 
-    void ReleaseDeviceChannelEntities() {
-        if (release_device_channel_entity_ == nullptr) {
-            converted_channel_handles_.clear();
-            return;
-        }
-        for (ChannelHandle handle : converted_channel_handles_) {
-            void *as_ptr = reinterpret_cast<void *>(static_cast<uintptr_t>(handle));
-            HcclResult rc = release_device_channel_entity_(as_ptr);
-            if (rc != HCCL_SUCCESS) {
-                LOG_WARN(
-                    "[comm rank %u] URMA: ReleaseDeviceChannelEntity(handle=0x%llx) failed: %d", rank_id_,
-                    static_cast<unsigned long long>(handle), static_cast<int>(rc)
-                );
-            }
-        }
-        converted_channel_handles_.clear();
-    }
-
     bool FillWqCtx(pto::comm::urma::UrmaWQCtx &wq, const SqContext &sq, uint32_t peer) {
         if (sq.type == kSqContextTypeRoce) {
             const RoceSqContextInfo &roce_sq = RoceSq(sq);
@@ -944,15 +870,8 @@ private:
     HcclMemHandle mem_handle_{nullptr};
 
     std::vector<ChannelHandle> channel_handles_;
-    std::vector<ChannelHandle> converted_channel_handles_;
-
     void *urma_info_device_{nullptr};
     void *eid_device_{nullptr};
-
-    void *hcomm_handle_{nullptr};
-    BuildChannelEntityToDeviceFn build_channel_entity_to_device_{nullptr};
-    ReleaseDeviceChannelEntityFn release_device_channel_entity_{nullptr};
-    GetUserRemoteMemFn get_user_remote_mem_{nullptr};
 
     bool initialized_{false};
 };
