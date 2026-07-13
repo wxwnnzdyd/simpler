@@ -51,10 +51,17 @@ PROBE_STAGES = {
     "full": 0,
     "workspace": 1,
     "build_session": 2,
-    "tget_post": 3,
-    "tget_test_once": 4,
-    "tput_post": 5,
-    "tput_test_once": 6,
+    "workspace_info": 3,
+    "wq_ctx": 4,
+    "queue_index_read": 5,
+    "wqe_read": 6,
+    "wqe_write_restore": 7,
+    "remote_mem": 8,
+    "eid_read": 9,
+    "tget_post": 10,
+    "tget_test_once": 11,
+    "tput_post": 12,
+    "tput_test_once": 13,
 }
 
 

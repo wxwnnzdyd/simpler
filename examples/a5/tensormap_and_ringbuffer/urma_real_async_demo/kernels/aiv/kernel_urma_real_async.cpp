@@ -54,10 +54,17 @@ enum class ProbeStage : uint32_t {
     kFull = 0,
     kWorkspace = 1,
     kBuildSession = 2,
-    kTgetPost = 3,
-    kTgetTestOnce = 4,
-    kTputPost = 5,
-    kTputTestOnce = 6,
+    kWorkspaceInfo = 3,
+    kWqCtx = 4,
+    kQueueIndexRead = 5,
+    kWqeRead = 6,
+    kWqeWriteRestore = 7,
+    kRemoteMem = 8,
+    kEidRead = 9,
+    kTgetPost = 10,
+    kTgetTestOnce = 11,
+    kTputPost = 12,
+    kTputTestOnce = 13,
 };
 
 constexpr uint32_t kMaxUrmaPollIters = 10000000;
@@ -185,6 +192,76 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(probe_stage), peer);
         return;
     }
+
+    __gm__ pto::comm::urma::UrmaInfo *urma_info = reinterpret_cast<__gm__ pto::comm::urma::UrmaInfo *>(workspace);
+    uint32_t qp_num = urma_info->qpNum;
+    uint64_t sq_ptr = urma_info->sqPtr;
+    if (probe_stage == static_cast<uint32_t>(ProbeStage::kWorkspaceInfo)) {
+        SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(qp_num), peer);
+        status[3] = static_cast<int32_t>(sq_ptr & 0xFFFFFFFFu);
+        return;
+    }
+
+    __gm__ pto::comm::urma::UrmaWQCtx *wq_ctx = reinterpret_cast<__gm__ pto::comm::urma::UrmaWQCtx *>(
+        sq_ptr + (static_cast<uint32_t>(peer) * qp_num) * sizeof(pto::comm::urma::UrmaWQCtx)
+    );
+    uint64_t head_addr = wq_ctx->headAddr;
+    uint64_t tail_addr = wq_ctx->tailAddr;
+    if (probe_stage == static_cast<uint32_t>(ProbeStage::kWqCtx)) {
+        SetStatus(
+            status, UrmaRealStatus::kOk, static_cast<int32_t>(wq_ctx->depth), static_cast<int32_t>(wq_ctx->wqeShiftSize)
+        );
+        status[3] = static_cast<int32_t>(head_addr & 0xFFFFFFFFu);
+        status[4] = static_cast<int32_t>(tail_addr & 0xFFFFFFFFu);
+        return;
+    }
+
+    uint32_t head = *reinterpret_cast<__gm__ uint32_t *>(head_addr);
+    uint32_t tail = *reinterpret_cast<__gm__ uint32_t *>(tail_addr);
+    if (probe_stage == static_cast<uint32_t>(ProbeStage::kQueueIndexRead)) {
+        SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(head), static_cast<int32_t>(tail));
+        return;
+    }
+
+    uint32_t wqe_size = 1U << wq_ctx->wqeShiftSize;
+    uint64_t wqe_addr = wq_ctx->bufAddr + static_cast<uint64_t>(wqe_size) * (head % wq_ctx->depth);
+    __gm__ uint64_t *wqe_word0 = reinterpret_cast<__gm__ uint64_t *>(wqe_addr);
+    uint64_t old_wqe_word0 = *wqe_word0;
+    if (probe_stage == static_cast<uint32_t>(ProbeStage::kWqeRead)) {
+        SetStatus(
+            status, UrmaRealStatus::kOk, static_cast<int32_t>(old_wqe_word0 & 0xFFFFFFFFu), static_cast<int32_t>(head)
+        );
+        status[3] = static_cast<int32_t>(wqe_addr & 0xFFFFFFFFu);
+        status[4] = static_cast<int32_t>(wqe_size);
+        return;
+    }
+    if (probe_stage == static_cast<uint32_t>(ProbeStage::kWqeWriteRestore)) {
+        *wqe_word0 = old_wqe_word0 ^ 1ULL;
+        *wqe_word0 = old_wqe_word0;
+        SetStatus(
+            status, UrmaRealStatus::kOk, static_cast<int32_t>(old_wqe_word0 & 0xFFFFFFFFu), static_cast<int32_t>(head)
+        );
+        return;
+    }
+
+    __gm__ pto::comm::urma::UrmaMemInfo *remote_mem =
+        reinterpret_cast<__gm__ pto::comm::urma::UrmaMemInfo *>(urma_info->memPtr) + peer;
+    if (probe_stage == static_cast<uint32_t>(ProbeStage::kRemoteMem)) {
+        SetStatus(
+            status, UrmaRealStatus::kOk, static_cast<int32_t>(remote_mem->tpn), static_cast<int32_t>(remote_mem->tid)
+        );
+        status[3] = static_cast<int32_t>(remote_mem->rmtTokenValue);
+        return;
+    }
+    if (probe_stage == static_cast<uint32_t>(ProbeStage::kEidRead)) {
+        __gm__ uint64_t *remote_eid_probe = reinterpret_cast<__gm__ uint64_t *>(remote_mem->eidAddr);
+        uint64_t eid0 = remote_eid_probe[0];
+        SetStatus(
+            status, UrmaRealStatus::kOk, static_cast<int32_t>(eid0 & 0xFFFFFFFFu), static_cast<int32_t>(eid0 >> 32)
+        );
+        return;
+    }
+
     if (probe_stage == static_cast<uint32_t>(ProbeStage::kTputPost) ||
         probe_stage == static_cast<uint32_t>(ProbeStage::kTputTestOnce)) {
         pto::comm::AsyncSession tput_probe_session;

@@ -168,6 +168,27 @@ PYTHONPATH=$PWD:$PWD/python python \
   -p a5 -d 0-1 --probe-stage build_session
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
+  -p a5 -d 0-1 --probe-stage workspace_info
+PYTHONPATH=$PWD:$PWD/python python \
+  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
+  -p a5 -d 0-1 --probe-stage wq_ctx
+PYTHONPATH=$PWD:$PWD/python python \
+  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
+  -p a5 -d 0-1 --probe-stage queue_index_read
+PYTHONPATH=$PWD:$PWD/python python \
+  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
+  -p a5 -d 0-1 --probe-stage wqe_read
+PYTHONPATH=$PWD:$PWD/python python \
+  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
+  -p a5 -d 0-1 --probe-stage wqe_write_restore
+PYTHONPATH=$PWD:$PWD/python python \
+  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
+  -p a5 -d 0-1 --probe-stage remote_mem
+PYTHONPATH=$PWD:$PWD/python python \
+  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
+  -p a5 -d 0-1 --probe-stage eid_read
+PYTHONPATH=$PWD:$PWD/python python \
+  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
   -p a5 -d 0-1 --probe-stage tget_post
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
@@ -181,9 +202,11 @@ PYTHONPATH=$PWD:$PWD/python python \
 ```
 
 The probe stages run only the small case and return early after the named
-operation. If `tget_post` hangs, the stall is inside the real URMA WQE post
-path. If `tget_post` returns but `tget_test_once` hangs, the stall is inside
-the first CQ test/poll. The TPUT probes are independent of the TGET path.
+operation. If a pre-post probe hangs, the named address class is not safely
+reachable from AICore. If all pre-post probes return but `tget_post` hangs,
+the stall is inside PTO-ISA's real URMA WQE post path. If `tget_post` returns
+but `tget_test_once` hangs, the stall is inside the first CQ test/poll. The
+TPUT probes are independent of the TGET path.
 
 Expected result:
 

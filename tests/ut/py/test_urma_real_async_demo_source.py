@@ -45,7 +45,21 @@ def test_phase3_demo_exposes_probe_stage_cli_and_passes_it_to_kernel() -> None:
     assert "params.add_scalar(probe_stage)" in orch_source
     assert "uint32_t probe_stage = static_cast<uint32_t>(args[7])" in kernel_source
     assert "enum class ProbeStage" in kernel_source
-    for stage in ["kWorkspace", "kBuildSession", "kTgetPost", "kTgetTestOnce", "kTputPost", "kTputTestOnce"]:
+    for stage in [
+        "kWorkspace",
+        "kBuildSession",
+        "kWorkspaceInfo",
+        "kWqCtx",
+        "kQueueIndexRead",
+        "kWqeRead",
+        "kWqeWriteRestore",
+        "kRemoteMem",
+        "kEidRead",
+        "kTgetPost",
+        "kTgetTestOnce",
+        "kTputPost",
+        "kTputTestOnce",
+    ]:
         assert stage in kernel_source
 
 
