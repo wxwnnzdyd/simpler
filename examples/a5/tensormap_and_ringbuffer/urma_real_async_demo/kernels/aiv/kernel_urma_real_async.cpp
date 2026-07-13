@@ -72,10 +72,14 @@ AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_p
 }
 
 AICORE inline void SetStatus(__gm__ int32_t *status, UrmaRealStatus code, int32_t detail0 = 0, int32_t detail1 = 0) {
-    __gm__ uint32_t *words = reinterpret_cast<__gm__ uint32_t *>(status);
-    st_dev(static_cast<uint32_t>(code), words, 0);
-    st_dev(static_cast<uint32_t>(detail0), words + 1, 0);
-    st_dev(static_cast<uint32_t>(detail1), words + 2, 0);
+    status[0] = static_cast<int32_t>(code);
+    status[1] = detail0;
+    status[2] = detail1;
+#ifdef PTO_URMA_SUPPORTED
+    pipe_barrier(PIPE_ALL);
+    pto::comm::urma::DcciCachelines(reinterpret_cast<__gm__ uint8_t *>(status), 32);
+    pipe_barrier(PIPE_ALL);
+#endif
 }
 
 template <typename Event, typename Session>
