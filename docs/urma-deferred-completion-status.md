@@ -20,7 +20,9 @@ Scope note:
 ## Phase 2: Real A5 Build And Workspace
 
 Status: code complete; local build validation passed; hardware smoke blocked by
-the current A5 account environment.
+the current A5 account environment. Source-level regression coverage now guards
+the workspace wiring and the A5 hardware smoke assertions, but this is still not
+full hardware acceptance.
 
 Validated:
 
@@ -80,10 +82,20 @@ Expected result:
 1 passed
 ```
 
+Local non-A5 guard:
+
+```bash
+pytest tests/ut/py/test_urma_real_async_demo_source.py -q
+```
+
+This checks that the A5 platform comm smoke asserts the Phase 2 acceptance
+points and that `comm_hccl.cpp` still initializes and propagates the URMA
+workspace through base, dense-derived, and dynamic-domain contexts.
+
 ## Phase 3: Standalone Real URMA Correctness
 
-Status: demo code added; local A5 compile validation passed; real hardware run
-still pending.
+Status: demo code added; probe-only early returns removed; local source guard
+passed; real hardware run still pending.
 
 Goal:
 
@@ -116,6 +128,9 @@ Validated:
 - Pytest collection includes the demo for `--platform a5`.
 - Pytest collection deselects the demo for `--platform a5sim`, so sim batches do
   not accidentally run a real-URMA-only test.
+- Local source regression confirms the kernel no longer bypasses rank 1, no
+  longer returns from probe code before the real URMA submit, and contains both
+  direct `tget_event.Wait(tget_session)` and `tput_event.Wait(tput_session)`.
 
 Not yet validated:
 
