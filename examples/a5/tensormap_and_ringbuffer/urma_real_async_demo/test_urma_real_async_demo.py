@@ -47,6 +47,7 @@ DTYPE_NBYTES = 4
 SIGNAL_NBYTES = 16 * 4
 STATUS_WORDS = 8
 CASES = (16, 4096)
+K_UNSAFE_WQE_ACCESS = 60  # mirrors UrmaRealStatus::kUnsafeWqeAccess
 PROBE_STAGES = {
     "full": 0,
     "workspace": 1,
@@ -68,6 +69,18 @@ PROBE_STAGES = {
     "wqe_first_st_dev": 17,
     "wqe_mte_store": 18,
 }
+SAFE_PROBE_STAGES = (
+    "workspace",
+    "build_session",
+    "remote_mem",
+    "eid_read",
+    "wqe_addr",
+)
+UNSAFE_PROBE_STAGES = (
+    "wqe_first_store",
+    "tget_post",
+    "tput_post",
+)
 
 
 def parse_device_range(spec: str) -> list[int]:
@@ -132,12 +145,15 @@ def _zero_i32(count: int) -> torch.Tensor:
     return torch.zeros(count, dtype=torch.int32).share_memory_()
 
 
-def _print_status(elem_count: int, status: list[torch.Tensor]) -> bool:
+def _print_status(elem_count: int, status: list[torch.Tensor], *, expected_status: int = 0) -> bool:
     ok = True
     for rank, rank_status in enumerate(status):
         words = [int(x) for x in rank_status.tolist()]
-        print(f"[urma_real_async_demo] count={elem_count} rank={rank} status={words}")
-        ok = ok and words[0] == 0
+        print(
+            f"[urma_real_async_demo] count={elem_count} rank={rank} "
+            f"expected={expected_status} status={words}"
+        )
+        ok = ok and words[0] == expected_status
     return ok
 
 
@@ -148,6 +164,7 @@ def run_case(
     *,
     build: bool = False,
     probe_stage: int = PROBE_STAGES["full"],
+    expected_status: int = 0,
 ) -> bool:
     if platform != "a5":
         raise ValueError("urma_real_async_demo requires platform 'a5'; a5sim cannot validate real URMA")
@@ -251,12 +268,35 @@ def run_case(
         try:
             worker.run(orch_fn, args=None, config=CallConfig())
         except RuntimeError:
-            _print_status(elem_count, status)
+            _print_status(elem_count, status, expected_status=expected_status)
             raise
     finally:
         worker.close()
 
-    return _print_status(elem_count, status)
+    return _print_status(elem_count, status, expected_status=expected_status)
+
+
+def run_probe_suite(platform: str, device_ids: list[int], *, build: bool = False) -> bool:
+    ok = True
+    for stage_name in SAFE_PROBE_STAGES:
+        ok = run_case(
+            platform,
+            device_ids,
+            CASES[0],
+            build=build,
+            probe_stage=PROBE_STAGES[stage_name],
+            expected_status=0,
+        ) and ok
+    for stage_name in UNSAFE_PROBE_STAGES:
+        ok = run_case(
+            platform,
+            device_ids,
+            CASES[0],
+            build=build,
+            probe_stage=PROBE_STAGES[stage_name],
+            expected_status=K_UNSAFE_WQE_ACCESS,
+        ) and ok
+    return ok
 
 
 def run(
@@ -264,14 +304,26 @@ def run(
     device_ids: list[int] | None = None,
     *,
     build: bool = False,
-    probe_stage: int = PROBE_STAGES["full"],
+    probe_stage: int | None = None,
+    expected_status: int | None = None,
 ) -> int:
     if device_ids is None:
         device_ids = [0, 1]
+    if probe_stage is None:
+        return 0 if run_probe_suite(platform, device_ids, build=build) else 1
+
     ok = True
     cases = CASES if probe_stage == PROBE_STAGES["full"] else (CASES[0],)
+    expected = 0 if expected_status is None else expected_status
     for elem_count in cases:
-        ok = run_case(platform, device_ids, elem_count, build=build, probe_stage=probe_stage) and ok
+        ok = run_case(
+            platform,
+            device_ids,
+            elem_count,
+            build=build,
+            probe_stage=probe_stage,
+            expected_status=expected,
+        ) and ok
     return 0 if ok else 1
 
 
@@ -287,9 +339,17 @@ def main() -> int:
     parser.add_argument("-p", "--platform", default="a5")
     parser.add_argument("-d", "--device", default="0-1")
     parser.add_argument("--build", action="store_true")
-    parser.add_argument("--probe-stage", choices=tuple(PROBE_STAGES), default="full")
+    parser.add_argument("--probe-stage", choices=("suite", *PROBE_STAGES), default="suite")
+    parser.add_argument("--expect-status", type=int, default=None)
     args = parser.parse_args()
-    return run(args.platform, parse_device_range(args.device), build=args.build, probe_stage=PROBE_STAGES[args.probe_stage])
+    probe_stage = None if args.probe_stage == "suite" else PROBE_STAGES[args.probe_stage]
+    return run(
+        args.platform,
+        parse_device_range(args.device),
+        build=args.build,
+        probe_stage=probe_stage,
+        expected_status=args.expect_status,
+    )
 
 
 if __name__ == "__main__":

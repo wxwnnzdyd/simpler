@@ -76,6 +76,20 @@ def test_phase3_demo_exposes_probe_stage_cli_and_passes_it_to_kernel() -> None:
         assert stage in kernel_source
 
 
+def test_phase3_hardware_pytest_runs_safe_probe_suite_not_full_submit() -> None:
+    test_source = TEST_PY.read_text()
+
+    assert "SAFE_PROBE_STAGES" in test_source
+    assert "UNSAFE_PROBE_STAGES" in test_source
+    assert 'parser.add_argument("--probe-stage", choices=("suite", *PROBE_STAGES)' in test_source
+    assert "def run_probe_suite(" in test_source
+    assert "assert run(st_platform, [int(st_device_ids[0]), int(st_device_ids[1])]) == 0" in test_source
+    assert "probe_stage: int | None = None" in test_source
+    assert "if probe_stage is None:" in test_source
+    assert "run_probe_suite(platform, device_ids, build=build)" in test_source
+    assert "kUnsafeWqeAccess" in test_source
+
+
 def test_phase2_workspace_smoke_asserts_a5_acceptance_points() -> None:
     test_source = (REPO_ROOT / "tests/ut/py/test_worker/test_platform_comm.py").read_text()
     assert '@pytest.mark.platforms(["a2a3", "a5"])' in test_source

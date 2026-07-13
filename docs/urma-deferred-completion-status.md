@@ -116,6 +116,10 @@ Implemented:
 - The demo keeps the small case (`16` float32 elements) and page-spanning case
   (`4096` float32 elements) harness, but the full path now reports the unsafe
   submit status instead of attempting data movement.
+- The default CLI/pytest entry now runs a focused safe probe suite: workspace,
+  session, remote metadata, EID, and WQE address probes must return status `0`,
+  while representative unsafe WQE/submit probes must return status `60` without
+  touching the WQE ring.
 
 Validated:
 
@@ -124,6 +128,8 @@ Validated:
   9.0.1 toolchain after the local sparse PTO-ISA checkout is populated with A5
   instruction headers.
 - Pytest collection includes the demo for `--platform a5`.
+- The hardware pytest entry validates the safe probe suite instead of treating
+  real data movement as complete.
 - Pytest collection deselects the demo for `--platform a5sim`, so sim batches do
   not accidentally run a real-URMA-only test.
 - Local source regression confirms the kernel no longer bypasses rank 1 and no
@@ -163,6 +169,9 @@ PYTHONPATH=$PWD:$PWD/python python \
   -p a5 -d 0-1
 ```
 
+This default command runs the focused probe suite. It should pass only if safe
+probes return `0` and representative unsafe WQE/submit probes return `60`.
+
 Diagnostic probe commands:
 
 ```bash
@@ -189,19 +198,19 @@ PYTHONPATH=$PWD:$PWD/python python \
   -p a5 -d 0-1 --probe-stage wqe_addr
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage wqe_read
+  -p a5 -d 0-1 --probe-stage wqe_read --expect-status 60
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage wqe_first_store
+  -p a5 -d 0-1 --probe-stage wqe_first_store --expect-status 60
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage wqe_first_st_dev
+  -p a5 -d 0-1 --probe-stage wqe_first_st_dev --expect-status 60
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage wqe_mte_store
+  -p a5 -d 0-1 --probe-stage wqe_mte_store --expect-status 60
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage wqe_write_restore
+  -p a5 -d 0-1 --probe-stage wqe_write_restore --expect-status 60
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
   -p a5 -d 0-1 --probe-stage remote_mem
@@ -210,16 +219,16 @@ PYTHONPATH=$PWD:$PWD/python python \
   -p a5 -d 0-1 --probe-stage eid_read
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage tget_post
+  -p a5 -d 0-1 --probe-stage tget_post --expect-status 60
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage tget_test_once
+  -p a5 -d 0-1 --probe-stage tget_test_once --expect-status 60
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage tput_post
+  -p a5 -d 0-1 --probe-stage tput_post --expect-status 60
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage tput_test_once
+  -p a5 -d 0-1 --probe-stage tput_test_once --expect-status 60
 ```
 
 The probe stages run only the small case and return early after the named
