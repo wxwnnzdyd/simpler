@@ -26,8 +26,8 @@ def test_phase3_kernel_failfasts_known_unsafe_wqe_access() -> None:
     assert "UrmaGetAsyncViaMte" not in source
     assert "UrmaPutAsyncViaMte" not in source
     assert "copy_ubuf_to_gm_align_v2" not in source
-    assert "TGET_ASYNC<pto::comm::DmaEngine::URMA>" not in source
-    assert "TPUT_ASYNC<pto::comm::DmaEngine::URMA>" not in source
+    assert "TGET_ASYNC<pto::comm::DmaEngine::URMA>" in source
+    assert "TPUT_ASYNC<pto::comm::DmaEngine::URMA>" in source
 
 
 def test_phase3_wqe_write_probes_do_not_touch_wqe_memory() -> None:
@@ -76,17 +76,18 @@ def test_phase3_demo_exposes_probe_stage_cli_and_passes_it_to_kernel() -> None:
         assert stage in kernel_source
 
 
-def test_phase3_hardware_pytest_runs_safe_probe_suite_not_full_submit() -> None:
+def test_phase3_hardware_pytest_runs_real_full_submit_by_default() -> None:
     test_source = TEST_PY.read_text()
 
     assert "SAFE_PROBE_STAGES" in test_source
     assert "UNSAFE_PROBE_STAGES" in test_source
+    assert "REAL_SUBMIT_PROBE_STAGES" in test_source
     assert 'parser.add_argument("--probe-stage", choices=("suite", *PROBE_STAGES)' in test_source
     assert "def run_probe_suite(" in test_source
     assert "assert run(st_platform, [int(st_device_ids[0]), int(st_device_ids[1])]) == 0" in test_source
     assert "probe_stage: int | None = None" in test_source
     assert "if probe_stage is None:" in test_source
-    assert "run_probe_suite(platform, device_ids, build=build)" in test_source
+    assert 'probe_stage = PROBE_STAGES["full"]' in test_source
     assert "kUnsafeWqeAccess" in test_source
 
 
@@ -111,11 +112,7 @@ def test_phase2_comm_hccl_initializes_and_propagates_urma_workspace() -> None:
     assert "URMA workspace disabled for non-dense rank mapping" in source
 
 
-def test_phase3_comm_hccl_logs_hcomm_route_diagnostics() -> None:
+def test_phase3_comm_hccl_reuses_pto_urma_workspace_manager() -> None:
     source = (REPO_ROOT / "src/a5/platform/onboard/host/comm_hccl.cpp").read_text()
-    assert "link[%u/%u] protocol=%s(%d)" in source
-    assert "selected channel protocol=%s(%d)" in source
-    assert "entity peer=%u protocol=%s(%d)" in source
-    assert "SqContext type=%s(%d)" in source
-    assert "CqContext type=%s(%d)" in source
-    assert "ProtocolName" in source
+    assert '#include "pto/comm/async/urma/urma_workspace_manager.hpp"' in source
+    assert "using A5UrmaWorkspaceManager = pto::comm::urma::UrmaWorkspaceManager;" in source

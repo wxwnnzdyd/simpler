@@ -78,9 +78,8 @@ SAFE_PROBE_STAGES = (
 )
 UNSAFE_PROBE_STAGES = (
     "wqe_first_store",
-    "tget_post",
-    "tput_post",
 )
+REAL_SUBMIT_PROBE_STAGES = ("tget_post", "tput_post")
 
 
 def parse_device_range(spec: str) -> list[int]:
@@ -296,6 +295,15 @@ def run_probe_suite(platform: str, device_ids: list[int], *, build: bool = False
             probe_stage=PROBE_STAGES[stage_name],
             expected_status=K_UNSAFE_WQE_ACCESS,
         ) and ok
+    for stage_name in REAL_SUBMIT_PROBE_STAGES:
+        ok = run_case(
+            platform,
+            device_ids,
+            CASES[0],
+            build=build,
+            probe_stage=PROBE_STAGES[stage_name],
+            expected_status=0,
+        ) and ok
     return ok
 
 
@@ -310,7 +318,7 @@ def run(
     if device_ids is None:
         device_ids = [0, 1]
     if probe_stage is None:
-        return 0 if run_probe_suite(platform, device_ids, build=build) else 1
+        probe_stage = PROBE_STAGES["full"]
 
     ok = True
     cases = CASES if probe_stage == PROBE_STAGES["full"] else (CASES[0],)
@@ -339,10 +347,12 @@ def main() -> int:
     parser.add_argument("-p", "--platform", default="a5")
     parser.add_argument("-d", "--device", default="0-1")
     parser.add_argument("--build", action="store_true")
-    parser.add_argument("--probe-stage", choices=("suite", *PROBE_STAGES), default="suite")
+    parser.add_argument("--probe-stage", choices=("suite", *PROBE_STAGES), default="full")
     parser.add_argument("--expect-status", type=int, default=None)
     args = parser.parse_args()
-    probe_stage = None if args.probe_stage == "suite" else PROBE_STAGES[args.probe_stage]
+    if args.probe_stage == "suite":
+        return 0 if run_probe_suite(args.platform, parse_device_range(args.device), build=args.build) else 1
+    probe_stage = PROBE_STAGES[args.probe_stage]
     return run(
         args.platform,
         parse_device_range(args.device),

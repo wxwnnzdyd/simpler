@@ -94,7 +94,7 @@ AICORE inline bool
 WaitUrmaBounded(const Event &event, const Session &session, __gm__ int32_t *status, UrmaRealStatus timeout_code) {
     for (uint32_t i = 0; i < kMaxUrmaPollIters; ++i) {
         if (event.Test(session)) {
-            return true;
+            return event.Wait(session);
         }
     }
     SetStatus(
@@ -174,6 +174,12 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     __gm__ uint8_t *workspace = reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace);
     uint64_t transfer_bytes = static_cast<uint64_t>(elem_count) * sizeof(float);
 
+    using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+    using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+    using GlobalFloat = pto::GlobalTensor<float, ShapeDyn, StrideDyn, pto::Layout::ND>;
+    ShapeDyn shape(1, 1, 1, 1, elem_count);
+    StrideDyn stride(elem_count, elem_count, elem_count, elem_count, 1);
+
     uint64_t local_window_base = comm_ctx->windowsIn[comm_ctx->rankId];
     uint64_t peer_base = pto::comm::urma::UrmaPeerMrBaseAddr(workspace, static_cast<uint32_t>(peer));
     uint64_t send_offset = reinterpret_cast<uint64_t>(send) - local_window_base;
@@ -182,10 +188,12 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     __gm__ float *remote_send = reinterpret_cast<__gm__ float *>(peer_base + send_offset);
     __gm__ float *remote_tput_slot = reinterpret_cast<__gm__ float *>(peer_base + tput_slot_offset);
-    (void)tget_recv;
-    (void)tput_recv;
-    (void)signal;
-    (void)remote_send;
+    GlobalFloat local_send_g(send, shape, stride);
+    GlobalFloat local_tget_recv_g(tget_recv, shape, stride);
+    GlobalFloat remote_send_g(remote_send, shape, stride);
+    GlobalFloat remote_tput_slot_g(remote_tput_slot, shape, stride);
+
+    (void)transfer_bytes;
     if (probe_stage == static_cast<uint32_t>(ProbeStage::kWorkspace)) {
         SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(probe_stage), peer);
         return;
@@ -225,16 +233,66 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         return;
     }
 
-    if (probe_stage == static_cast<uint32_t>(ProbeStage::kTputPost) ||
-        probe_stage == static_cast<uint32_t>(ProbeStage::kTputTestOnce)) {
-        pto::comm::AsyncSession tput_probe_session;
-        pto::comm::BuildAsyncSession<pto::comm::DmaEngine::URMA>(
-            workspace, static_cast<uint32_t>(peer), tput_probe_session
-        );
-        (void)tput_probe_session;
-        (void)remote_tput_slot;
-        (void)transfer_bytes;
-        SetStatus(status, UrmaRealStatus::kUnsafeWqeAccess, static_cast<int32_t>(probe_stage), peer);
+    const bool run_tget = probe_stage == static_cast<uint32_t>(ProbeStage::kFull) ||
+                          probe_stage == static_cast<uint32_t>(ProbeStage::kTgetPost) ||
+                          probe_stage == static_cast<uint32_t>(ProbeStage::kTgetTestOnce);
+    const bool run_tput = probe_stage == static_cast<uint32_t>(ProbeStage::kFull) ||
+                          probe_stage == static_cast<uint32_t>(ProbeStage::kTputPost) ||
+                          probe_stage == static_cast<uint32_t>(ProbeStage::kTputTestOnce);
+    if (run_tget) {
+        auto event = pto::comm::TGET_ASYNC<pto::comm::DmaEngine::URMA>(local_tget_recv_g, remote_send_g, tget_session);
+        bool observed_ready = event.Test(tget_session);
+        if (!WaitUrmaBounded(event, tget_session, status, UrmaRealStatus::kTgetWaitFailed)) {
+            return;
+        }
+        if (probe_stage == static_cast<uint32_t>(ProbeStage::kTgetPost) ||
+            probe_stage == static_cast<uint32_t>(ProbeStage::kTgetTestOnce)) {
+            SetStatus(
+                status, UrmaRealStatus::kOk, static_cast<int32_t>(event.handle & 0xFFFFFFFFu),
+                observed_ready ? 1 : 0
+            );
+            return;
+        }
+    }
+
+    if (run_tput) {
+        pto::comm::AsyncSession tput_session;
+        pto::comm::BuildAsyncSession<pto::comm::DmaEngine::URMA>(workspace, static_cast<uint32_t>(peer), tput_session);
+        auto event = pto::comm::TPUT_ASYNC<pto::comm::DmaEngine::URMA>(remote_tput_slot_g, local_send_g, tput_session);
+        bool observed_ready = event.Test(tput_session);
+        if (!WaitUrmaBounded(event, tput_session, status, UrmaRealStatus::kTputWaitFailed)) {
+            return;
+        }
+        if (probe_stage == static_cast<uint32_t>(ProbeStage::kTputPost) ||
+            probe_stage == static_cast<uint32_t>(ProbeStage::kTputTestOnce)) {
+            SetStatus(
+                status, UrmaRealStatus::kOk, static_cast<int32_t>(event.handle & 0xFFFFFFFFu),
+                observed_ready ? 1 : 0
+            );
+            return;
+        }
+    }
+
+    if (probe_stage == static_cast<uint32_t>(ProbeStage::kFull)) {
+        if (!DeviceBarrierBounded(comm_ctx, signal, my_rank, nranks)) {
+            SetStatus(status, UrmaRealStatus::kBarrierWaitFailed, my_rank, peer);
+            return;
+        }
+        for (uint32_t i = 0; i < elem_count; ++i) {
+            float expected = static_cast<float>(peer * 100000 + static_cast<int>(i));
+            if (tget_recv[i] != expected) {
+                SetStatus(status, UrmaRealStatus::kTgetMismatch, static_cast<int32_t>(i), peer);
+                status[3] = static_cast<int32_t>(tget_recv[i]);
+                return;
+            }
+            float tput_value = tput_recv[static_cast<uint32_t>(peer) * elem_count + i];
+            if (tput_value != expected) {
+                SetStatus(status, UrmaRealStatus::kTputMismatch, static_cast<int32_t>(i), peer);
+                status[3] = static_cast<int32_t>(tput_value);
+                return;
+            }
+        }
+        SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(elem_count), peer);
         return;
     }
 

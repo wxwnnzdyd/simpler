@@ -108,18 +108,16 @@ Implemented:
   symmetric window before submitting the AIV kernel.
 - The AIV kernel reads `CommContext::workSpace` and can validate workspace,
   remote memory metadata, EID, queue indices, and WQE address calculation.
-- The AIV kernel now fail-fasts known unsafe WQE write and submit probes with
-  status code `60`, because hardware runs showed those paths can stall until
-  the runtime op timeout.
+- The AIV kernel fail-fasts known unsafe direct WQE read/write probes with
+  status code `60`, because hardware runs showed those manual WQE accesses can
+  stall until the runtime op timeout.
 - URMA remote addresses are derived from `UrmaPeerMrBaseAddr(workspace, peer) +
   offset`.
 - The demo keeps the small case (`16` float32 elements) and page-spanning case
-  (`4096` float32 elements) harness, but the full path now reports the unsafe
-  submit status instead of attempting data movement.
-- The default CLI/pytest entry now runs a focused safe probe suite: workspace,
-  session, remote metadata, EID, and WQE address probes must return status `0`,
-  while representative unsafe WQE/submit probes must return status `60` without
-  touching the WQE ring.
+  (`4096` float32 elements) harness. The default CLI/pytest entry now runs the
+  full real `TGET_ASYNC<URMA>` and `TPUT_ASYNC<URMA>` path.
+- The optional `suite` probe mode still checks workspace, session, remote
+  metadata, EID, WQE address, real submit probes, and unsafe direct-WQE probes.
 
 Validated:
 
@@ -128,8 +126,7 @@ Validated:
   9.0.1 toolchain after the local sparse PTO-ISA checkout is populated with A5
   instruction headers.
 - Pytest collection includes the demo for `--platform a5`.
-- The hardware pytest entry validates the safe probe suite instead of treating
-  real data movement as complete.
+- The hardware pytest entry now validates real URMA data movement by default.
 - Pytest collection deselects the demo for `--platform a5sim`, so sim batches do
   not accidentally run a real-URMA-only test.
 - Local source regression confirms the kernel no longer bypasses rank 1 and no
@@ -142,23 +139,19 @@ Hardware findings:
   (AICPU) failed: 507000` and `PTO2 scheduler timeout sub_class=S1:running-stalled`.
   The host status tensors remained zero because fatal runtime status skipped
   copy-back, so the next diagnostic step is the bounded-wait kernel above.
-- Later probe runs narrowed the failing access to the SQ WQE ring buffer at
+- Later probe runs narrowed the unsafe manual access to the SQ WQE ring buffer at
   `UrmaWQCtx::bufAddr`: `wqe_addr`, `remote_mem`, and `eid_read` passed, while
   `wqe_read`, `wqe_first_store`, `wqe_first_st_dev`, `wqe_mte_store`, and the
-  original PTO-ISA-backed `tput_post` timed out. This proves that the current
-  URMA SQ WQE ring address is not safely reachable from AICore, either through
-  ordinary LSU stores, `st_dev`, or MTE copy. The demo now fail-fasts these
-  known unsafe paths with status code `60` instead of hanging the device.
+  earlier custom-workspace submit path timed out. The demo now uses PTO-ISA's
+  native `UrmaWorkspaceManager`, because PTO-ISA's own A5
+  `tget_async_urma`/`tput_async_urma` tests pass on the target hardware.
 - CANN's public AIV `Hcomm<CommEngine::AIV, CommProtocol::ROCE>` path is not a
   drop-in replacement for this workspace: it expects a ROCE/RDMA `Channel`
   layout, while the HCCL channel conversion used here exposes a URMA/UB-JFS
   `ChannelEntity` layout.
-- The host workspace setup now logs every `HcclRankGraphGetLinks` protocol, the
-  selected channel protocol, the converted `ChannelEntity` protocol, and the SQ/CQ
-  context ABI type. If A5 logs show only `UBC_CTP`/`UBC_TP` links and
-  `UB_JFS`/`UB_JFC` contexts, the public HCOMM ROCE device API remains
-  inapplicable. If a `ROCE` link/context appears, the next step is a minimal
-  `Hcomm<AIV, ROCE>` post/wait probe.
+- The host workspace setup now reuses PTO-ISA's native A5 URMA workspace
+  construction instead of maintaining a divergent `ChannelEntity` conversion and
+  queue-index backfill path in simpler.
 - Device logs have not yet been inspected for URMA CQE status/substatus errors.
 
 Required hardware acceptance command:
@@ -169,8 +162,8 @@ PYTHONPATH=$PWD:$PWD/python python \
   -p a5 -d 0-1
 ```
 
-This default command runs the focused probe suite. It should pass only if safe
-probes return `0` and representative unsafe WQE/submit probes return `60`.
+This default command runs the full real-submit path. It should pass only if both
+ranks complete real `TGET_ASYNC<URMA>` and `TPUT_ASYNC<URMA>` data movement.
 
 Diagnostic probe commands:
 
@@ -219,23 +212,21 @@ PYTHONPATH=$PWD:$PWD/python python \
   -p a5 -d 0-1 --probe-stage eid_read
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage tget_post --expect-status 60
+  -p a5 -d 0-1 --probe-stage tget_post
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage tget_test_once --expect-status 60
+  -p a5 -d 0-1 --probe-stage tget_test_once
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage tput_post --expect-status 60
+  -p a5 -d 0-1 --probe-stage tput_post
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage tput_test_once --expect-status 60
+  -p a5 -d 0-1 --probe-stage tput_test_once
 ```
 
 The probe stages run only the small case and return early after the named
-operation. The WQE write probes now return status code `60` because the matching
-hardware runs already showed they can stall the AICore until the runtime reports
-`507000`. A future fix must replace the raw AICore WQE post mechanism rather
-than try another AICore write variant to `UrmaWQCtx::bufAddr`.
+operation. The direct WQE access probes still return status code `60`; real
+`tget_*` and `tput_*` probes are expected to return status `0`.
 
 Expected result for a completed Phase 3 implementation:
 
