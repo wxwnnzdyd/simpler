@@ -82,6 +82,12 @@ Expected result:
 1 passed
 ```
 
+If this command fails at `stage 'init_device'` or reports
+`simpler_init failed with code 507899`, the run has not reached Phase 2
+workspace validation. That failure is at the `rtSetDevice`/device attach
+boundary; first rerun through `task-submit` on healthy A5 devices and confirm
+`npu-smi info` works for the test user.
+
 Local non-A5 guard:
 
 ```bash

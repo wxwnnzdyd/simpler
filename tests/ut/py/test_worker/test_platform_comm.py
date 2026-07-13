@@ -85,6 +85,8 @@ def _rank_entry(
         from simpler.task_interface import ChipWorker
 
         worker = ChipWorker()
+        result["stage"] = "init_device"
+        result["device_id"] = int(device_id)
         worker.init(device_id, bins)
         result["stage"] = "init"
 
@@ -255,7 +257,13 @@ def test_two_rank_comm_lifecycle(st_platform, st_device_ids):
             pytest.fail(f"rank {rank} never reported a result")
         r = results_by_rank[rank]
         if not r.get("ok"):
-            pytest.fail(f"rank {rank} failed at stage {r.get('stage')!r}:\n{r.get('error', '(no traceback)')}")
+            prefix = ""
+            if r.get("stage") == "init_device":
+                prefix = (
+                    f"rank {rank} failed while attaching device {r.get('device_id')}; "
+                    "comm_alloc_windows/URMA workspace validation was not reached.\n"
+                )
+            pytest.fail(f"{prefix}rank {rank} failed at stage {r.get('stage')!r}:\n{r.get('error', '(no traceback)')}")
 
     # Each rank's own-slot invariant (windowsIn[rank] == local_base) is
     # asserted inside _rank_entry; all peer slots are already checked to be
