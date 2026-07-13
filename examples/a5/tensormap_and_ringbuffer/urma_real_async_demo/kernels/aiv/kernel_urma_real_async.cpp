@@ -235,12 +235,12 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     __gm__ uint8_t *sqe_bytes = reinterpret_cast<__gm__ uint8_t *>(wqe_addr);
     __gm__ uint32_t *sqe_dw = reinterpret_cast<__gm__ uint32_t *>(sqe_bytes);
     uint32_t old_sqe_dw0 = sqe_dw[0];
-    sqe_dw[0] = old_sqe_dw0;
     SetStatus(
         status, UrmaRealStatus::kProbeWqeOriginalStoreDone, static_cast<int32_t>(old_sqe_dw0),
         static_cast<int32_t>(head)
     );
     return;
+    sqe_dw[0] = old_sqe_dw0;
     uint32_t sqe_owner = ((head & wq_ctx->depth) == 0U ? 1U : 0U);
     uint32_t sqe_dw0 = sqe_dw0_without_owner | (sqe_owner << 31);
     uint32_t sqe_dw1 = (static_cast<uint32_t>(remote_mem->targetHint) & 0xFFU) |
