@@ -20,12 +20,15 @@ def test_phase3_kernel_reaches_real_urma_submit_for_all_ranks() -> None:
     assert "return;" not in submit_preamble
 
 
-def test_phase3_kernel_waits_for_real_tget_and_tput() -> None:
+def test_phase3_kernel_uses_bounded_waits_for_real_tget_and_tput() -> None:
     source = KERNEL.read_text()
     assert "TGET_ASYNC<pto::comm::DmaEngine::URMA>" in source
     assert "TPUT_ASYNC<pto::comm::DmaEngine::URMA>" in source
-    assert "tget_event.Wait(tget_session)" in source
-    assert "tput_event.Wait(tput_session)" in source
+    assert "WaitUrmaBounded(tget_event, tget_session" in source
+    assert "WaitUrmaBounded(tput_event, tput_session" in source
+    assert "tget_event.Wait(tget_session)" not in source
+    assert "tput_event.Wait(tput_session)" not in source
+    assert "DeviceBarrierBounded" in source
 
 
 def test_phase2_workspace_smoke_asserts_a5_acceptance_points() -> None:

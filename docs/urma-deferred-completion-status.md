@@ -117,7 +117,9 @@ Implemented:
   symmetric window before submitting the AIV kernel.
 - The AIV kernel reads `CommContext::workSpace`, builds a PTO-ISA URMA
   `AsyncSession`, issues both `TGET_ASYNC<DmaEngine::URMA>` and
-  `TPUT_ASYNC<DmaEngine::URMA>`, and waits directly with `event.Wait(session)`.
+  `TPUT_ASYNC<DmaEngine::URMA>`, and uses bounded `event.Test(session)` polling
+  so a failed CQ completion returns a status code instead of hanging until the
+  runtime op timeout.
 - URMA remote addresses are derived from `UrmaPeerMrBaseAddr(workspace, peer) +
   offset`.
 - A notification barrier runs after the outgoing TPUT wait so each rank verifies
@@ -135,14 +137,16 @@ Validated:
 - Pytest collection deselects the demo for `--platform a5sim`, so sim batches do
   not accidentally run a real-URMA-only test.
 - Local source regression confirms the kernel no longer bypasses rank 1, no
-  longer returns from probe code before the real URMA submit, and contains both
-  direct `tget_event.Wait(tget_session)` and `tput_event.Wait(tput_session)`.
+  longer returns from probe code before the real URMA submit, and uses bounded
+  TGET/TPUT wait paths plus bounded rank synchronization.
 
 Not yet validated:
 
-- The demo has not been executed on real A5 hardware in the current account.
-- Required hardware acceptance is blocked until the test user can run
-  `npu-smi info` and `aclrtSetDevice` successfully.
+- A real A5 run on 2026-07-13 reached URMA workspace setup and launched the
+  demo, but timed out after about 45 s with `aclrtSynchronizeStreamWithTimeout
+  (AICPU) failed: 507000` and `PTO2 scheduler timeout sub_class=S1:running-stalled`.
+  The host status tensors remained zero because fatal runtime status skipped
+  copy-back, so the next diagnostic step is the bounded-wait kernel above.
 - Device logs have not yet been inspected for URMA CQE status/substatus errors.
 
 Required hardware acceptance command:

@@ -45,9 +45,13 @@ enum class UrmaRealStatus : int32_t {
     kTgetPostDone = 31,
     kTputPostBegin = 40,
     kTputPostDone = 41,
+    kBarrierWaitFailed = 50,
     kTgetMismatch = 100,
     kTputMismatch = 200,
 };
+
+constexpr uint32_t kMaxUrmaPollIters = 10000000;
+constexpr uint32_t kMaxBarrierPollIters = 10000000;
 
 template <typename T>
 AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_ptr, int peer) {
@@ -62,7 +66,21 @@ AICORE inline void SetStatus(__gm__ int32_t *status, UrmaRealStatus code, int32_
     status[2] = detail1;
 }
 
-AICORE inline void DeviceBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_base, int my_rank, int nranks) {
+template <typename Event, typename Session>
+AICORE inline bool
+WaitUrmaBounded(const Event &event, const Session &session, __gm__ int32_t *status, UrmaRealStatus timeout_code) {
+    for (uint32_t i = 0; i < kMaxUrmaPollIters; ++i) {
+        if (event.Test(session)) {
+            return true;
+        }
+    }
+    SetStatus(
+        status, timeout_code, static_cast<int32_t>(event.handle & 0xFFFFFFFFu), static_cast<int32_t>(event.handle >> 32)
+    );
+    return false;
+}
+
+AICORE inline bool DeviceBarrierBounded(__gm__ CommContext *ctx, __gm__ int32_t *signal_base, int my_rank, int nranks) {
     for (int peer = 0; peer < nranks; ++peer) {
         if (peer == my_rank) continue;
         __gm__ int32_t *remote_signal = CommRemotePtr(ctx, signal_base + my_rank, peer);
@@ -72,10 +90,20 @@ AICORE inline void DeviceBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal
 
     for (int peer = 0; peer < nranks; ++peer) {
         if (peer == my_rank) continue;
-        pto::comm::Signal signal(signal_base + peer);
-        pto::comm::TWAIT(signal, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
+        __gm__ volatile int32_t *peer_signal = signal_base + peer;
+        bool observed = false;
+        for (uint32_t i = 0; i < kMaxBarrierPollIters; ++i) {
+            if (*peer_signal >= 1) {
+                observed = true;
+                break;
+            }
+        }
+        if (!observed) {
+            return false;
+        }
     }
     pipe_barrier(PIPE_ALL);
+    return true;
 }
 
 }  // namespace
@@ -143,8 +171,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     SetStatus(status, UrmaRealStatus::kTgetPostBegin, my_rank, peer);
     auto tget_event = pto::comm::TGET_ASYNC<pto::comm::DmaEngine::URMA>(local_tget_g, remote_send_g, tget_session);
     SetStatus(status, UrmaRealStatus::kTgetPostDone, static_cast<int32_t>(tget_event.handle & 0xFFFFFFFFu), peer);
-    if (!tget_event.Wait(tget_session)) {
-        SetStatus(status, UrmaRealStatus::kTgetWaitFailed, static_cast<int32_t>(tget_event.handle & 0xFFFFFFFFu), peer);
+    if (!WaitUrmaBounded(tget_event, tget_session, status, UrmaRealStatus::kTgetWaitFailed)) {
         return;
     }
 
@@ -155,12 +182,14 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     SetStatus(status, UrmaRealStatus::kTputPostBegin, my_rank, peer);
     auto tput_event = pto::comm::TPUT_ASYNC<pto::comm::DmaEngine::URMA>(remote_tput_g, local_send_g, tput_session);
     SetStatus(status, UrmaRealStatus::kTputPostDone, static_cast<int32_t>(tput_event.handle & 0xFFFFFFFFu), peer);
-    if (!tput_event.Wait(tput_session)) {
-        SetStatus(status, UrmaRealStatus::kTputWaitFailed, static_cast<int32_t>(tput_event.handle & 0xFFFFFFFFu), peer);
+    if (!WaitUrmaBounded(tput_event, tput_session, status, UrmaRealStatus::kTputWaitFailed)) {
         return;
     }
 
-    DeviceBarrier(comm_ctx, signal, my_rank, nranks);
+    if (!DeviceBarrierBounded(comm_ctx, signal, my_rank, nranks)) {
+        SetStatus(status, UrmaRealStatus::kBarrierWaitFailed, my_rank, peer);
+        return;
+    }
 
     for (uint32_t i = 0; i < elem_count; ++i) {
         float expected = static_cast<float>(peer * 100000 + static_cast<int>(i));
