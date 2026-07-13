@@ -98,9 +98,9 @@ public:
         FreeDeviceAddr(eid_device_);
         channel_handles_.clear();
         hccl_channel_acquire_ = nullptr;
-        if (libhccl_handle_ != nullptr) {
-            dlclose(libhccl_handle_);
-            libhccl_handle_ = nullptr;
+        if (hccl_symbol_lib_handle_ != nullptr) {
+            dlclose(hccl_symbol_lib_handle_);
+            hccl_symbol_lib_handle_ = nullptr;
         }
         initialized_ = false;
     }
@@ -200,7 +200,7 @@ private:
         }
 
         channel_handles_.resize(descs.size());
-        HcclResult rc = HcclChannelAcquireFromLibhccl(
+        HcclResult rc = HcclChannelAcquireResolved(
             comm_, COMM_ENGINE_AIV, descs.data(), static_cast<uint32_t>(descs.size()), channel_handles_.data()
         );
         if (rc != HCCL_SUCCESS) {
@@ -217,30 +217,30 @@ private:
         return true;
     }
 
-    HcclResult HcclChannelAcquireFromLibhccl(
+    HcclResult HcclChannelAcquireResolved(
         HcclComm comm, CommEngine engine, const HcclChannelDesc *descs, uint32_t channel_num, ChannelHandle *channels
     ) {
-        HcclChannelAcquireFn fn = ResolveLibhcclChannelAcquire();
+        HcclChannelAcquireFn fn = ResolveHcclChannelAcquire();
         if (fn == nullptr) {
             return HCCL_E_INTERNAL;
         }
         return fn(comm, engine, descs, channel_num, channels);
     }
 
-    HcclChannelAcquireFn ResolveLibhcclChannelAcquire() {
+    HcclChannelAcquireFn ResolveHcclChannelAcquire() {
         if (hccl_channel_acquire_ != nullptr) return hccl_channel_acquire_;
 
         dlerror();
-        libhccl_handle_ = dlopen("libhccl.so", RTLD_NOW | RTLD_NOLOAD);
-        if (libhccl_handle_ == nullptr) {
-            libhccl_handle_ = dlopen("libhccl.so", RTLD_NOW);
+        hccl_symbol_lib_handle_ = dlopen("libhccl.so", RTLD_NOW | RTLD_NOLOAD);
+        if (hccl_symbol_lib_handle_ == nullptr) {
+            hccl_symbol_lib_handle_ = dlopen("libhccl.so", RTLD_NOW);
         }
-        if (libhccl_handle_ == nullptr) {
+        if (hccl_symbol_lib_handle_ == nullptr) {
             LOG_WARN("[comm rank %u] URMA: dlopen libhccl.so failed: %s", rank_id_, dlerror());
             return nullptr;
         }
 
-        auto *sym = dlsym(libhccl_handle_, "HcclChannelAcquire");
+        auto *sym = dlsym(hccl_symbol_lib_handle_, "HcclChannelAcquire");
         if (sym == nullptr) {
             LOG_WARN("[comm rank %u] URMA: dlsym(libhccl.so, HcclChannelAcquire) failed: %s", rank_id_, dlerror());
             return nullptr;
@@ -921,7 +921,7 @@ private:
     void *urma_info_device_{nullptr};
     void *eid_device_{nullptr};
 
-    void *libhccl_handle_{nullptr};
+    void *hccl_symbol_lib_handle_{nullptr};
     HcclChannelAcquireFn hccl_channel_acquire_{nullptr};
 
     bool initialized_{false};
@@ -1169,6 +1169,12 @@ extern "C" CommHandle comm_init(int rank, int nranks, void *stream, const char *
         hccl_comm_init_root_info(static_cast<uint32_t>(nranks), &rootInfo, static_cast<uint32_t>(rank), &h->hccl_comm);
     if (hret != HCCL_SUCCESS) {
         LOG_ERROR("[comm rank %d] HcclCommInitRootInfo failed: %d", rank, (int)hret);
+        delete h;
+        return nullptr;
+    }
+
+    if (!file_barrier(h->rootinfo_path, h->rank, h->nranks, "hccl_comm_ready", h->run_token)) {
+        hccl_comm_destroy(h->hccl_comm);
         delete h;
         return nullptr;
     }
