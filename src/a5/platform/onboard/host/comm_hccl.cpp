@@ -76,10 +76,6 @@ public:
         symmetric_addr_ = symmetric_addr;
         symmetric_size_ = symmetric_size;
 
-        if (!LoadDynamicSymbols()) {
-            Finalize();
-            return false;
-        }
         if (!RegisterMemory()) {
             Finalize();
             return false;
@@ -257,6 +253,13 @@ private:
         if (rc != HCCL_SUCCESS) {
             LOG_WARN("[comm rank %u] URMA: HcclChannelAcquire failed: %d", rank_id_, static_cast<int>(rc));
             return false;
+        }
+        for (size_t i = 0; i < channel_handles_.size(); ++i) {
+            LOG_WARN(
+                "[comm rank %u] URMA: channel[%zu] handle=0x%llx class=%s", rank_id_, i,
+                static_cast<unsigned long long>(channel_handles_[i]),
+                IsLikelyA5DeviceVa(channel_handles_[i]) ? "device" : "opaque-host"
+            );
         }
         return true;
     }
@@ -583,18 +586,14 @@ private:
     }
 
     bool GetRemoteMemByTag(ChannelHandle handle, uint32_t peer, void **out_addr, uint64_t *out_size) {
-        if (get_user_remote_mem_ == nullptr) {
-            LOG_WARN("[comm rank %u] URMA: GetUserRemoteMem symbol missing for peer=%u", rank_id_, peer);
-            return false;
-        }
-
         CommMem *remote_mems = nullptr;
         char **mem_tags = nullptr;
         uint32_t mem_num = 0;
-        void *as_ptr = reinterpret_cast<void *>(static_cast<uintptr_t>(handle));
-        HcclResult rc = get_user_remote_mem_(as_ptr, &remote_mems, &mem_tags, &mem_num);
+        HcclResult rc = HcclChannelGetRemoteMems(comm_, handle, &mem_num, &remote_mems, &mem_tags);
         if (rc != HCCL_SUCCESS) {
-            LOG_WARN("[comm rank %u] URMA: GetUserRemoteMem peer=%u failed: %d", rank_id_, peer, static_cast<int>(rc));
+            LOG_WARN(
+                "[comm rank %u] URMA: HcclChannelGetRemoteMems peer=%u failed: %d", rank_id_, peer, static_cast<int>(rc)
+            );
             return false;
         }
 
@@ -613,32 +612,13 @@ private:
     }
 
     ChannelHandle ResolveDeviceChannelEntity(ChannelHandle handle, uint32_t peer) {
-        void *as_ptr = reinterpret_cast<void *>(static_cast<uintptr_t>(handle));
         if (IsLikelyA5DeviceVa(handle)) return handle;
-
-        if (build_channel_entity_to_device_ == nullptr) {
-            LOG_WARN(
-                "[comm rank %u] URMA: peer=%u ChannelHandle is opaque host object 0x%llx, but converter is missing",
-                rank_id_, peer, static_cast<unsigned long long>(handle)
-            );
-            return 0;
-        }
-
-        void *dev_entity = nullptr;
-        HcclResult rc = build_channel_entity_to_device_(as_ptr, &dev_entity);
-        if (rc != HCCL_SUCCESS || dev_entity == nullptr) {
-            LOG_WARN(
-                "[comm rank %u] URMA: BuildChannelEntityToDevice(peer=%u handle=0x%llx) failed: ret=%d entity=%p",
-                rank_id_, peer, static_cast<unsigned long long>(handle), static_cast<int>(rc), dev_entity
-            );
-            return 0;
-        }
-        converted_channel_handles_.push_back(handle);
-        LOG_INFO_V0(
-            "[comm rank %u] URMA: converted peer=%u ChannelHandle=0x%llx to device ChannelEntity=%p", rank_id_, peer,
-            static_cast<unsigned long long>(handle), dev_entity
+        LOG_WARN(
+            "[comm rank %u] URMA: peer=%u ChannelHandle is opaque host object 0x%llx; refusing private conversion. "
+            "A5 URMA requires HcclChannelAcquire to return a device ChannelEntity pointer, matching PTO-ISA.",
+            rank_id_, peer, static_cast<unsigned long long>(handle)
         );
-        return static_cast<ChannelHandle>(reinterpret_cast<uintptr_t>(dev_entity));
+        return 0;
     }
 
     void ReleaseDeviceChannelEntities() {
