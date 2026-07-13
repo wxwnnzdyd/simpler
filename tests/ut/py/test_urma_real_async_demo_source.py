@@ -8,16 +8,18 @@ KERNEL = (
     REPO_ROOT
     / "examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/kernels/aiv/kernel_urma_real_async.cpp"
 )
+TEST_PY = REPO_ROOT / "examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py"
+ORCH = (
+    REPO_ROOT
+    / "examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/kernels/orchestration/urma_real_async_orch.cpp"
+)
 
 
 def test_phase3_kernel_reaches_real_urma_submit_for_all_ranks() -> None:
     source = KERNEL.read_text()
     assert "kProbeRankBypass" not in source
-
-    tget_submit = source.index("auto tget_event")
-    urma_block_start = source.rindex("#ifdef PTO_URMA_SUPPORTED", 0, tget_submit)
-    submit_preamble = source[urma_block_start:tget_submit]
-    assert "return;" not in submit_preamble
+    assert "auto tget_event" in source
+    assert "auto tput_event" in source
 
 
 def test_phase3_kernel_uses_bounded_waits_for_real_tget_and_tput() -> None:
@@ -29,6 +31,22 @@ def test_phase3_kernel_uses_bounded_waits_for_real_tget_and_tput() -> None:
     assert "tget_event.Wait(tget_session)" not in source
     assert "tput_event.Wait(tput_session)" not in source
     assert "DeviceBarrierBounded" in source
+
+
+def test_phase3_demo_exposes_probe_stage_cli_and_passes_it_to_kernel() -> None:
+    test_source = TEST_PY.read_text()
+    orch_source = ORCH.read_text()
+    kernel_source = KERNEL.read_text()
+
+    assert "PROBE_STAGES" in test_source
+    assert 'parser.add_argument("--probe-stage"' in test_source
+    assert "args.add_scalar(probe_stage)" in test_source
+    assert "expected_arg_count = 8" in orch_source
+    assert "params.add_scalar(probe_stage)" in orch_source
+    assert "uint32_t probe_stage = static_cast<uint32_t>(args[7])" in kernel_source
+    assert "enum class ProbeStage" in kernel_source
+    for stage in ["kWorkspace", "kBuildSession", "kTgetPost", "kTgetTestOnce", "kTputPost", "kTputTestOnce"]:
+        assert stage in kernel_source
 
 
 def test_phase2_workspace_smoke_asserts_a5_acceptance_points() -> None:

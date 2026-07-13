@@ -47,6 +47,15 @@ DTYPE_NBYTES = 4
 SIGNAL_NBYTES = 16 * 4
 STATUS_WORDS = 8
 CASES = (16, 4096)
+PROBE_STAGES = {
+    "full": 0,
+    "workspace": 1,
+    "build_session": 2,
+    "tget_post": 3,
+    "tget_test_once": 4,
+    "tput_post": 5,
+    "tput_test_once": 6,
+}
 
 
 def parse_device_range(spec: str) -> list[int]:
@@ -88,6 +97,7 @@ def build_chip_callable(platform: str) -> ChipCallable:
         ArgDirection.OUT,
         ArgDirection.IN,
         ArgDirection.IN,
+        ArgDirection.IN,
     ]
     return ChipCallable.build(
         signature=signature,
@@ -119,7 +129,14 @@ def _print_status(elem_count: int, status: list[torch.Tensor]) -> bool:
     return ok
 
 
-def run_case(platform: str, device_ids: list[int], elem_count: int, *, build: bool = False) -> bool:
+def run_case(
+    platform: str,
+    device_ids: list[int],
+    elem_count: int,
+    *,
+    build: bool = False,
+    probe_stage: int = PROBE_STAGES["full"],
+) -> bool:
     if platform != "a5":
         raise ValueError("urma_real_async_demo requires platform 'a5'; a5sim cannot validate real URMA")
     if len(device_ids) != 2:
@@ -216,6 +233,7 @@ def run_case(platform: str, device_ids: list[int], elem_count: int, *, build: bo
                     args.add_tensor(make_tensor_arg(status[rank]), TensorArgType.OUTPUT_EXISTING)
                     args.add_scalar(domain.device_ctx)
                     args.add_scalar(elem_count)
+                    args.add_scalar(probe_stage)
                     orch.submit_next_level(chip_handle, args, cfg, worker=rank)
 
         try:
@@ -229,12 +247,19 @@ def run_case(platform: str, device_ids: list[int], elem_count: int, *, build: bo
     return _print_status(elem_count, status)
 
 
-def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: bool = False) -> int:
+def run(
+    platform: str = "a5",
+    device_ids: list[int] | None = None,
+    *,
+    build: bool = False,
+    probe_stage: int = PROBE_STAGES["full"],
+) -> int:
     if device_ids is None:
         device_ids = [0, 1]
     ok = True
-    for elem_count in CASES:
-        ok = run_case(platform, device_ids, elem_count, build=build) and ok
+    cases = CASES if probe_stage == PROBE_STAGES["full"] else (CASES[0],)
+    for elem_count in cases:
+        ok = run_case(platform, device_ids, elem_count, build=build, probe_stage=probe_stage) and ok
     return 0 if ok else 1
 
 
@@ -250,8 +275,9 @@ def main() -> int:
     parser.add_argument("-p", "--platform", default="a5")
     parser.add_argument("-d", "--device", default="0-1")
     parser.add_argument("--build", action="store_true")
+    parser.add_argument("--probe-stage", choices=tuple(PROBE_STAGES), default="full")
     args = parser.parse_args()
-    return run(args.platform, parse_device_range(args.device), build=args.build)
+    return run(args.platform, parse_device_range(args.device), build=args.build, probe_stage=PROBE_STAGES[args.probe_stage])
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ extern "C" {
 __attribute__((visibility("default"))) PTO2OrchestrationConfig
 urma_real_async_orchestration_config(const L2TaskArgs &orch_args) {
     (void)orch_args;
-    return PTO2OrchestrationConfig{.expected_arg_count = 7};
+    return PTO2OrchestrationConfig{.expected_arg_count = 8};
 }
 
 __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestration_config(const L2TaskArgs &orch_args) {
@@ -27,8 +27,8 @@ __attribute__((visibility("default"))) PTO2OrchestrationConfig aicpu_orchestrati
 }
 
 __attribute__((visibility("default"))) void urma_real_async_orchestration(const L2TaskArgs &orch_args) {
-    if (orch_args.tensor_count() + orch_args.scalar_count() != 7) {
-        LOG_ERROR("urma_real_async_demo: expected 7 args");
+    if (orch_args.tensor_count() + orch_args.scalar_count() != 8) {
+        LOG_ERROR("urma_real_async_demo: expected 8 args");
         return;
     }
 
@@ -39,6 +39,7 @@ __attribute__((visibility("default"))) void urma_real_async_orchestration(const 
     const Tensor &status = orch_args.tensor(4).ref();
     auto *comm_ctx = reinterpret_cast<CommContext *>(static_cast<uintptr_t>(orch_args.scalar(0)));
     const uint32_t elem_count = static_cast<uint32_t>(orch_args.scalar(1));
+    const uint32_t probe_stage = static_cast<uint32_t>(orch_args.scalar(2));
 
     L0TaskArgs params;
     params.add_input(send);
@@ -48,6 +49,7 @@ __attribute__((visibility("default"))) void urma_real_async_orchestration(const 
     params.add_output(status);
     params.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     params.add_scalar(elem_count);
+    params.add_scalar(probe_stage);
     rt_submit_aiv_task(0, params);
 }
 
