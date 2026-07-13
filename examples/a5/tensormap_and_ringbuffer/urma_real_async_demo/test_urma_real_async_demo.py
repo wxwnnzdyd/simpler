@@ -110,6 +110,15 @@ def _zero_i32(count: int) -> torch.Tensor:
     return torch.zeros(count, dtype=torch.int32).share_memory_()
 
 
+def _print_status(elem_count: int, status: list[torch.Tensor]) -> bool:
+    ok = True
+    for rank, rank_status in enumerate(status):
+        words = [int(x) for x in rank_status.tolist()]
+        print(f"[urma_real_async_demo] count={elem_count} rank={rank} status={words}")
+        ok = ok and words[0] == 0
+    return ok
+
+
 def run_case(platform: str, device_ids: list[int], elem_count: int, *, build: bool = False) -> bool:
     if platform != "a5":
         raise ValueError("urma_real_async_demo requires platform 'a5'; a5sim cannot validate real URMA")
@@ -209,16 +218,15 @@ def run_case(platform: str, device_ids: list[int], elem_count: int, *, build: bo
                     args.add_scalar(elem_count)
                     orch.submit_next_level(chip_handle, args, cfg, worker=rank)
 
-        worker.run(orch_fn, args=None, config=CallConfig())
+        try:
+            worker.run(orch_fn, args=None, config=CallConfig())
+        except RuntimeError:
+            _print_status(elem_count, status)
+            raise
     finally:
         worker.close()
 
-    ok = True
-    for rank in range(nranks):
-        words = [int(x) for x in status[rank].tolist()]
-        print(f"[urma_real_async_demo] count={elem_count} rank={rank} status={words}")
-        ok = ok and words[0] == 0
-    return ok
+    return _print_status(elem_count, status)
 
 
 def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: bool = False) -> int:
