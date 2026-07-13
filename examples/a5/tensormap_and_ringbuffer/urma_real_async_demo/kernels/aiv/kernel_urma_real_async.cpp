@@ -202,6 +202,47 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         return;
     }
 
+    __gm__ pto::comm::urma::UrmaMemInfo *remote_mem =
+        reinterpret_cast<__gm__ pto::comm::urma::UrmaMemInfo *>(urma_info->memPtr) + peer;
+    if (probe_stage == static_cast<uint32_t>(ProbeStage::kRemoteMem)) {
+        SetStatus(
+            status, UrmaRealStatus::kOk, static_cast<int32_t>(remote_mem->tpn), static_cast<int32_t>(remote_mem->tid)
+        );
+        status[3] = static_cast<int32_t>(remote_mem->rmtTokenValue);
+        return;
+    }
+    if (probe_stage == static_cast<uint32_t>(ProbeStage::kEidRead)) {
+        __gm__ uint64_t *remote_eid_probe = reinterpret_cast<__gm__ uint64_t *>(remote_mem->eidAddr);
+        uint64_t eid0 = remote_eid_probe[0];
+        SetStatus(
+            status, UrmaRealStatus::kOk, static_cast<int32_t>(eid0 & 0xFFFFFFFFu), static_cast<int32_t>(eid0 >> 32)
+        );
+        return;
+    }
+
+    if (probe_stage == static_cast<uint32_t>(ProbeStage::kTputPost) ||
+        probe_stage == static_cast<uint32_t>(ProbeStage::kTputTestOnce)) {
+        pto::comm::AsyncSession tput_probe_session;
+        pto::comm::BuildAsyncSession<pto::comm::DmaEngine::URMA>(
+            workspace, static_cast<uint32_t>(peer), tput_probe_session
+        );
+        Global remote_tput_probe_g(remote_tput_slot, shape, stride);
+        Global local_send_probe_g(send, shape, stride);
+        SetStatus(status, UrmaRealStatus::kTputPostBegin, my_rank, peer);
+        auto tput_probe_event = pto::comm::TPUT_ASYNC<pto::comm::DmaEngine::URMA>(
+            remote_tput_probe_g, local_send_probe_g, tput_probe_session
+        );
+        SetStatus(
+            status, UrmaRealStatus::kTputPostDone, static_cast<int32_t>(tput_probe_event.handle & 0xFFFFFFFFu), peer
+        );
+        if (probe_stage == static_cast<uint32_t>(ProbeStage::kTputPost)) {
+            return;
+        }
+        bool ready = tput_probe_event.Test(tput_probe_session);
+        SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(probe_stage), ready ? 1 : 0);
+        return;
+    }
+
     __gm__ pto::comm::urma::UrmaWQCtx *wq_ctx = reinterpret_cast<__gm__ pto::comm::urma::UrmaWQCtx *>(
         sq_ptr + (static_cast<uint32_t>(peer) * qp_num) * sizeof(pto::comm::urma::UrmaWQCtx)
     );
@@ -244,46 +285,6 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         return;
     }
 
-    __gm__ pto::comm::urma::UrmaMemInfo *remote_mem =
-        reinterpret_cast<__gm__ pto::comm::urma::UrmaMemInfo *>(urma_info->memPtr) + peer;
-    if (probe_stage == static_cast<uint32_t>(ProbeStage::kRemoteMem)) {
-        SetStatus(
-            status, UrmaRealStatus::kOk, static_cast<int32_t>(remote_mem->tpn), static_cast<int32_t>(remote_mem->tid)
-        );
-        status[3] = static_cast<int32_t>(remote_mem->rmtTokenValue);
-        return;
-    }
-    if (probe_stage == static_cast<uint32_t>(ProbeStage::kEidRead)) {
-        __gm__ uint64_t *remote_eid_probe = reinterpret_cast<__gm__ uint64_t *>(remote_mem->eidAddr);
-        uint64_t eid0 = remote_eid_probe[0];
-        SetStatus(
-            status, UrmaRealStatus::kOk, static_cast<int32_t>(eid0 & 0xFFFFFFFFu), static_cast<int32_t>(eid0 >> 32)
-        );
-        return;
-    }
-
-    if (probe_stage == static_cast<uint32_t>(ProbeStage::kTputPost) ||
-        probe_stage == static_cast<uint32_t>(ProbeStage::kTputTestOnce)) {
-        pto::comm::AsyncSession tput_probe_session;
-        pto::comm::BuildAsyncSession<pto::comm::DmaEngine::URMA>(
-            workspace, static_cast<uint32_t>(peer), tput_probe_session
-        );
-        Global remote_tput_probe_g(remote_tput_slot, shape, stride);
-        Global local_send_probe_g(send, shape, stride);
-        SetStatus(status, UrmaRealStatus::kTputPostBegin, my_rank, peer);
-        auto tput_probe_event = pto::comm::TPUT_ASYNC<pto::comm::DmaEngine::URMA>(
-            remote_tput_probe_g, local_send_probe_g, tput_probe_session
-        );
-        SetStatus(
-            status, UrmaRealStatus::kTputPostDone, static_cast<int32_t>(tput_probe_event.handle & 0xFFFFFFFFu), peer
-        );
-        if (probe_stage == static_cast<uint32_t>(ProbeStage::kTputPost)) {
-            return;
-        }
-        bool ready = tput_probe_event.Test(tput_probe_session);
-        SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(probe_stage), ready ? 1 : 0);
-        return;
-    }
     Global local_tget_g(tget_recv, shape, stride);
     Global remote_send_g(remote_send, shape, stride);
     SetStatus(status, UrmaRealStatus::kTgetPostBegin, my_rank, peer);

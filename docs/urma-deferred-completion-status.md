@@ -147,6 +147,11 @@ Not yet validated:
   (AICPU) failed: 507000` and `PTO2 scheduler timeout sub_class=S1:running-stalled`.
   The host status tensors remained zero because fatal runtime status skipped
   copy-back, so the next diagnostic step is the bounded-wait kernel above.
+- A later `--probe-stage tget_post` run also timed out, proving the stall happens
+  before a URMA event handle is returned. A `--probe-stage wqe_read` run then
+  timed out, narrowing the failing access to an AICore load from the SQ WQE ring
+  buffer address in `UrmaWQCtx::bufAddr`. The diagnostic probe order now keeps
+  `remote_mem`, `eid_read`, and TPUT probes independent of that WQE read.
 - Device logs have not yet been inspected for URMA CQE status/substatus errors.
 
 Required hardware acceptance command:
