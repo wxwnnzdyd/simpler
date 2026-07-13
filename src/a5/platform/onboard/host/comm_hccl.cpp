@@ -49,7 +49,6 @@
 #include "pto/comm/async/urma/urma_channel_helper.hpp"
 #include "pto/comm/async/urma/urma_hccl_defs.hpp"
 #include "pto/comm/async/urma/urma_types.hpp"
-#include "pto/comm/async/urma/urma_workspace_manager.hpp"
 
 // Thin wrappers around the HCCL public APIs we use. Kept as a translation
 // layer in case we need to swap (e.g., InitConfig variant) later.
@@ -62,13 +61,13 @@ static inline HcclResult hccl_comm_destroy(HcclComm c) { return HcclCommDestroy(
 
 namespace {
 
-class LegacyA5UrmaWorkspaceManager {
+class A5UrmaWorkspaceManager {
 public:
-    LegacyA5UrmaWorkspaceManager() = default;
-    ~LegacyA5UrmaWorkspaceManager() { Finalize(); }
+    A5UrmaWorkspaceManager() = default;
+    ~A5UrmaWorkspaceManager() { Finalize(); }
 
-    LegacyA5UrmaWorkspaceManager(const LegacyA5UrmaWorkspaceManager &) = delete;
-    LegacyA5UrmaWorkspaceManager &operator=(const LegacyA5UrmaWorkspaceManager &) = delete;
+    A5UrmaWorkspaceManager(const A5UrmaWorkspaceManager &) = delete;
+    A5UrmaWorkspaceManager &operator=(const A5UrmaWorkspaceManager &) = delete;
 
     bool Init(HcclComm comm, uint32_t rank_id, uint32_t rank_count, void *symmetric_addr, uint64_t symmetric_size) {
         comm_ = comm;
@@ -977,8 +976,6 @@ private:
 
     bool initialized_{false};
 };
-
-using A5UrmaWorkspaceManager = pto::comm::urma::UrmaWorkspaceManager;
 
 }  // namespace
 

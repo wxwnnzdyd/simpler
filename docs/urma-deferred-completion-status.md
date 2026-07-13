@@ -142,16 +142,17 @@ Hardware findings:
 - Later probe runs narrowed the unsafe manual access to the SQ WQE ring buffer at
   `UrmaWQCtx::bufAddr`: `wqe_addr`, `remote_mem`, and `eid_read` passed, while
   `wqe_read`, `wqe_first_store`, `wqe_first_st_dev`, `wqe_mte_store`, and the
-  earlier custom-workspace submit path timed out. The demo now uses PTO-ISA's
-  native `UrmaWorkspaceManager`, because PTO-ISA's own A5
-  `tget_async_urma`/`tput_async_urma` tests pass on the target hardware.
+  earlier custom-workspace submit path timed out. PTO-ISA's own A5
+  `tget_async_urma`/`tput_async_urma` tests pass on the target hardware, so the
+  remaining issue is in simpler's HCCL channel-to-URMA-workspace translation.
 - CANN's public AIV `Hcomm<CommEngine::AIV, CommProtocol::ROCE>` path is not a
   drop-in replacement for this workspace: it expects a ROCE/RDMA `Channel`
   layout, while the HCCL channel conversion used here exposes a URMA/UB-JFS
   `ChannelEntity` layout.
-- The host workspace setup now reuses PTO-ISA's native A5 URMA workspace
-  construction instead of maintaining a divergent `ChannelEntity` conversion and
-  queue-index backfill path in simpler.
+- In simpler, `HcclChannelAcquire` can return an opaque host `AivUrmaChannel`
+  handle (`0xaaab...`) instead of a device `ChannelEntity` pointer. The host
+  workspace setup therefore keeps the local conversion path via HCOMM private
+  symbols before reading the device `ChannelEntity`.
 - Device logs have not yet been inspected for URMA CQE status/substatus errors.
 
 Required hardware acceptance command:

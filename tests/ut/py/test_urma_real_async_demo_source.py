@@ -112,7 +112,9 @@ def test_phase2_comm_hccl_initializes_and_propagates_urma_workspace() -> None:
     assert "URMA workspace disabled for non-dense rank mapping" in source
 
 
-def test_phase3_comm_hccl_reuses_pto_urma_workspace_manager() -> None:
+def test_phase3_comm_hccl_handles_opaque_aiv_channel_handles() -> None:
     source = (REPO_ROOT / "src/a5/platform/onboard/host/comm_hccl.cpp").read_text()
-    assert '#include "pto/comm/async/urma/urma_workspace_manager.hpp"' in source
-    assert "using A5UrmaWorkspaceManager = pto::comm::urma::UrmaWorkspaceManager;" in source
+    assert "class A5UrmaWorkspaceManager" in source
+    assert "ResolveDeviceChannelEntity" in source
+    assert "BuildChannelEntityToDevice" in source
+    assert "GetUserRemoteMem" in source
