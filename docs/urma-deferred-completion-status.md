@@ -147,6 +147,12 @@ Hardware findings:
   drop-in replacement for this workspace: it expects a ROCE/RDMA `Channel`
   layout, while the HCCL channel conversion used here exposes a URMA/UB-JFS
   `ChannelEntity` layout.
+- The host workspace setup now logs every `HcclRankGraphGetLinks` protocol, the
+  selected channel protocol, the converted `ChannelEntity` protocol, and the SQ/CQ
+  context ABI type. If A5 logs show only `UBC_CTP`/`UBC_TP` links and
+  `UB_JFS`/`UB_JFC` contexts, the public HCOMM ROCE device API remains
+  inapplicable. If a `ROCE` link/context appears, the next step is a minimal
+  `Hcomm<AIV, ROCE>` post/wait probe.
 - Device logs have not yet been inspected for URMA CQE status/substatus errors.
 
 Required hardware acceptance command:

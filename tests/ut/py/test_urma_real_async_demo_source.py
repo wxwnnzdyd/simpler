@@ -95,3 +95,13 @@ def test_phase2_comm_hccl_initializes_and_propagates_urma_workspace() -> None:
     assert "ctx.workSpace = h->host_ctx.workSpace" in source
     assert "rank_ids_are_dense_prefix" in source
     assert "URMA workspace disabled for non-dense rank mapping" in source
+
+
+def test_phase3_comm_hccl_logs_hcomm_route_diagnostics() -> None:
+    source = (REPO_ROOT / "src/a5/platform/onboard/host/comm_hccl.cpp").read_text()
+    assert "link[%u/%u] protocol=%s(%d)" in source
+    assert "selected channel protocol=%s(%d)" in source
+    assert "entity peer=%u protocol=%s(%d)" in source
+    assert "SqContext type=%s(%d)" in source
+    assert "CqContext type=%s(%d)" in source
+    assert "ProtocolName" in source

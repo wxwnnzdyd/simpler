@@ -221,6 +221,10 @@ private:
             bool found = false;
             for (uint32_t i = 0; i < link_num; ++i) {
                 CommProtocol proto = link_list[i].linkAttr.linkProtocol;
+                LOG_WARN(
+                    "[comm rank %u] URMA: peer=%u link[%u/%u] protocol=%s(%d)", rank_id_, peer, i, link_num,
+                    ProtocolName(proto), static_cast<int>(proto)
+                );
                 if (proto != kCommProtocolUbcCtp && proto != kCommProtocolUbcTp) continue;
 
                 HcclChannelDesc desc;
@@ -233,6 +237,10 @@ private:
                 desc.memHandles = &mem_handle_;
                 desc.memHandleNum = 1;
                 descs.push_back(desc);
+                LOG_WARN(
+                    "[comm rank %u] URMA: peer=%u selected channel protocol=%s(%d)", rank_id_, peer,
+                    ProtocolName(proto), static_cast<int>(proto)
+                );
                 found = true;
                 break;
             }
@@ -376,7 +384,8 @@ private:
         }
         NormalizeChannelEntityPointers(entity_handle, host_entity);
         LOG_WARN(
-            "[comm rank %u] URMA: entity peer=%u sq=%p/%u cq=%p/%u remoteBuf=%p/%u localBuf=%p/%u", rank_id_, peer,
+            "[comm rank %u] URMA: entity peer=%u protocol=%s(%d) sq=%p/%u cq=%p/%u remoteBuf=%p/%u localBuf=%p/%u",
+            rank_id_, peer, ProtocolName(host_entity.protocol), static_cast<int>(host_entity.protocol),
             static_cast<void *>(host_entity.sqContextAddr), host_entity.sqNum,
             static_cast<void *>(host_entity.cqContextAddr), host_entity.cqNum,
             static_cast<void *>(host_entity.remoteBufferAddr), host_entity.remoteBufferNum,
@@ -817,9 +826,10 @@ private:
 
     void LogContextRaw(uint32_t peer, const SqContext &sq, const CqContext &cq) const {
         LOG_WARN(
-            "[comm rank %u] URMA: peer=%u SqContext type=%d raw64=[0x%llx 0x%llx 0x%llx 0x%llx "
+            "[comm rank %u] URMA: peer=%u SqContext type=%s(%d) raw64=[0x%llx 0x%llx 0x%llx 0x%llx "
             "0x%llx 0x%llx 0x%llx 0x%llx]",
-            rank_id_, peer, sq.type, static_cast<unsigned long long>(RawU64(sq.contextInfo.raws, 0)),
+            rank_id_, peer, SqContextName(sq.type), sq.type,
+            static_cast<unsigned long long>(RawU64(sq.contextInfo.raws, 0)),
             static_cast<unsigned long long>(RawU64(sq.contextInfo.raws, 1)),
             static_cast<unsigned long long>(RawU64(sq.contextInfo.raws, 2)),
             static_cast<unsigned long long>(RawU64(sq.contextInfo.raws, 3)),
@@ -829,9 +839,10 @@ private:
             static_cast<unsigned long long>(RawU64(sq.contextInfo.raws, 7))
         );
         LOG_WARN(
-            "[comm rank %u] URMA: peer=%u CqContext type=%d raw64=[0x%llx 0x%llx 0x%llx 0x%llx "
+            "[comm rank %u] URMA: peer=%u CqContext type=%s(%d) raw64=[0x%llx 0x%llx 0x%llx 0x%llx "
             "0x%llx 0x%llx 0x%llx 0x%llx]",
-            rank_id_, peer, cq.type, static_cast<unsigned long long>(RawU64(cq.contextInfo.raws, 0)),
+            rank_id_, peer, CqContextName(cq.type), cq.type,
+            static_cast<unsigned long long>(RawU64(cq.contextInfo.raws, 0)),
             static_cast<unsigned long long>(RawU64(cq.contextInfo.raws, 1)),
             static_cast<unsigned long long>(RawU64(cq.contextInfo.raws, 2)),
             static_cast<unsigned long long>(RawU64(cq.contextInfo.raws, 3)),
@@ -894,6 +905,35 @@ private:
 
     static bool IsLikelyA5DeviceVa(ChannelHandle handle) {
         return handle >= kA5DeviceVaLowerBound && handle < kA5DeviceVaUpperBound;
+    }
+
+    static const char *ProtocolName(CommProtocol protocol) {
+        switch (static_cast<int>(protocol)) {
+        case 1:
+            return "ROCE";
+        case 4:
+            return "UBC_CTP";
+        case 5:
+            return "UBC_TP";
+        case 6:
+            return "UB_MEM";
+        case 7:
+            return "UBOE";
+        default:
+            return "UNKNOWN";
+        }
+    }
+
+    static const char *SqContextName(int32_t type) {
+        if (type == kSqContextTypeRoce) return "ROCE";
+        if (type == kSqContextTypeUbJfs) return "UB_JFS";
+        return "UNKNOWN";
+    }
+
+    static const char *CqContextName(int32_t type) {
+        if (type == kCqContextTypeRoce) return "ROCE";
+        if (type == kCqContextTypeUbJfc) return "UB_JFC";
+        return "UNKNOWN";
     }
 
     static void FreeDeviceAddr(void *&addr) {
