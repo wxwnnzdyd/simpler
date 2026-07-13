@@ -67,6 +67,8 @@ def test_phase3_demo_exposes_probe_stage_cli_and_passes_it_to_kernel() -> None:
         "kTgetTestOnce",
         "kTputPost",
         "kTputTestOnce",
+        "kTgetRootPost",
+        "kTputRootPost",
         "kQueueIndexLdDev",
         "kWqeAddr",
         "kWqeFirstStore",

@@ -71,6 +71,8 @@ enum class ProbeStage : uint32_t {
     kWqeFirstStore = 16,
     kWqeFirstStDev = 17,
     kWqeMteStore = 18,
+    kTgetRootPost = 19,
+    kTputRootPost = 20,
 };
 
 constexpr uint32_t kMaxUrmaPollIters = 10000000;
@@ -193,6 +195,37 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     GlobalFloat remote_send_g(remote_send, shape, stride);
     GlobalFloat remote_tput_slot_g(remote_tput_slot, shape, stride);
 
+    const bool tget_root_post = probe_stage == static_cast<uint32_t>(ProbeStage::kTgetRootPost);
+    const bool tput_root_post = probe_stage == static_cast<uint32_t>(ProbeStage::kTputRootPost);
+
+    if (tget_root_post && my_rank != 0) {
+        SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(probe_stage), peer);
+        return;
+    }
+    if (tput_root_post && my_rank != 0) {
+        uint32_t observed = 0;
+        for (uint32_t iter = 0; iter < kMaxBarrierPollIters; ++iter) {
+            if (tput_recv[elem_count - 1] == static_cast<float>(elem_count - 1)) {
+                observed = 1;
+                break;
+            }
+        }
+        if (observed == 0) {
+            SetStatus(status, UrmaRealStatus::kTputWaitFailed, my_rank, peer);
+            return;
+        }
+        for (uint32_t i = 0; i < elem_count; ++i) {
+            float expected = static_cast<float>(i);
+            if (tput_recv[i] != expected) {
+                SetStatus(status, UrmaRealStatus::kTputMismatch, static_cast<int32_t>(i), peer);
+                status[3] = static_cast<int32_t>(tput_recv[i]);
+                return;
+            }
+        }
+        SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(elem_count), peer);
+        return;
+    }
+
     (void)transfer_bytes;
     if (probe_stage == static_cast<uint32_t>(ProbeStage::kWorkspace)) {
         SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(probe_stage), peer);
@@ -235,14 +268,26 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     const bool run_tget = probe_stage == static_cast<uint32_t>(ProbeStage::kFull) ||
                           probe_stage == static_cast<uint32_t>(ProbeStage::kTgetPost) ||
-                          probe_stage == static_cast<uint32_t>(ProbeStage::kTgetTestOnce);
+                          probe_stage == static_cast<uint32_t>(ProbeStage::kTgetTestOnce) || tget_root_post;
     const bool run_tput = probe_stage == static_cast<uint32_t>(ProbeStage::kFull) ||
                           probe_stage == static_cast<uint32_t>(ProbeStage::kTputPost) ||
-                          probe_stage == static_cast<uint32_t>(ProbeStage::kTputTestOnce);
+                          probe_stage == static_cast<uint32_t>(ProbeStage::kTputTestOnce) || tput_root_post;
     if (run_tget) {
         auto event = pto::comm::TGET_ASYNC<pto::comm::DmaEngine::URMA>(local_tget_recv_g, remote_send_g, tget_session);
         bool observed_ready = event.Test(tget_session);
         if (!WaitUrmaBounded(event, tget_session, status, UrmaRealStatus::kTgetWaitFailed)) {
+            return;
+        }
+        if (tget_root_post) {
+            for (uint32_t i = 0; i < elem_count; ++i) {
+                float expected = static_cast<float>(peer * 100000 + static_cast<int>(i));
+                if (tget_recv[i] != expected) {
+                    SetStatus(status, UrmaRealStatus::kTgetMismatch, static_cast<int32_t>(i), peer);
+                    status[3] = static_cast<int32_t>(tget_recv[i]);
+                    return;
+                }
+            }
+            SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(elem_count), peer);
             return;
         }
         if (probe_stage == static_cast<uint32_t>(ProbeStage::kTgetPost) ||
@@ -261,6 +306,10 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         auto event = pto::comm::TPUT_ASYNC<pto::comm::DmaEngine::URMA>(remote_tput_slot_g, local_send_g, tput_session);
         bool observed_ready = event.Test(tput_session);
         if (!WaitUrmaBounded(event, tput_session, status, UrmaRealStatus::kTputWaitFailed)) {
+            return;
+        }
+        if (tput_root_post) {
+            SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(event.handle & 0xFFFFFFFFu), peer);
             return;
         }
         if (probe_stage == static_cast<uint32_t>(ProbeStage::kTputPost) ||

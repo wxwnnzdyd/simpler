@@ -223,11 +223,19 @@ PYTHONPATH=$PWD:$PWD/python python \
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
   -p a5 -d 0-1 --probe-stage tput_test_once
+PYTHONPATH=$PWD:$PWD/python python \
+  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
+  -p a5 -d 0-1 --probe-stage tget_root_post
+PYTHONPATH=$PWD:$PWD/python python \
+  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
+  -p a5 -d 0-1 --probe-stage tput_root_post
 ```
 
 The probe stages run only the small case and return early after the named
 operation. The direct WQE access probes still return status code `60`; real
-`tget_*` and `tput_*` probes are expected to return status `0`.
+root-only `tget_*` and `tput_*` probes are expected to return status `0`.
+The bidirectional `tget_post` and `tput_post` probes intentionally keep the
+bidirectional submit pattern for isolating concurrency/runtime issues.
 
 Expected result for a completed Phase 3 implementation:
 

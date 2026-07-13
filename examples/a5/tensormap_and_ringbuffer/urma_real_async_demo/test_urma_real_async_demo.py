@@ -68,6 +68,8 @@ PROBE_STAGES = {
     "wqe_first_store": 16,
     "wqe_first_st_dev": 17,
     "wqe_mte_store": 18,
+    "tget_root_post": 19,
+    "tput_root_post": 20,
 }
 SAFE_PROBE_STAGES = (
     "workspace",
@@ -79,7 +81,7 @@ SAFE_PROBE_STAGES = (
 UNSAFE_PROBE_STAGES = (
     "wqe_first_store",
 )
-REAL_SUBMIT_PROBE_STAGES = ("tget_post", "tput_post")
+REAL_SUBMIT_PROBE_STAGES = ("tget_root_post", "tput_root_post")
 
 
 def parse_device_range(spec: str) -> list[int]:
