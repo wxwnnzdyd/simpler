@@ -75,11 +75,6 @@ AICORE inline void SetStatus(__gm__ int32_t *status, UrmaRealStatus code, int32_
     status[0] = static_cast<int32_t>(code);
     status[1] = detail0;
     status[2] = detail1;
-#ifdef PTO_URMA_SUPPORTED
-    pipe_barrier(PIPE_ALL);
-    pto::comm::urma::DcciCachelines(reinterpret_cast<__gm__ uint8_t *>(status), 32);
-    pipe_barrier(PIPE_ALL);
-#endif
 }
 
 template <typename Event, typename Session>
@@ -228,18 +223,17 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         status, UrmaRealStatus::kProbeEidReadDone, static_cast<int32_t>(eid0 & 0xFFFFFFFFu),
         static_cast<int32_t>(eid1 & 0xFFFFFFFFu)
     );
-    uint64_t remote_addr_value = reinterpret_cast<uint64_t>(remote_send);
-    __gm__ uint8_t *sqe_bytes = reinterpret_cast<__gm__ uint8_t *>(wqe_addr);
-    __gm__ uint32_t *sqe_dw = reinterpret_cast<__gm__ uint32_t *>(sqe_bytes);
     uint32_t sqe_dw0_without_owner = static_cast<uint32_t>(head % wq_ctx->depth) | (0x20U << 16) |
                                      ((remote_mem->tokenValueValid ? 1U : 0U) << 28) |
                                      ((remote_mem->rmtJettyType & 0x3U) << 29);
-    sqe_dw[0] = sqe_dw0_without_owner;
     SetStatus(
         status, UrmaRealStatus::kProbeRawSqeHeaderDone, static_cast<int32_t>(sqe_dw0_without_owner),
         static_cast<int32_t>(head)
     );
     return;
+    uint64_t remote_addr_value = reinterpret_cast<uint64_t>(remote_send);
+    __gm__ uint8_t *sqe_bytes = reinterpret_cast<__gm__ uint8_t *>(wqe_addr);
+    __gm__ uint32_t *sqe_dw = reinterpret_cast<__gm__ uint32_t *>(sqe_bytes);
     uint32_t sqe_owner = ((head & wq_ctx->depth) == 0U ? 1U : 0U);
     uint32_t sqe_dw0 = sqe_dw0_without_owner | (sqe_owner << 31);
     uint32_t sqe_dw1 = (static_cast<uint32_t>(remote_mem->targetHint) & 0xFFU) |
