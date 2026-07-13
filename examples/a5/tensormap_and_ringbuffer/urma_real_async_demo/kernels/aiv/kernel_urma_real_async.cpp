@@ -203,6 +203,12 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         status, UrmaRealStatus::kProbeWqeWriteDone, static_cast<int32_t>(old_wqe_word0 & 0xFFFFFFFFu),
         static_cast<int32_t>(head)
     );
+    uint64_t second_wqe_word0 = *wqe_word0;
+    SetStatus(
+        status, UrmaRealStatus::kProbeWqeOriginalStoreDone, static_cast<int32_t>(second_wqe_word0 & 0xFFFFFFFFu),
+        static_cast<int32_t>(head)
+    );
+    return;
     SetStatus(
         status, UrmaRealStatus::kProbeQueueIndexStoreBegin, static_cast<int32_t>(head), static_cast<int32_t>(tail)
     );
@@ -231,12 +237,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         status, UrmaRealStatus::kProbeRawSqeHeaderDone, static_cast<int32_t>(sqe_dw0_without_owner),
         static_cast<int32_t>(head)
     );
-    uint64_t late_wqe_word0 = *wqe_word0;
-    SetStatus(
-        status, UrmaRealStatus::kProbeWqeOriginalStoreDone, static_cast<int32_t>(late_wqe_word0 & 0xFFFFFFFFu),
-        static_cast<int32_t>(head)
-    );
-    return;
+    uint64_t late_wqe_word0 = second_wqe_word0;
     uint64_t remote_addr_value = reinterpret_cast<uint64_t>(remote_send);
     __gm__ uint8_t *sqe_bytes = reinterpret_cast<__gm__ uint8_t *>(wqe_addr);
     __gm__ uint32_t *sqe_dw = reinterpret_cast<__gm__ uint32_t *>(sqe_bytes);
