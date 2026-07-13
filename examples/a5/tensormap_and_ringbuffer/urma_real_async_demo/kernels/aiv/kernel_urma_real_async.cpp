@@ -59,6 +59,7 @@ enum class UrmaRealStatus : int32_t {
     kProbeWqeOriginalStoreDone = 45,
     kProbeFullSqeDone = 46,
     kProbeDcciDone = 47,
+    kProbeRankBypass = 48,
     kTgetMismatch = 100,
     kTputMismatch = 200,
 };
@@ -145,6 +146,10 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     }
 
     int peer = 1 - my_rank;
+    if (my_rank != 0) {
+        SetStatus(status, UrmaRealStatus::kProbeRankBypass, my_rank, peer);
+        return;
+    }
 
 #ifdef PTO_URMA_SUPPORTED
     using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
