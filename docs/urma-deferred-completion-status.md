@@ -19,10 +19,7 @@ Scope note:
 
 ## Phase 2: Real A5 Build And Workspace
 
-Status: code complete; local build validation passed; hardware smoke blocked by
-the current A5 account environment. Source-level regression coverage now guards
-the workspace wiring and the A5 hardware smoke assertions, but this is still not
-full hardware acceptance.
+Status: complete; A5 hardware smoke passed through `task-submit`.
 
 Validated:
 
@@ -50,23 +47,17 @@ Validated:
   HCCL Path-D allocation policy, `ACL_MEM_MALLOC_HUGE_FIRST`, and explains when
   to tighten it to `ACL_MEM_MALLOC_HUGE_ONLY`.
 
-Not yet validated:
+Hardware notes:
 
-- The Phase 2 hardware smoke
-  `tests/ut/py/test_worker/test_platform_comm.py --platform a5 --device 0-1`
-  did not run to completion in the current account.
-- The blocker is environment access, not a workspace assertion failure:
-  `npu-smi` cannot load driver runtime libraries because
-  `/usr/local/Ascend/driver/lib64/common/libsecurec.so` is readable only by
-  `HwHiAiUser`.
-- Because `npu-smi` cannot run, the A5 arch precheck cannot complete, and
-  `aclrtSetDevice` reports `507899`.
+- The direct, unlocked run failed before workspace validation because
+  `rtSetDevice` returned `507899`.
+- The locked `task-submit --device auto --device-num 2` run passed the Phase 2
+  hardware smoke: `1 passed in 17.37s`.
 
 Acceptance decision:
 
-- Treat Phase 2 as complete for development planning so Phase 3 can proceed.
-- Before declaring Phase 2 fully hardware-accepted, rerun the hardware smoke on
-  an A5 environment where the test user can run `npu-smi info` successfully.
+- Phase 2 is hardware-accepted. Use `task-submit` for future A5 validation; do
+  not treat the earlier unlocked `507899` run as a Phase 2 failure.
 
 Required hardware acceptance command:
 
@@ -100,8 +91,8 @@ workspace through base, dense-derived, and dynamic-domain contexts.
 
 ## Phase 3: Standalone Real URMA Correctness
 
-Status: demo code added; probe-only early returns removed; local source guard
-passed; real hardware run still pending.
+Status: not complete; hardware probes show the current real URMA submit design
+is unsafe on A5.
 
 Goal:
 
@@ -115,17 +106,16 @@ Implemented:
   two-rank dynamic communication domain.
 - Host staging uses `orch.copy_to` to initialize each rank's registered
   symmetric window before submitting the AIV kernel.
-- The AIV kernel reads `CommContext::workSpace`, builds a PTO-ISA URMA
-  `AsyncSession`, posts both READ and WRITE WQEs through a local UB-staged
-  MTE copy path, and uses bounded `event.Test(session)` polling so a failed CQ
-  completion returns a status code instead of hanging until the runtime op
-  timeout.
+- The AIV kernel reads `CommContext::workSpace` and can validate workspace,
+  remote memory metadata, EID, queue indices, and WQE address calculation.
+- The AIV kernel now fail-fasts known unsafe WQE write and submit probes with
+  status code `60`, because hardware runs showed those paths can stall until
+  the runtime op timeout.
 - URMA remote addresses are derived from `UrmaPeerMrBaseAddr(workspace, peer) +
   offset`.
-- A notification barrier runs after the outgoing TPUT wait so each rank verifies
-  its incoming TPUT only after the peer has completed the write.
-- The demo covers a small case (`16` float32 elements) and a page-spanning case
-  (`4096` float32 elements).
+- The demo keeps the small case (`16` float32 elements) and page-spanning case
+  (`4096` float32 elements) harness, but the full path now reports the unsafe
+  submit status instead of attempting data movement.
 
 Validated:
 
@@ -136,11 +126,10 @@ Validated:
 - Pytest collection includes the demo for `--platform a5`.
 - Pytest collection deselects the demo for `--platform a5sim`, so sim batches do
   not accidentally run a real-URMA-only test.
-- Local source regression confirms the kernel no longer bypasses rank 1, no
-  longer returns from probe code before the real URMA submit, and uses bounded
-  TGET/TPUT wait paths plus bounded rank synchronization.
+- Local source regression confirms the kernel no longer bypasses rank 1 and no
+  longer attempts the known unsafe direct WQE write variants.
 
-Not yet validated:
+Hardware findings:
 
 - A real A5 run on 2026-07-13 reached URMA workspace setup and launched the
   demo, but timed out after about 45 s with `aclrtSynchronizeStreamWithTimeout
@@ -149,11 +138,15 @@ Not yet validated:
   copy-back, so the next diagnostic step is the bounded-wait kernel above.
 - Later probe runs narrowed the failing access to the SQ WQE ring buffer at
   `UrmaWQCtx::bufAddr`: `wqe_addr`, `remote_mem`, and `eid_read` passed, while
-  `wqe_read`, `wqe_first_store`, `wqe_first_st_dev`, and the original
-  PTO-ISA-backed `tput_post` timed out. The current demo therefore avoids
-  AICore LSU direct access to WQE memory and posts WQEs by assembling the
-  64-byte WQE in UB and copying it to SQ with `copy_ubuf_to_gm_align_v2`,
-  following the SDMA/CANN hcomm pattern.
+  `wqe_read`, `wqe_first_store`, `wqe_first_st_dev`, `wqe_mte_store`, and the
+  original PTO-ISA-backed `tput_post` timed out. This proves that the current
+  URMA SQ WQE ring address is not safely reachable from AICore, either through
+  ordinary LSU stores, `st_dev`, or MTE copy. The demo now fail-fasts these
+  known unsafe paths with status code `60` instead of hanging the device.
+- CANN's public AIV `Hcomm<CommEngine::AIV, CommProtocol::ROCE>` path is not a
+  drop-in replacement for this workspace: it expects a ROCE/RDMA `Channel`
+  layout, while the HCCL channel conversion used here exposes a URMA/UB-JFS
+  `ChannelEntity` layout.
 - Device logs have not yet been inspected for URMA CQE status/substatus errors.
 
 Required hardware acceptance command:
@@ -224,14 +217,12 @@ PYTHONPATH=$PWD:$PWD/python python \
 ```
 
 The probe stages run only the small case and return early after the named
-operation. If a direct WQE probe hangs, the named access path is not safely
-reachable from AICore. `wqe_mte_store` is the decisive submit-path probe: if it
-passes but `tget_post` or `tput_post` still hangs, the remaining suspect is SQ
-doorbell/head update. If a post probe returns but `*_test_once` hangs, the stall
-is inside the first CQ test/poll. The TPUT probes are independent of the TGET
-path.
+operation. The WQE write probes now return status code `60` because the matching
+hardware runs already showed they can stall the AICore until the runtime reports
+`507000`. A future fix must replace the raw AICore WQE post mechanism rather
+than try another AICore write variant to `UrmaWQCtx::bufAddr`.
 
-Expected result:
+Expected result for a completed Phase 3 implementation:
 
 ```text
 [urma_real_async_demo] count=16 rank=0 status=[0, 16, 1, ...]

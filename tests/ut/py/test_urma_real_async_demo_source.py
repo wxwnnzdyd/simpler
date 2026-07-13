@@ -15,29 +15,30 @@ ORCH = (
 )
 
 
-def test_phase3_kernel_reaches_real_urma_submit_for_all_ranks() -> None:
+def test_phase3_kernel_does_not_bypass_ranks() -> None:
     source = KERNEL.read_text()
     assert "kProbeRankBypass" not in source
-    assert "auto tget_event" in source
-    assert "auto tput_event" in source
 
 
-def test_phase3_kernel_uses_bounded_waits_for_real_tget_and_tput() -> None:
+def test_phase3_kernel_failfasts_known_unsafe_wqe_access() -> None:
     source = KERNEL.read_text()
-    assert "UrmaGetAsyncViaMte" in source
-    assert "UrmaPutAsyncViaMte" in source
-    assert "copy_ubuf_to_gm_align_v2" in source
-    assert "WaitUrmaBounded(tget_event, tget_session" in source
-    assert "WaitUrmaBounded(tput_event, tput_session" in source
-    assert "tget_event.Wait(tget_session)" not in source
-    assert "tput_event.Wait(tput_session)" not in source
-    assert "DeviceBarrierBounded" in source
+    assert "kUnsafeWqeAccess = 60" in source
+    assert "UrmaGetAsyncViaMte" not in source
+    assert "UrmaPutAsyncViaMte" not in source
+    assert "copy_ubuf_to_gm_align_v2" not in source
+    assert "TGET_ASYNC<pto::comm::DmaEngine::URMA>" not in source
+    assert "TPUT_ASYNC<pto::comm::DmaEngine::URMA>" not in source
 
 
-def test_phase3_tget_probe_does_not_take_manual_wqe_read_path() -> None:
+def test_phase3_wqe_write_probes_do_not_touch_wqe_memory() -> None:
     source = KERNEL.read_text()
-    assert source.index("kWqeRead))") < source.index("uint64_t old_wqe_word0 = *wqe_word0;")
-    assert source.index("uint64_t old_wqe_word0 = *wqe_word0;") < source.index("Global local_tget_g")
+    for unsafe in [
+        "uint64_t old_wqe_word0 = *wqe_word0",
+        "*reinterpret_cast<__gm__ uint32_t *>(wqe_addr) = 0",
+        "st_dev(0U, reinterpret_cast<__gm__ uint32_t *>(wqe_addr), 0)",
+        "*wqe_word0 = old_wqe_word0 ^ 1ULL",
+    ]:
+        assert unsafe not in source
 
 
 def test_phase3_demo_exposes_probe_stage_cli_and_passes_it_to_kernel() -> None:
