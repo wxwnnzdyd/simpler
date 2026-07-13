@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -96,12 +97,20 @@ public:
         FreeDeviceAddr(urma_info_device_);
         FreeDeviceAddr(eid_device_);
         channel_handles_.clear();
+        hccl_channel_acquire_ = nullptr;
+        if (libhccl_handle_ != nullptr) {
+            dlclose(libhccl_handle_);
+            libhccl_handle_ = nullptr;
+        }
         initialized_ = false;
     }
 
     void *GetWorkspaceAddr() const { return urma_info_device_; }
 
 private:
+    using HcclChannelAcquireFn =
+        HcclResult (*)(HcclComm, CommEngine, const HcclChannelDesc *, uint32_t, ChannelHandle *);
+
     struct RoceSqContextInfo {
         uint64_t sqVa;
         uint64_t headAddr;
@@ -191,7 +200,7 @@ private:
         }
 
         channel_handles_.resize(descs.size());
-        HcclResult rc = HcclChannelAcquire(
+        HcclResult rc = HcclChannelAcquireFromLibhccl(
             comm_, COMM_ENGINE_AIV, descs.data(), static_cast<uint32_t>(descs.size()), channel_handles_.data()
         );
         if (rc != HCCL_SUCCESS) {
@@ -206,6 +215,45 @@ private:
             );
         }
         return true;
+    }
+
+    HcclResult HcclChannelAcquireFromLibhccl(
+        HcclComm comm, CommEngine engine, const HcclChannelDesc *descs, uint32_t channel_num, ChannelHandle *channels
+    ) {
+        HcclChannelAcquireFn fn = ResolveLibhcclChannelAcquire();
+        if (fn == nullptr) {
+            return HCCL_E_INTERNAL;
+        }
+        return fn(comm, engine, descs, channel_num, channels);
+    }
+
+    HcclChannelAcquireFn ResolveLibhcclChannelAcquire() {
+        if (hccl_channel_acquire_ != nullptr) return hccl_channel_acquire_;
+
+        dlerror();
+        libhccl_handle_ = dlopen("libhccl.so", RTLD_NOW | RTLD_NOLOAD);
+        if (libhccl_handle_ == nullptr) {
+            libhccl_handle_ = dlopen("libhccl.so", RTLD_NOW);
+        }
+        if (libhccl_handle_ == nullptr) {
+            LOG_WARN("[comm rank %u] URMA: dlopen libhccl.so failed: %s", rank_id_, dlerror());
+            return nullptr;
+        }
+
+        auto *sym = dlsym(libhccl_handle_, "HcclChannelAcquire");
+        if (sym == nullptr) {
+            LOG_WARN("[comm rank %u] URMA: dlsym(libhccl.so, HcclChannelAcquire) failed: %s", rank_id_, dlerror());
+            return nullptr;
+        }
+        hccl_channel_acquire_ = reinterpret_cast<HcclChannelAcquireFn>(sym);
+
+        Dl_info info{};
+        const char *path = "unknown";
+        if (dladdr(sym, &info) != 0 && info.dli_fname != nullptr) {
+            path = info.dli_fname;
+        }
+        LOG_WARN("[comm rank %u] URMA: HcclChannelAcquire resolved from %s", rank_id_, path);
+        return hccl_channel_acquire_;
     }
 
     bool ExtractAndFillUrmaInfo() {
@@ -872,6 +920,9 @@ private:
     std::vector<ChannelHandle> channel_handles_;
     void *urma_info_device_{nullptr};
     void *eid_device_{nullptr};
+
+    void *libhccl_handle_{nullptr};
+    HcclChannelAcquireFn hccl_channel_acquire_{nullptr};
 
     bool initialized_{false};
 };
