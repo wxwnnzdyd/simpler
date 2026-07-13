@@ -1741,6 +1741,10 @@ static int domain_alloc_via_ipc(
             h->rank
         );
     }
+    if (!file_barrier(rootinfo, my_dr, subset_n, domain_barrier_tag(allocation_id, "urma_ready"), run_token)) {
+        aclrtFree(localBuf);
+        return -1;
+    }
 
     CommContext ctx{};
     ctx.rankId = domain_rank;
@@ -1806,6 +1810,7 @@ extern "C" int comm_alloc_windows(CommHandle h, size_t win_size, uint64_t *devic
     if (alloc_windows_via_ipc(h, effective_win_size) != 0) return -1;
 
     ensure_base_urma_workspace(h);
+    if (!file_barrier(h->rootinfo_path, h->rank, h->nranks, "base_urma_ready", h->run_token)) return -1;
 
     void *newDevMem = nullptr;
     aclError aRet = aclrtMalloc(&newDevMem, sizeof(CommContext), ACL_MEM_MALLOC_HUGE_FIRST);
