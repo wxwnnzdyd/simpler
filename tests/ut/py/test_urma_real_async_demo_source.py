@@ -24,8 +24,9 @@ def test_phase3_kernel_reaches_real_urma_submit_for_all_ranks() -> None:
 
 def test_phase3_kernel_uses_bounded_waits_for_real_tget_and_tput() -> None:
     source = KERNEL.read_text()
-    assert "TGET_ASYNC<pto::comm::DmaEngine::URMA>" in source
-    assert "TPUT_ASYNC<pto::comm::DmaEngine::URMA>" in source
+    assert "UrmaGetAsyncViaMte" in source
+    assert "UrmaPutAsyncViaMte" in source
+    assert "copy_ubuf_to_gm_align_v2" in source
     assert "WaitUrmaBounded(tget_event, tget_session" in source
     assert "WaitUrmaBounded(tput_event, tput_session" in source
     assert "tget_event.Wait(tget_session)" not in source
@@ -69,6 +70,7 @@ def test_phase3_demo_exposes_probe_stage_cli_and_passes_it_to_kernel() -> None:
         "kWqeAddr",
         "kWqeFirstStore",
         "kWqeFirstStDev",
+        "kWqeMteStore",
     ]:
         assert stage in kernel_source
 

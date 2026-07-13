@@ -116,10 +116,10 @@ Implemented:
 - Host staging uses `orch.copy_to` to initialize each rank's registered
   symmetric window before submitting the AIV kernel.
 - The AIV kernel reads `CommContext::workSpace`, builds a PTO-ISA URMA
-  `AsyncSession`, issues both `TGET_ASYNC<DmaEngine::URMA>` and
-  `TPUT_ASYNC<DmaEngine::URMA>`, and uses bounded `event.Test(session)` polling
-  so a failed CQ completion returns a status code instead of hanging until the
-  runtime op timeout.
+  `AsyncSession`, posts both READ and WRITE WQEs through a local UB-staged
+  MTE copy path, and uses bounded `event.Test(session)` polling so a failed CQ
+  completion returns a status code instead of hanging until the runtime op
+  timeout.
 - URMA remote addresses are derived from `UrmaPeerMrBaseAddr(workspace, peer) +
   offset`.
 - A notification barrier runs after the outgoing TPUT wait so each rank verifies
@@ -147,14 +147,13 @@ Not yet validated:
   (AICPU) failed: 507000` and `PTO2 scheduler timeout sub_class=S1:running-stalled`.
   The host status tensors remained zero because fatal runtime status skipped
   copy-back, so the next diagnostic step is the bounded-wait kernel above.
-- A later `--probe-stage wqe_read` run timed out, narrowing one failing access
-  to an AICore load from the SQ WQE ring buffer address in `UrmaWQCtx::bufAddr`.
-  `remote_mem` and `eid_read` passed, so the MR and remote EID metadata are
-  readable. `--probe-stage tput_post` timed out even though it bypasses the
-  manual WQE read, so the remaining suspect is PTO-ISA's real URMA submit path:
-  queue-index device loads, SQ WQE writes/flush, or SQ doorbell/head update.
-  The diagnostic probe order now keeps `remote_mem`, `eid_read`, TGET, and TPUT
-  probes independent of the manual WQE read.
+- Later probe runs narrowed the failing access to the SQ WQE ring buffer at
+  `UrmaWQCtx::bufAddr`: `wqe_addr`, `remote_mem`, and `eid_read` passed, while
+  `wqe_read`, `wqe_first_store`, `wqe_first_st_dev`, and the original
+  PTO-ISA-backed `tput_post` timed out. The current demo therefore avoids
+  AICore LSU direct access to WQE memory and posts WQEs by assembling the
+  64-byte WQE in UB and copying it to SQ with `copy_ubuf_to_gm_align_v2`,
+  following the SDMA/CANN hcomm pattern.
 - Device logs have not yet been inspected for URMA CQE status/substatus errors.
 
 Required hardware acceptance command:
@@ -200,6 +199,9 @@ PYTHONPATH=$PWD:$PWD/python python \
   -p a5 -d 0-1 --probe-stage wqe_first_st_dev
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
+  -p a5 -d 0-1 --probe-stage wqe_mte_store
+PYTHONPATH=$PWD:$PWD/python python \
+  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
   -p a5 -d 0-1 --probe-stage wqe_write_restore
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
@@ -222,11 +224,12 @@ PYTHONPATH=$PWD:$PWD/python python \
 ```
 
 The probe stages run only the small case and return early after the named
-operation. If a pre-post probe hangs, the named address class is not safely
-reachable from AICore. If all pre-post probes return but `tget_post` hangs,
-the stall is inside PTO-ISA's real URMA WQE post path. If `tget_post` returns
-but `tget_test_once` hangs, the stall is inside the first CQ test/poll. The
-TPUT probes are independent of the TGET path.
+operation. If a direct WQE probe hangs, the named access path is not safely
+reachable from AICore. `wqe_mte_store` is the decisive submit-path probe: if it
+passes but `tget_post` or `tput_post` still hangs, the remaining suspect is SQ
+doorbell/head update. If a post probe returns but `*_test_once` hangs, the stall
+is inside the first CQ test/poll. The TPUT probes are independent of the TGET
+path.
 
 Expected result:
 

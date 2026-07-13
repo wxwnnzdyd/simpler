@@ -69,6 +69,7 @@ enum class ProbeStage : uint32_t {
     kWqeAddr = 15,
     kWqeFirstStore = 16,
     kWqeFirstStDev = 17,
+    kWqeMteStore = 18,
 };
 
 constexpr uint32_t kMaxUrmaPollIters = 10000000;
@@ -127,6 +128,98 @@ AICORE inline bool DeviceBarrierBounded(__gm__ CommContext *ctx, __gm__ int32_t 
     return true;
 }
 
+#ifdef PTO_URMA_SUPPORTED
+template <typename ScratchTile>
+AICORE inline void CopyUrmaWqeToSq(__gm__ uint8_t *wqe_addr, ScratchTile &scratch_tile) {
+    __ubuf__ uint8_t *ub = reinterpret_cast<__ubuf__ uint8_t *>(scratch_tile.data());
+    pipe_barrier(PIPE_ALL);
+    copy_ubuf_to_gm_align_v2(
+        reinterpret_cast<__gm__ uint32_t *>(wqe_addr), reinterpret_cast<__ubuf__ uint32_t *>(ub), 0, 1,
+        pto::comm::urma::kUrmaSqeSizeBytes + pto::comm::urma::kUrmaSgeSizeBytes, 0, 0, 0
+    );
+    set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    pipe_barrier(PIPE_ALL);
+}
+
+template <typename ScratchTile>
+AICORE inline uint32_t UrmaPostSendViaMte(
+    __gm__ uint8_t *context_gm, __gm__ uint8_t *remote_addr, __gm__ uint8_t *local_addr, uint32_t dest_rank_id,
+    uint32_t qp_idx, pto::comm::urma::UrmaOpcode opcode, uint64_t message_len, ScratchTile &scratch_tile
+) {
+    __gm__ pto::comm::urma::UrmaInfo *urma_info = reinterpret_cast<__gm__ pto::comm::urma::UrmaInfo *>(context_gm);
+    uint32_t qp_num = urma_info->qpNum;
+    __gm__ pto::comm::urma::UrmaWQCtx *wq_ctx = reinterpret_cast<__gm__ pto::comm::urma::UrmaWQCtx *>(
+        urma_info->sqPtr + (dest_rank_id * qp_num + qp_idx) * sizeof(pto::comm::urma::UrmaWQCtx)
+    );
+    uint32_t wqe_size = 1U << wq_ctx->wqeShiftSize;
+    uint32_t depth = wq_ctx->depth;
+    uint32_t cur_head = ld_dev(reinterpret_cast<__gm__ uint32_t *>(wq_ctx->headAddr), 0);
+    __gm__ pto::comm::urma::UrmaMemInfo *remote_mem = reinterpret_cast<__gm__ pto::comm::urma::UrmaMemInfo *>(
+        urma_info->memPtr + sizeof(pto::comm::urma::UrmaMemInfo) * dest_rank_id
+    );
+    __gm__ uint8_t *wqe_addr = reinterpret_cast<__gm__ uint8_t *>(wq_ctx->bufAddr + wqe_size * (cur_head % depth));
+
+    __ubuf__ uint8_t *ub = reinterpret_cast<__ubuf__ uint8_t *>(scratch_tile.data());
+    __ubuf__ uint32_t *dw = reinterpret_cast<__ubuf__ uint32_t *>(ub);
+    __gm__ uint64_t *remote_eid = reinterpret_cast<__gm__ uint64_t *>(remote_mem->eidAddr);
+    uint64_t remote_addr_value = reinterpret_cast<uint64_t>(remote_addr);
+    uint64_t local_addr_value = reinterpret_cast<uint64_t>(local_addr);
+
+    uint32_t owner = (cur_head & depth) == 0U ? 1U : 0U;
+    dw[0] = static_cast<uint32_t>(cur_head % depth) | (0x20U << 16) |
+            (static_cast<uint32_t>(remote_mem->tokenValueValid ? 1U : 0U) << 28) |
+            ((remote_mem->rmtJettyType & 0x3U) << 29) | (owner << 31);
+    dw[1] = static_cast<uint32_t>(remote_mem->targetHint) | (static_cast<uint32_t>(opcode) << 8);
+    dw[2] = (remote_mem->tpn & 0xFFFFFFU) | (1U << 24);
+    dw[3] = remote_mem->tid & 0xFFFFFU;
+    *reinterpret_cast<__ubuf__ uint64_t *>(ub + pto::comm::urma::kUrmaSqeRmtEidLOffset) = remote_eid[0];
+    *reinterpret_cast<__ubuf__ uint64_t *>(ub + pto::comm::urma::kUrmaSqeRmtEidHOffset) = remote_eid[1];
+    dw[8] = remote_mem->rmtTokenValue;
+    dw[9] = 0;
+    dw[10] = static_cast<uint32_t>(remote_addr_value & 0xFFFFFFFFU);
+    dw[11] = static_cast<uint32_t>((remote_addr_value >> 32) & 0xFFFFFFFFU);
+    dw[12] = static_cast<uint32_t>(message_len);
+    dw[13] = urma_info->localTokenId;
+    *reinterpret_cast<__ubuf__ uint64_t *>(ub + pto::comm::urma::kUrmaSqeSizeBytes + 8) = local_addr_value;
+
+    CopyUrmaWqeToSq(wqe_addr, scratch_tile);
+
+    cur_head++;
+    st_dev(cur_head, reinterpret_cast<__gm__ uint32_t *>(wq_ctx->dbAddr), 0);
+    st_dev(cur_head, reinterpret_cast<__gm__ uint32_t *>(wq_ctx->headAddr), 0);
+    return cur_head;
+}
+
+template <typename ScratchTile>
+AICORE inline pto::comm::AsyncEvent UrmaPutAsyncViaMte(
+    __gm__ uint8_t *dst, __gm__ uint8_t *src, uint64_t transfer_size, const pto::comm::urma::UrmaExecContext &exec_ctx,
+    ScratchTile &scratch_tile
+) {
+    uint32_t cur_head = UrmaPostSendViaMte(
+        exec_ctx.contextGm, dst, src, exec_ctx.destRankId, exec_ctx.qpIdx, pto::comm::urma::UrmaOpcode::WRITE,
+        transfer_size, scratch_tile
+    );
+    return pto::comm::AsyncEvent(
+        pto::comm::urma::detail::EncodeHandle(exec_ctx.destRankId, cur_head), pto::comm::DmaEngine::URMA
+    );
+}
+
+template <typename ScratchTile>
+AICORE inline pto::comm::AsyncEvent UrmaGetAsyncViaMte(
+    __gm__ uint8_t *dst, __gm__ uint8_t *src, uint64_t transfer_size, const pto::comm::urma::UrmaExecContext &exec_ctx,
+    ScratchTile &scratch_tile
+) {
+    uint32_t cur_head = UrmaPostSendViaMte(
+        exec_ctx.contextGm, src, dst, exec_ctx.destRankId, exec_ctx.qpIdx, pto::comm::urma::UrmaOpcode::READ,
+        transfer_size, scratch_tile
+    );
+    return pto::comm::AsyncEvent(
+        pto::comm::urma::detail::EncodeHandle(exec_ctx.destRankId, cur_head), pto::comm::DmaEngine::URMA
+    );
+}
+#endif
+
 }  // namespace
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
@@ -172,10 +265,14 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
     using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
     using Global = pto::GlobalTensor<float, ShapeDyn, StrideDyn, pto::Layout::ND>;
+    using WqeScratch = pto::Tile<pto::TileType::Vec, uint8_t, 1, 64, pto::BLayout::RowMajor, 1, 64>;
 
     ShapeDyn shape(1, 1, 1, 1, static_cast<int>(elem_count));
     StrideDyn stride(elem_count, elem_count, elem_count, elem_count, 1);
+    WqeScratch wqe_scratch;
+    TASSIGN(wqe_scratch, 0x0);
     __gm__ uint8_t *workspace = reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace);
+    uint64_t transfer_bytes = static_cast<uint64_t>(elem_count) * sizeof(float);
 
     uint64_t local_window_base = comm_ctx->windowsIn[comm_ctx->rankId];
     uint64_t peer_base = pto::comm::urma::UrmaPeerMrBaseAddr(workspace, static_cast<uint32_t>(peer));
@@ -230,11 +327,10 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         pto::comm::BuildAsyncSession<pto::comm::DmaEngine::URMA>(
             workspace, static_cast<uint32_t>(peer), tput_probe_session
         );
-        Global remote_tput_probe_g(remote_tput_slot, shape, stride);
-        Global local_send_probe_g(send, shape, stride);
         SetStatus(status, UrmaRealStatus::kTputPostBegin, my_rank, peer);
-        auto tput_probe_event = pto::comm::TPUT_ASYNC<pto::comm::DmaEngine::URMA>(
-            remote_tput_probe_g, local_send_probe_g, tput_probe_session
+        auto tput_probe_event = UrmaPutAsyncViaMte(
+            reinterpret_cast<__gm__ uint8_t *>(remote_tput_slot), reinterpret_cast<__gm__ uint8_t *>(send),
+            transfer_bytes, tput_probe_session.urmaSession.execCtx, wqe_scratch
         );
         SetStatus(
             status, UrmaRealStatus::kTputPostDone, static_cast<int32_t>(tput_probe_event.handle & 0xFFFFFFFFu), peer
@@ -278,19 +374,36 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     uint64_t wqe_addr = wq_ctx->bufAddr + static_cast<uint64_t>(wqe_size) * (head % wq_ctx->depth);
     __gm__ uint64_t *wqe_word0 = reinterpret_cast<__gm__ uint64_t *>(wqe_addr);
     if (probe_stage == static_cast<uint32_t>(ProbeStage::kWqeAddr)) {
-        SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(wqe_addr & 0xFFFFFFFFu), static_cast<int32_t>(head));
+        SetStatus(
+            status, UrmaRealStatus::kOk, static_cast<int32_t>(wqe_addr & 0xFFFFFFFFu), static_cast<int32_t>(head)
+        );
         status[3] = static_cast<int32_t>(wqe_size);
         status[4] = static_cast<int32_t>(wq_ctx->depth);
         return;
     }
     if (probe_stage == static_cast<uint32_t>(ProbeStage::kWqeFirstStore)) {
         *reinterpret_cast<__gm__ uint32_t *>(wqe_addr) = 0;
-        SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(wqe_addr & 0xFFFFFFFFu), static_cast<int32_t>(head));
+        SetStatus(
+            status, UrmaRealStatus::kOk, static_cast<int32_t>(wqe_addr & 0xFFFFFFFFu), static_cast<int32_t>(head)
+        );
         return;
     }
     if (probe_stage == static_cast<uint32_t>(ProbeStage::kWqeFirstStDev)) {
         st_dev(0U, reinterpret_cast<__gm__ uint32_t *>(wqe_addr), 0);
-        SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(wqe_addr & 0xFFFFFFFFu), static_cast<int32_t>(head));
+        SetStatus(
+            status, UrmaRealStatus::kOk, static_cast<int32_t>(wqe_addr & 0xFFFFFFFFu), static_cast<int32_t>(head)
+        );
+        return;
+    }
+    if (probe_stage == static_cast<uint32_t>(ProbeStage::kWqeMteStore)) {
+        __ubuf__ uint32_t *dw = reinterpret_cast<__ubuf__ uint32_t *>(wqe_scratch.data());
+        for (uint32_t i = 0; i < 16; ++i) {
+            dw[i] = 0;
+        }
+        CopyUrmaWqeToSq(reinterpret_cast<__gm__ uint8_t *>(wqe_addr), wqe_scratch);
+        SetStatus(
+            status, UrmaRealStatus::kOk, static_cast<int32_t>(wqe_addr & 0xFFFFFFFFu), static_cast<int32_t>(head)
+        );
         return;
     }
     if (probe_stage == static_cast<uint32_t>(ProbeStage::kWqeRead)) {
@@ -314,8 +427,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     Global local_tget_g(tget_recv, shape, stride);
     Global remote_send_g(remote_send, shape, stride);
+    (void)local_tget_g;
+    (void)remote_send_g;
     SetStatus(status, UrmaRealStatus::kTgetPostBegin, my_rank, peer);
-    auto tget_event = pto::comm::TGET_ASYNC<pto::comm::DmaEngine::URMA>(local_tget_g, remote_send_g, tget_session);
+    auto tget_event = UrmaGetAsyncViaMte(
+        reinterpret_cast<__gm__ uint8_t *>(tget_recv), reinterpret_cast<__gm__ uint8_t *>(remote_send), transfer_bytes,
+        tget_session.urmaSession.execCtx, wqe_scratch
+    );
     SetStatus(status, UrmaRealStatus::kTgetPostDone, static_cast<int32_t>(tget_event.handle & 0xFFFFFFFFu), peer);
     if (probe_stage == static_cast<uint32_t>(ProbeStage::kTgetPost)) {
         return;
@@ -333,8 +451,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     pto::comm::BuildAsyncSession<pto::comm::DmaEngine::URMA>(workspace, static_cast<uint32_t>(peer), tput_session);
     Global remote_tput_g(remote_tput_slot, shape, stride);
     Global local_send_g(send, shape, stride);
+    (void)remote_tput_g;
+    (void)local_send_g;
     SetStatus(status, UrmaRealStatus::kTputPostBegin, my_rank, peer);
-    auto tput_event = pto::comm::TPUT_ASYNC<pto::comm::DmaEngine::URMA>(remote_tput_g, local_send_g, tput_session);
+    auto tput_event = UrmaPutAsyncViaMte(
+        reinterpret_cast<__gm__ uint8_t *>(remote_tput_slot), reinterpret_cast<__gm__ uint8_t *>(send), transfer_bytes,
+        tput_session.urmaSession.execCtx, wqe_scratch
+    );
     SetStatus(status, UrmaRealStatus::kTputPostDone, static_cast<int32_t>(tput_event.handle & 0xFFFFFFFFu), peer);
     if (probe_stage == static_cast<uint32_t>(ProbeStage::kTputPost)) {
         return;

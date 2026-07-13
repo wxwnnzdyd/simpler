@@ -66,6 +66,7 @@ PROBE_STAGES = {
     "wqe_addr": 15,
     "wqe_first_store": 16,
     "wqe_first_st_dev": 17,
+    "wqe_mte_store": 18,
 }
 
 
