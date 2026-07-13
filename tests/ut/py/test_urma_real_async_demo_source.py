@@ -22,6 +22,8 @@ def test_phase3_kernel_does_not_bypass_ranks() -> None:
 
 def test_phase3_kernel_failfasts_known_unsafe_wqe_access() -> None:
     source = KERNEL.read_text()
+    assert "#undef MEMORY_BASE" in source
+    assert "#define REGISTER_BASE" in source
     assert "kUnsafeWqeAccess = 60" in source
     assert "UrmaGetAsyncViaMte" not in source
     assert "UrmaPutAsyncViaMte" not in source

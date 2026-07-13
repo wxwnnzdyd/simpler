@@ -18,6 +18,13 @@
 #define __aicore__ [aicore]
 #endif
 
+#ifdef MEMORY_BASE
+#undef MEMORY_BASE
+#endif
+#ifndef REGISTER_BASE
+#define REGISTER_BASE
+#endif
+
 #include <pto/pto-inst.hpp>
 #include "pto/common/pto_tile.hpp"
 #include "pto/comm/comm_types.hpp"

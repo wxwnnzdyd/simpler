@@ -165,6 +165,8 @@ PYTHONPATH=$PWD:$PWD/python python \
 
 This default command runs the full real-submit path. It should pass only if both
 ranks complete real `TGET_ASYNC<URMA>` and `TPUT_ASYNC<URMA>` data movement.
+The demo kernel undefines `MEMORY_BASE` and defines `REGISTER_BASE` before PTO
+headers, matching A5 PTO communication ST compile mode for URMA instructions.
 
 Diagnostic probe commands:
 
