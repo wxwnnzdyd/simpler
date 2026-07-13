@@ -68,6 +68,7 @@ enum class ProbeStage : uint32_t {
     kQueueIndexLdDev = 14,
     kWqeAddr = 15,
     kWqeFirstStore = 16,
+    kWqeFirstStDev = 17,
 };
 
 constexpr uint32_t kMaxUrmaPollIters = 10000000;
@@ -284,6 +285,11 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     }
     if (probe_stage == static_cast<uint32_t>(ProbeStage::kWqeFirstStore)) {
         *reinterpret_cast<__gm__ uint32_t *>(wqe_addr) = 0;
+        SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(wqe_addr & 0xFFFFFFFFu), static_cast<int32_t>(head));
+        return;
+    }
+    if (probe_stage == static_cast<uint32_t>(ProbeStage::kWqeFirstStDev)) {
+        st_dev(0U, reinterpret_cast<__gm__ uint32_t *>(wqe_addr), 0);
         SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(wqe_addr & 0xFFFFFFFFu), static_cast<int32_t>(head));
         return;
     }

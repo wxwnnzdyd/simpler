@@ -65,6 +65,7 @@ PROBE_STAGES = {
     "queue_index_ld_dev": 14,
     "wqe_addr": 15,
     "wqe_first_store": 16,
+    "wqe_first_st_dev": 17,
 }
 
 

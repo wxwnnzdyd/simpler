@@ -68,6 +68,7 @@ def test_phase3_demo_exposes_probe_stage_cli_and_passes_it_to_kernel() -> None:
         "kQueueIndexLdDev",
         "kWqeAddr",
         "kWqeFirstStore",
+        "kWqeFirstStDev",
     ]:
         assert stage in kernel_source
 

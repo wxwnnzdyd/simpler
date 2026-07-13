@@ -197,6 +197,9 @@ PYTHONPATH=$PWD:$PWD/python python \
   -p a5 -d 0-1 --probe-stage wqe_first_store
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
+  -p a5 -d 0-1 --probe-stage wqe_first_st_dev
+PYTHONPATH=$PWD:$PWD/python python \
+  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
   -p a5 -d 0-1 --probe-stage wqe_write_restore
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
