@@ -33,6 +33,12 @@ def test_phase3_kernel_uses_bounded_waits_for_real_tget_and_tput() -> None:
     assert "DeviceBarrierBounded" in source
 
 
+def test_phase3_tget_probe_does_not_take_manual_wqe_read_path() -> None:
+    source = KERNEL.read_text()
+    assert source.index("kWqeRead))") < source.index("uint64_t old_wqe_word0 = *wqe_word0;")
+    assert source.index("uint64_t old_wqe_word0 = *wqe_word0;") < source.index("Global local_tget_g")
+
+
 def test_phase3_demo_exposes_probe_stage_cli_and_passes_it_to_kernel() -> None:
     test_source = TEST_PY.read_text()
     orch_source = ORCH.read_text()
@@ -59,6 +65,9 @@ def test_phase3_demo_exposes_probe_stage_cli_and_passes_it_to_kernel() -> None:
         "kTgetTestOnce",
         "kTputPost",
         "kTputTestOnce",
+        "kQueueIndexLdDev",
+        "kWqeAddr",
+        "kWqeFirstStore",
     ]:
         assert stage in kernel_source
 

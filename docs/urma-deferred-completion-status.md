@@ -147,11 +147,14 @@ Not yet validated:
   (AICPU) failed: 507000` and `PTO2 scheduler timeout sub_class=S1:running-stalled`.
   The host status tensors remained zero because fatal runtime status skipped
   copy-back, so the next diagnostic step is the bounded-wait kernel above.
-- A later `--probe-stage tget_post` run also timed out, proving the stall happens
-  before a URMA event handle is returned. A `--probe-stage wqe_read` run then
-  timed out, narrowing the failing access to an AICore load from the SQ WQE ring
-  buffer address in `UrmaWQCtx::bufAddr`. The diagnostic probe order now keeps
-  `remote_mem`, `eid_read`, and TPUT probes independent of that WQE read.
+- A later `--probe-stage wqe_read` run timed out, narrowing one failing access
+  to an AICore load from the SQ WQE ring buffer address in `UrmaWQCtx::bufAddr`.
+  `remote_mem` and `eid_read` passed, so the MR and remote EID metadata are
+  readable. `--probe-stage tput_post` timed out even though it bypasses the
+  manual WQE read, so the remaining suspect is PTO-ISA's real URMA submit path:
+  queue-index device loads, SQ WQE writes/flush, or SQ doorbell/head update.
+  The diagnostic probe order now keeps `remote_mem`, `eid_read`, TGET, and TPUT
+  probes independent of the manual WQE read.
 - Device logs have not yet been inspected for URMA CQE status/substatus errors.
 
 Required hardware acceptance command:
@@ -182,7 +185,16 @@ PYTHONPATH=$PWD:$PWD/python python \
   -p a5 -d 0-1 --probe-stage queue_index_read
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
+  -p a5 -d 0-1 --probe-stage queue_index_ld_dev
+PYTHONPATH=$PWD:$PWD/python python \
+  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
+  -p a5 -d 0-1 --probe-stage wqe_addr
+PYTHONPATH=$PWD:$PWD/python python \
+  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
   -p a5 -d 0-1 --probe-stage wqe_read
+PYTHONPATH=$PWD:$PWD/python python \
+  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
+  -p a5 -d 0-1 --probe-stage wqe_first_store
 PYTHONPATH=$PWD:$PWD/python python \
   examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
   -p a5 -d 0-1 --probe-stage wqe_write_restore

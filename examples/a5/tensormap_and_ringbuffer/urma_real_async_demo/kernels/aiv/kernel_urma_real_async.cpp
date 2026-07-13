@@ -65,6 +65,9 @@ enum class ProbeStage : uint32_t {
     kTgetTestOnce = 11,
     kTputPost = 12,
     kTputTestOnce = 13,
+    kQueueIndexLdDev = 14,
+    kWqeAddr = 15,
+    kWqeFirstStore = 16,
 };
 
 constexpr uint32_t kMaxUrmaPollIters = 10000000;
@@ -263,12 +266,29 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(head), static_cast<int32_t>(tail));
         return;
     }
+    if (probe_stage == static_cast<uint32_t>(ProbeStage::kQueueIndexLdDev)) {
+        uint32_t head_ld = ld_dev(reinterpret_cast<__gm__ uint32_t *>(head_addr), 0);
+        uint32_t tail_ld = ld_dev(reinterpret_cast<__gm__ uint32_t *>(tail_addr), 0);
+        SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(head_ld), static_cast<int32_t>(tail_ld));
+        return;
+    }
 
     uint32_t wqe_size = 1U << wq_ctx->wqeShiftSize;
     uint64_t wqe_addr = wq_ctx->bufAddr + static_cast<uint64_t>(wqe_size) * (head % wq_ctx->depth);
     __gm__ uint64_t *wqe_word0 = reinterpret_cast<__gm__ uint64_t *>(wqe_addr);
-    uint64_t old_wqe_word0 = *wqe_word0;
+    if (probe_stage == static_cast<uint32_t>(ProbeStage::kWqeAddr)) {
+        SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(wqe_addr & 0xFFFFFFFFu), static_cast<int32_t>(head));
+        status[3] = static_cast<int32_t>(wqe_size);
+        status[4] = static_cast<int32_t>(wq_ctx->depth);
+        return;
+    }
+    if (probe_stage == static_cast<uint32_t>(ProbeStage::kWqeFirstStore)) {
+        *reinterpret_cast<__gm__ uint32_t *>(wqe_addr) = 0;
+        SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(wqe_addr & 0xFFFFFFFFu), static_cast<int32_t>(head));
+        return;
+    }
     if (probe_stage == static_cast<uint32_t>(ProbeStage::kWqeRead)) {
+        uint64_t old_wqe_word0 = *wqe_word0;
         SetStatus(
             status, UrmaRealStatus::kOk, static_cast<int32_t>(old_wqe_word0 & 0xFFFFFFFFu), static_cast<int32_t>(head)
         );
@@ -277,6 +297,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         return;
     }
     if (probe_stage == static_cast<uint32_t>(ProbeStage::kWqeWriteRestore)) {
+        uint64_t old_wqe_word0 = *wqe_word0;
         *wqe_word0 = old_wqe_word0 ^ 1ULL;
         *wqe_word0 = old_wqe_word0;
         SetStatus(

@@ -62,6 +62,9 @@ PROBE_STAGES = {
     "tget_test_once": 11,
     "tput_post": 12,
     "tput_test_once": 13,
+    "queue_index_ld_dev": 14,
+    "wqe_addr": 15,
+    "wqe_first_store": 16,
 }
 
 
