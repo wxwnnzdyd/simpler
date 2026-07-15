@@ -281,7 +281,17 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
                           probe_stage == static_cast<uint32_t>(ProbeStage::kTputTestOnce) || tput_root_post;
     if (run_tget) {
         auto event = pto::comm::TGET_ASYNC<pto::comm::DmaEngine::URMA>(local_tget_recv_g, remote_send_g, tget_session);
-        bool observed_ready = event.Test(tget_session);
+        if (probe_stage == static_cast<uint32_t>(ProbeStage::kTgetPost)) {
+            SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(event.handle & 0xFFFFFFFFu), 0);
+            return;
+        }
+        if (probe_stage == static_cast<uint32_t>(ProbeStage::kTgetTestOnce)) {
+            bool observed_ready = event.Test(tget_session);
+            SetStatus(
+                status, UrmaRealStatus::kOk, static_cast<int32_t>(event.handle & 0xFFFFFFFFu), observed_ready ? 1 : 0
+            );
+            return;
+        }
         if (!WaitUrmaBounded(event, tget_session, status, UrmaRealStatus::kTgetWaitFailed)) {
             return;
         }
@@ -297,34 +307,28 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
             SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(elem_count), peer);
             return;
         }
-        if (probe_stage == static_cast<uint32_t>(ProbeStage::kTgetPost) ||
-            probe_stage == static_cast<uint32_t>(ProbeStage::kTgetTestOnce)) {
-            SetStatus(
-                status, UrmaRealStatus::kOk, static_cast<int32_t>(event.handle & 0xFFFFFFFFu),
-                observed_ready ? 1 : 0
-            );
-            return;
-        }
     }
 
     if (run_tput) {
         pto::comm::AsyncSession tput_session;
         pto::comm::BuildAsyncSession<pto::comm::DmaEngine::URMA>(workspace, static_cast<uint32_t>(peer), tput_session);
         auto event = pto::comm::TPUT_ASYNC<pto::comm::DmaEngine::URMA>(remote_tput_slot_g, local_send_g, tput_session);
-        bool observed_ready = event.Test(tput_session);
+        if (probe_stage == static_cast<uint32_t>(ProbeStage::kTputPost)) {
+            SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(event.handle & 0xFFFFFFFFu), 0);
+            return;
+        }
+        if (probe_stage == static_cast<uint32_t>(ProbeStage::kTputTestOnce)) {
+            bool observed_ready = event.Test(tput_session);
+            SetStatus(
+                status, UrmaRealStatus::kOk, static_cast<int32_t>(event.handle & 0xFFFFFFFFu), observed_ready ? 1 : 0
+            );
+            return;
+        }
         if (!WaitUrmaBounded(event, tput_session, status, UrmaRealStatus::kTputWaitFailed)) {
             return;
         }
         if (tput_root_post) {
             SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(event.handle & 0xFFFFFFFFu), peer);
-            return;
-        }
-        if (probe_stage == static_cast<uint32_t>(ProbeStage::kTputPost) ||
-            probe_stage == static_cast<uint32_t>(ProbeStage::kTputTestOnce)) {
-            SetStatus(
-                status, UrmaRealStatus::kOk, static_cast<int32_t>(event.handle & 0xFFFFFFFFu),
-                observed_ready ? 1 : 0
-            );
             return;
         }
     }
