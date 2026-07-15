@@ -52,7 +52,6 @@ enum class UrmaRealStatus : int32_t {
     kTgetPostDone = 31,
     kTputPostBegin = 40,
     kTputPostDone = 41,
-    kBarrierWaitFailed = 50,
     kUnsafeWqeAccess = 60,
     kTgetMismatch = 100,
     kTputMismatch = 200,
@@ -83,14 +82,7 @@ enum class ProbeStage : uint32_t {
 };
 
 constexpr uint32_t kMaxUrmaPollIters = 10000000;
-constexpr uint32_t kMaxBarrierPollIters = 10000000;
-
-template <typename T>
-AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_ptr, int peer) {
-    uint64_t local_base = ctx->windowsIn[ctx->rankId];
-    uint64_t offset = reinterpret_cast<uint64_t>(local_ptr) - local_base;
-    return reinterpret_cast<__gm__ T *>(ctx->windowsIn[peer] + offset);
-}
+constexpr uint32_t kMaxRemoteWritePollIters = 10000000;
 
 AICORE inline void SetStatus(__gm__ int32_t *status, UrmaRealStatus code, int32_t detail0 = 0, int32_t detail1 = 0) {
     status[0] = static_cast<int32_t>(code);
@@ -110,32 +102,6 @@ WaitUrmaBounded(const Event &event, const Session &session, __gm__ int32_t *stat
         status, timeout_code, static_cast<int32_t>(event.handle & 0xFFFFFFFFu), static_cast<int32_t>(event.handle >> 32)
     );
     return false;
-}
-
-AICORE inline bool DeviceBarrierBounded(__gm__ CommContext *ctx, __gm__ int32_t *signal_base, int my_rank, int nranks) {
-    for (int peer = 0; peer < nranks; ++peer) {
-        if (peer == my_rank) continue;
-        __gm__ int32_t *remote_signal = CommRemotePtr(ctx, signal_base + my_rank, peer);
-        pto::comm::Signal signal(remote_signal);
-        pto::comm::TNOTIFY(signal, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
-    }
-
-    for (int peer = 0; peer < nranks; ++peer) {
-        if (peer == my_rank) continue;
-        __gm__ volatile int32_t *peer_signal = signal_base + peer;
-        bool observed = false;
-        for (uint32_t i = 0; i < kMaxBarrierPollIters; ++i) {
-            if (*peer_signal >= 1) {
-                observed = true;
-                break;
-            }
-        }
-        if (!observed) {
-            return false;
-        }
-    }
-    pipe_barrier(PIPE_ALL);
-    return true;
 }
 
 }  // namespace
@@ -159,6 +125,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         reinterpret_cast<__gm__ int32_t *>(signal_tensor->buffer.addr) + signal_tensor->start_offset;
     __gm__ int32_t *status =
         reinterpret_cast<__gm__ int32_t *>(status_tensor->buffer.addr) + status_tensor->start_offset;
+    (void)signal;
 
     SetStatus(status, UrmaRealStatus::kOk);
 
@@ -202,6 +169,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     GlobalFloat remote_send_g(remote_send, shape, stride);
     GlobalFloat remote_tput_slot_g(remote_tput_slot, shape, stride);
 
+    const bool full_probe = probe_stage == static_cast<uint32_t>(ProbeStage::kFull);
     const bool tget_root_post = probe_stage == static_cast<uint32_t>(ProbeStage::kTgetRootPost);
     const bool tput_root_post = probe_stage == static_cast<uint32_t>(ProbeStage::kTputRootPost);
 
@@ -209,9 +177,9 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(probe_stage), peer);
         return;
     }
-    if (tput_root_post && my_rank != 0) {
+    if ((tput_root_post || full_probe) && my_rank != 0) {
         uint32_t observed = 0;
-        for (uint32_t iter = 0; iter < kMaxBarrierPollIters; ++iter) {
+        for (uint32_t iter = 0; iter < kMaxRemoteWritePollIters; ++iter) {
             if (tput_recv[elem_count - 1] == static_cast<float>(elem_count - 1)) {
                 observed = 1;
                 break;
@@ -280,9 +248,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         return;
     }
 
-    const bool run_tget = probe_stage == static_cast<uint32_t>(ProbeStage::kFull) || tget_post_probe || tget_root_post;
-    const bool run_tput = probe_stage == static_cast<uint32_t>(ProbeStage::kFull) ||
-                          probe_stage == static_cast<uint32_t>(ProbeStage::kTputPost) ||
+    const bool run_tget = full_probe || tget_post_probe || tget_root_post;
+    const bool run_tput = full_probe || probe_stage == static_cast<uint32_t>(ProbeStage::kTputPost) ||
                           probe_stage == static_cast<uint32_t>(ProbeStage::kTputTestOnce) || tput_root_post;
     if (run_tget) {
         auto event = pto::comm::TGET_ASYNC<pto::comm::DmaEngine::URMA>(local_tget_recv_g, remote_send_g, tget_session);
@@ -300,7 +267,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         if (!WaitUrmaBounded(event, tget_session, status, UrmaRealStatus::kTgetWaitFailed)) {
             return;
         }
-        if (tget_root_post) {
+        if (tget_root_post || full_probe) {
             for (uint32_t i = 0; i < elem_count; ++i) {
                 float expected = static_cast<float>(peer * 100000 + static_cast<int>(i));
                 if (tget_recv[i] != expected) {
@@ -309,8 +276,10 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
                     return;
                 }
             }
-            SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(elem_count), peer);
-            return;
+            if (tget_root_post) {
+                SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(elem_count), peer);
+                return;
+            }
         }
     }
 
@@ -338,25 +307,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         }
     }
 
-    if (probe_stage == static_cast<uint32_t>(ProbeStage::kFull)) {
-        if (!DeviceBarrierBounded(comm_ctx, signal, my_rank, nranks)) {
-            SetStatus(status, UrmaRealStatus::kBarrierWaitFailed, my_rank, peer);
-            return;
-        }
-        for (uint32_t i = 0; i < elem_count; ++i) {
-            float expected = static_cast<float>(peer * 100000 + static_cast<int>(i));
-            if (tget_recv[i] != expected) {
-                SetStatus(status, UrmaRealStatus::kTgetMismatch, static_cast<int32_t>(i), peer);
-                status[3] = static_cast<int32_t>(tget_recv[i]);
-                return;
-            }
-            float tput_value = tput_recv[static_cast<uint32_t>(peer) * elem_count + i];
-            if (tput_value != expected) {
-                SetStatus(status, UrmaRealStatus::kTputMismatch, static_cast<int32_t>(i), peer);
-                status[3] = static_cast<int32_t>(tput_value);
-                return;
-            }
-        }
+    if (full_probe) {
         SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(elem_count), peer);
         return;
     }

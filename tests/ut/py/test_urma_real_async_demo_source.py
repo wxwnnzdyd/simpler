@@ -153,3 +153,15 @@ def test_phase3_comm_hccl_keeps_helper_namespace_closed_before_c_api() -> None:
 
     assert source.count("namespace {") == source.count("}  // namespace")
     assert source.rfind("}  // namespace", 0, source.index('extern "C" int comm_alloc_windows')) != -1
+
+
+def test_phase3_full_probe_uses_native_root_only_urma_pattern() -> None:
+    source = (REPO_ROOT / "examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/kernels/aiv/kernel_urma_real_async.cpp").read_text()
+
+    full_branch = source[source.index("const bool full_probe") : source.index("__gm__ pto::comm::urma::UrmaWQCtx")]
+    assert "(tput_root_post || full_probe) && my_rank != 0" in full_branch
+    assert "tget_root_post || full_probe" in full_branch
+    assert "tput_root_post || full_probe" in full_branch
+    assert "DeviceBarrierBounded" not in source
+    assert "CommRemotePtr" not in source
+    assert "kBarrierWaitFailed" not in source
