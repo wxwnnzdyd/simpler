@@ -590,6 +590,7 @@ add_a5_orchestrator_runtime_test(test_a5_orchestrator_fanin a5/test_orchestrator
 add_a5_runtime_test(test_a5_spsc_queue       a5/test_spsc_queue.cpp)
 add_a5_runtime_test(test_a5_wiring           a5/test_wiring.cpp)
 add_a5_runtime_test(test_a5_aicore_completion_mailbox a5/test_aicore_completion_mailbox.cpp)
+add_a5_runtime_test(test_a5_urma_completion_scheduler a5/test_urma_completion_scheduler.cpp)
 
 # Host logger silent/off behavior — no runtime deps, just compile host_log.cpp
 # alongside the test (faster than dlopen'ing libsimpler_log.so for a unit test).

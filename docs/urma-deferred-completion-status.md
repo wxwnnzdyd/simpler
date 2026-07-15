@@ -93,159 +93,105 @@ workspace through base, dense-derived, and dynamic-domain contexts.
 
 ## Phase 3: Standalone Real URMA Correctness
 
-Status: not complete; hardware probes show the current real URMA submit design
-is unsafe on A5.
+Status: complete; A5 hardware probes passed with the native PTO-ISA URMA
+workspace path.
 
 Goal:
 
 - Prove real PTO-ISA URMA submit and data movement correctness on A5, without
   connecting the operation to AICPU deferred completion.
 
-Implemented:
+Accepted implementation:
 
-- Added `examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/`.
-- The demo allocates all URMA source, destination, and signal buffers inside a
-  two-rank dynamic communication domain.
-- Host staging uses `orch.copy_to` to initialize each rank's registered
-  symmetric window before submitting the AIV kernel.
-- The AIV kernel reads `CommContext::workSpace` and can validate workspace,
-  remote memory metadata, EID, queue indices, and WQE address calculation.
-- The AIV kernel fail-fasts known unsafe direct WQE read/write probes with
-  status code `60`, because hardware runs showed those manual WQE accesses can
-  stall until the runtime op timeout.
-- URMA remote addresses are derived from `UrmaPeerMrBaseAddr(workspace, peer) +
-  offset`.
-- The demo keeps the small case (`16` float32 elements) and page-spanning case
-  (`4096` float32 elements) harness. The default CLI/pytest entry now runs the
-  full real `TGET_ASYNC<URMA>` and `TPUT_ASYNC<URMA>` path.
-- The optional `suite` probe mode still checks workspace, session, remote
-  metadata, EID, WQE address, real submit probes, and unsafe direct-WQE probes.
+- `examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/` is the hardware
+  smoke for standalone real URMA.
+- Host allocation uses a two-rank dynamic communication domain, with send,
+  TGET receive, TPUT receive, and signal buffers inside the registered
+  symmetric window.
+- The kernel derives remote addresses through
+  `UrmaPeerMrBaseAddr(workspace, peer) + offset`; it does not use
+  `windowsIn[peer]` as a URMA remote VA.
+- The full path uses PTO-ISA `TGET_ASYNC<URMA>` and `TPUT_ASYNC<URMA>` followed
+  by bounded in-kernel `event.Test`/`event.Wait`.
+- The full probe uses the native root-only pattern and does not use
+  `DeviceBarrierBounded`, `CommRemotePtr`, or peer-VA barriers.
 
-Validated:
-
-- `test_urma_real_async_demo.py` passes Python syntax compilation.
-- The new A5 incore kernel and orchestration shim compile with the local CANN
-  9.0.1 toolchain after the local sparse PTO-ISA checkout is populated with A5
-  instruction headers.
-- Pytest collection includes the demo for `--platform a5`.
-- The hardware pytest entry now validates real URMA data movement by default.
-- Pytest collection deselects the demo for `--platform a5sim`, so sim batches do
-  not accidentally run a real-URMA-only test.
-- Local source regression confirms the kernel no longer bypasses rank 1 and no
-  longer attempts the known unsafe direct WQE write variants.
-
-Hardware findings:
-
-- A real A5 run on 2026-07-13 reached URMA workspace setup and launched the
-  demo, but timed out after about 45 s with `aclrtSynchronizeStreamWithTimeout
-  (AICPU) failed: 507000` and `PTO2 scheduler timeout sub_class=S1:running-stalled`.
-  The host status tensors remained zero because fatal runtime status skipped
-  copy-back, so the next diagnostic step is the bounded-wait kernel above.
-- Later probe runs narrowed the unsafe manual access to the SQ WQE ring buffer at
-  `UrmaWQCtx::bufAddr`: `wqe_addr`, `remote_mem`, and `eid_read` passed, while
-  `wqe_read`, `wqe_first_store`, `wqe_first_st_dev`, `wqe_mte_store`, and the
-  earlier custom-workspace submit path timed out. PTO-ISA's own A5
-  `tget_async_urma`/`tput_async_urma` tests pass on the target hardware, so the
-  remaining issue is in simpler's HCCL channel-to-URMA-workspace translation.
-- CANN's public AIV `Hcomm<CommEngine::AIV, CommProtocol::ROCE>` path is not a
-  drop-in replacement for this workspace: it expects a ROCE/RDMA `Channel`
-  layout, while the HCCL channel conversion used here exposes a URMA/UB-JFS
-  `ChannelEntity` layout.
-- In simpler, `HcclChannelAcquire` can return an opaque host `AivUrmaChannel`
-  handle (`0xaaab...`) instead of a device `ChannelEntity` pointer. The host
-  workspace setup therefore keeps the local conversion path via HCOMM private
-  symbols before reading the device `ChannelEntity`.
-- Device logs have not yet been inspected for URMA CQE status/substatus errors.
-
-Required hardware acceptance command:
+A5 hardware accepted probes:
 
 ```bash
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1
+python examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py -p a5 -d 0,1 --build --probe-stage workspace_info
+python examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py -p a5 -d 0,1 --build --probe-stage remote_mem
+python examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py -p a5 -d 0,1 --build --probe-stage tget_post
+python examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py -p a5 -d 0,1 --build --probe-stage tget_root_post
+python examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py -p a5 -d 0,1 --build --probe-stage tput_root_post
+python examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py -p a5 -d 0,1 --build --probe-stage full
 ```
 
-This default command runs the full real-submit path. It should pass only if both
-ranks complete real `TGET_ASYNC<URMA>` and `TPUT_ASYNC<URMA>` data movement.
-The demo kernel undefines `MEMORY_BASE` and defines `REGISTER_BASE` before PTO
-headers, matching A5 PTO communication ST compile mode for URMA instructions.
+Acceptance decision:
 
-Diagnostic probe commands:
+- Phase 3 is complete for small and page-spanning real-submit correctness.
+- This proves real URMA WQE post and data movement under PTO-ISA's blocking
+  wait path.
+- This does not prove AICPU deferred CQ polling, CQ/SQ tail update, CQ
+  doorbell update, or fanout release under deferred completion. Those are Phase
+  4 acceptance criteria.
+
+## Phase 4: Real A5 Deferred Runtime
+
+Status: implementation in progress; hardware acceptance pending.
+
+Goal:
+
+- Connect real PTO-ISA URMA events to the deferred completion path already
+  exercised by the Phase 1 a5sim demo.
+
+Implemented wiring:
+
+- `UrmaTget` / `UrmaTput` descriptors use `send_request_entry` in
+  `src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/urma_completion_kernel.h`.
+- The real onboard path builds a PTO-ISA URMA session, submits
+  `TGET_ASYNC<URMA>` / `TPUT_ASYNC<URMA>`, and registers the returned event
+  instead of calling `event.Wait`.
+- Completion tokens use:
+  - `addr = event.handle`
+  - `backend_cookie = workspace pointer`
+  - `engine = COMPLETION_ENGINE_URMA`
+  - `completion_type = COMPLETION_TYPE_URMA_EVENT_HANDLE`
+- `poll_urma_event_handle(event_handle, workspace)` decodes the handle,
+  consumes send CQEs, and updates CQ tail, CQ doorbell, and SQ tail.
+- `examples/a5/tensormap_and_ringbuffer/urma_real_deferred_demo/` is the new
+  real A5 deferred smoke scene. It posts real URMA TGET/TPUT from AICore,
+  relies on AICPU polling for completion, and validates dependent consumer
+  execution after deferred completion.
+
+Validation commands:
 
 ```bash
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage workspace
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage build_session
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage workspace_info
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage wq_ctx
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage queue_index_read
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage queue_index_ld_dev
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage wqe_addr
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage wqe_read --expect-status 60
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage wqe_first_store --expect-status 60
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage wqe_first_st_dev --expect-status 60
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage wqe_mte_store --expect-status 60
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage wqe_write_restore --expect-status 60
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage remote_mem
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage eid_read
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage tget_post
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage tget_test_once
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage tput_post
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage tput_test_once
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage tget_root_post
-PYTHONPATH=$PWD:$PWD/python python \
-  examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/test_urma_real_async_demo.py \
-  -p a5 -d 0-1 --probe-stage tput_root_post
+python -m pytest tests/ut/py/test_urma_real_async_demo_source.py -q
+cmake -B tests/ut/cpp/build -S tests/ut/cpp
+cmake --build tests/ut/cpp/build --target test_a5_urma_completion_scheduler
+ctest --test-dir tests/ut/cpp/build -R test_a5_urma_completion_scheduler --output-on-failure
 ```
 
-The probe stages run only the small case and return early after the named
-operation. The direct WQE access probes still return status code `60`; real
-root-only `tget_*` and `tput_*` probes are expected to return status `0`.
-The bidirectional `tget_post` and `tput_post` probes intentionally keep the
-bidirectional submit pattern for isolating concurrency/runtime issues.
+Required A5 hardware acceptance command:
 
-Expected result for a completed Phase 3 implementation:
-
-```text
-[urma_real_async_demo] count=16 rank=0 status=[0, 16, 1, ...]
-[urma_real_async_demo] count=16 rank=1 status=[0, 16, 0, ...]
-[urma_real_async_demo] count=4096 rank=0 status=[0, 4096, 1, ...]
-[urma_real_async_demo] count=4096 rank=1 status=[0, 4096, 0, ...]
+```bash
+python examples/a5/tensormap_and_ringbuffer/urma_real_deferred_demo/test_urma_real_deferred_demo.py -p a5 -d 0,1 --build
 ```
+
+Hardware acceptance criteria:
+
+- no scheduler timeout;
+- no URMA CQE status/substatus error;
+- AICPU polling observes real CQ readiness and retires the task;
+- dependent consumer sees correct TGET data;
+- TPUT data lands in the peer registered symmetric window;
+- status tensors report `status[0] == 0` on both ranks for all cases.
+
+Open Phase 4 risk:
+
+- PTO-ISA's blocking wait path updates CQ tail and doorbell from AICore with
+  device load/store. The deferred path updates them from AICPU via the scheduler
+  mirror. A5 hardware must confirm that these AICPU stores are sufficient. If
+  not, use one of the fallback paths in `../impl.md`: AICore blocking smoke,
+  AICPU device-store primitive, or an AICore helper task for CQ retire.

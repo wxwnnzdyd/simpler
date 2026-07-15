@@ -13,6 +13,14 @@ ORCH = (
     REPO_ROOT
     / "examples/a5/tensormap_and_ringbuffer/urma_real_async_demo/kernels/orchestration/urma_real_async_orch.cpp"
 )
+DEFERRED_DEMO = REPO_ROOT / "examples/a5/tensormap_and_ringbuffer/urma_real_deferred_demo"
+DEFERRED_COMMON = DEFERRED_DEMO / "kernels/aiv/urma_real_deferred_common.h"
+DEFERRED_TGET = DEFERRED_DEMO / "kernels/aiv/kernel_urma_real_deferred_tget.cpp"
+DEFERRED_TPUT = DEFERRED_DEMO / "kernels/aiv/kernel_urma_real_deferred_tput.cpp"
+DEFERRED_CONSUMER = DEFERRED_DEMO / "kernels/aiv/kernel_urma_real_deferred_consumer.cpp"
+DEFERRED_ORCH = DEFERRED_DEMO / "kernels/orchestration/urma_real_deferred_orch.cpp"
+DEFERRED_TEST_PY = DEFERRED_DEMO / "test_urma_real_deferred_demo.py"
+STATUS_DOC = REPO_ROOT / "docs/urma-deferred-completion-status.md"
 
 
 def test_phase3_kernel_does_not_bypass_ranks() -> None:
@@ -165,3 +173,53 @@ def test_phase3_full_probe_uses_native_root_only_urma_pattern() -> None:
     assert "DeviceBarrierBounded" not in source
     assert "CommRemotePtr" not in source
     assert "kBarrierWaitFailed" not in source
+
+
+def test_phase3_status_doc_marks_real_urma_correctness_complete() -> None:
+    source = STATUS_DOC.read_text()
+
+    phase3 = source[source.index("## Phase 3: Standalone Real URMA Correctness") : source.index("## Phase 4")]
+    assert "Status: complete" in phase3
+    assert "UrmaPeerMrBaseAddr(workspace, peer) + offset" in phase3
+    assert "does not prove AICPU deferred CQ polling" in phase3
+
+
+def test_phase4_real_deferred_demo_uses_deferred_urma_backend() -> None:
+    tget = DEFERRED_TGET.read_text()
+    tput = DEFERRED_TPUT.read_text()
+    common = DEFERRED_COMMON.read_text()
+    orch = DEFERRED_ORCH.read_text()
+
+    assert "backend/urma/urma_completion_kernel.h" in common
+    assert "CommContext" in common
+    assert "comm_ctx->workSpace" in tget
+    assert "comm_ctx->workSpace" in tput
+    assert "UrmaPeerMrBaseAddr" in common
+    assert "send_request_entry" in tget
+    assert "send_request_entry" in tput
+    assert "UrmaTget" in tget
+    assert "UrmaTput" in tput
+    assert "event.Wait" not in tget
+    assert "event.Wait" not in tput
+    assert "TPUT_ASYNC" not in tget
+    assert "TPUT_ASYNC" not in tput
+    assert "TGET_ASYNC" not in tget
+    assert "TGET_ASYNC" not in tput
+    assert "rt_submit_aiv_task(0" in orch
+    assert "rt_submit_aiv_task(1" in orch
+    assert "rt_submit_aiv_task(2" in orch
+
+
+def test_phase4_real_deferred_consumer_depends_on_deferred_outputs() -> None:
+    consumer = DEFERRED_CONSUMER.read_text()
+    orch = DEFERRED_ORCH.read_text()
+    test_py = DEFERRED_TEST_PY.read_text()
+
+    assert "consumer_args.add_input(tget_tmp)" in orch
+    assert "consumer_args.add_input(tput_marker)" in orch
+    assert "Status::kTgetMismatch" in consumer
+    assert "Status::kTputMismatch" in consumer
+    assert "kMaxRemoteWritePollIters" in consumer
+    assert "@pytest.mark.requires_hardware" in test_py
+    assert "pytest.mark.platforms([\"a5\"])" in test_py
+    assert "platform != \"a5\"" in test_py
