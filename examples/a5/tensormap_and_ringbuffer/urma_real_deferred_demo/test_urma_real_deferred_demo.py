@@ -59,12 +59,12 @@ def build_chip_callable(platform: str) -> ChipCallable:
 
     children = []
     for func_id, rel, signature in [
-        (0, "kernels/aiv/kernel_urma_real_deferred_tget.cpp", [ArgDirection.IN, ArgDirection.OUT]),
-        (1, "kernels/aiv/kernel_urma_real_deferred_tput.cpp", [ArgDirection.IN, ArgDirection.IN, ArgDirection.OUT]),
+        (0, "kernels/aiv/kernel_urma_real_deferred_tget.cpp", [ArgDirection.IN, ArgDirection.OUT, ArgDirection.IN, ArgDirection.IN]),
+        (1, "kernels/aiv/kernel_urma_real_deferred_tput.cpp", [ArgDirection.IN, ArgDirection.IN, ArgDirection.OUT, ArgDirection.IN, ArgDirection.IN]),
         (
             2,
             "kernels/aiv/kernel_urma_real_deferred_consumer.cpp",
-            [ArgDirection.IN, ArgDirection.IN, ArgDirection.IN, ArgDirection.OUT],
+            [ArgDirection.IN, ArgDirection.IN, ArgDirection.IN, ArgDirection.OUT, ArgDirection.IN, ArgDirection.IN],
         ),
     ]:
         kernel = kc.compile_incore(
