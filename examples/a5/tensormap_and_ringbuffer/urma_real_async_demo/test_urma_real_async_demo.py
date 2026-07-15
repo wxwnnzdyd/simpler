@@ -46,6 +46,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DTYPE_NBYTES = 4
 SIGNAL_NBYTES = 16 * 4
 STATUS_WORDS = 8
+URMA_DATA_OFFSET_NBYTES = 64 * 4
 CASES = (16, 4096)
 K_UNSAFE_WQE_ACCESS = 60  # mirrors UrmaRealStatus::kUnsafeWqeAccess
 PROBE_STAGES = {
@@ -176,7 +177,10 @@ def run_case(
     send_nbytes = elem_count * DTYPE_NBYTES
     tget_nbytes = elem_count * DTYPE_NBYTES
     tput_nbytes = nranks * elem_count * DTYPE_NBYTES
-    window_size = max(send_nbytes + tget_nbytes + tput_nbytes + SIGNAL_NBYTES, 4 * 1024 * 1024)
+    window_size = max(
+        URMA_DATA_OFFSET_NBYTES + send_nbytes + tget_nbytes + tput_nbytes + SIGNAL_NBYTES,
+        4 * 1024 * 1024,
+    )
 
     send_host = [_send_pattern(rank, elem_count) for rank in range(nranks)]
     tget_zero = [_zero_float(elem_count) for _ in range(nranks)]
@@ -203,6 +207,12 @@ def run_case(
                 workers=list(range(nranks)),
                 window_size=window_size,
                 buffers=[
+                    CommBufferSpec(
+                        name="urma_reserved",
+                        dtype="int32",
+                        count=URMA_DATA_OFFSET_NBYTES // 4,
+                        nbytes=URMA_DATA_OFFSET_NBYTES,
+                    ),
                     CommBufferSpec(name="send", dtype="float32", count=elem_count, nbytes=send_nbytes),
                     CommBufferSpec(name="tget_recv", dtype="float32", count=elem_count, nbytes=tget_nbytes),
                     CommBufferSpec(

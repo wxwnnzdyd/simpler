@@ -95,6 +95,15 @@ def test_phase3_hardware_pytest_runs_real_full_submit_by_default() -> None:
     assert "kUnsafeWqeAccess" in test_source
 
 
+def test_phase3_urma_demo_keeps_native_data_offset() -> None:
+    test_source = TEST_PY.read_text()
+
+    assert "URMA_DATA_OFFSET_NBYTES = 64 * 4" in test_source
+    assert "URMA_DATA_OFFSET_NBYTES + send_nbytes" in test_source
+    assert 'name="urma_reserved"' in test_source
+    assert "URMA_DATA_OFFSET_NBYTES // 4" in test_source
+
+
 def test_phase2_workspace_smoke_asserts_a5_acceptance_points() -> None:
     test_source = (REPO_ROOT / "tests/ut/py/test_worker/test_platform_comm.py").read_text()
     assert '@pytest.mark.platforms(["a2a3", "a5"])' in test_source
