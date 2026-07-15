@@ -273,9 +273,14 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         return;
     }
 
-    const bool run_tget = probe_stage == static_cast<uint32_t>(ProbeStage::kFull) ||
-                          probe_stage == static_cast<uint32_t>(ProbeStage::kTgetPost) ||
-                          probe_stage == static_cast<uint32_t>(ProbeStage::kTgetTestOnce) || tget_root_post;
+    const bool tget_post_probe = probe_stage == static_cast<uint32_t>(ProbeStage::kTgetPost) ||
+                                 probe_stage == static_cast<uint32_t>(ProbeStage::kTgetTestOnce);
+    if (tget_post_probe && my_rank != 0) {
+        SetStatus(status, UrmaRealStatus::kOk, static_cast<int32_t>(probe_stage), peer);
+        return;
+    }
+
+    const bool run_tget = probe_stage == static_cast<uint32_t>(ProbeStage::kFull) || tget_post_probe || tget_root_post;
     const bool run_tput = probe_stage == static_cast<uint32_t>(ProbeStage::kFull) ||
                           probe_stage == static_cast<uint32_t>(ProbeStage::kTputPost) ||
                           probe_stage == static_cast<uint32_t>(ProbeStage::kTputTestOnce) || tput_root_post;
