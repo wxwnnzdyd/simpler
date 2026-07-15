@@ -62,9 +62,9 @@ CommHandle comm_init(int rank, int nranks, void *stream, const char *rootinfo_pa
 /**
  * Allocate RDMA / shared-memory windows and populate the device context.
  *
- * On HCCL this builds a per-rank symmetric pool via the public ACL IPC
- * primitives (aclrtMalloc + aclrtIpcMemGetExportKey / SetImportPid /
- * ImportByKey) and enables cross-card P2P via aclrtDeviceEnablePeerAccess.
+ * On HCCL this builds a per-rank symmetric pool. a2a3 imports peer windows
+ * through ACL IPC; a5 URMA registers the local window with PTO-ISA's native
+ * UrmaWorkspaceManager and derives peer addresses from CommContext::workSpace.
  * On sim it mallocs a shared region and partitions it.
  *
  * @param h               Handle from comm_init().
@@ -122,14 +122,13 @@ int comm_derive_context(
 );
 
 /**
- * Allocate a fresh per-rank symmetric window pool for a subset of ranks.
+ * Allocate or derive a per-rank communication window for a subset of ranks.
  *
- * Unlike comm_alloc_windows() which allocates the single base pool once at
- * bootstrap, this allocates an additional pool for a dynamically-derived
- * domain (a subset of the base communicator).  Multiple concurrent
- * allocations are disambiguated by `allocation_id`, which is mixed into
- * every internal handshake / barrier filename so a second allocation
- * does not collide with the first.
+ * Unlike comm_alloc_windows() which creates the base communication window once
+ * at bootstrap, this materialises a dynamically-derived domain (a subset of
+ * the base communicator).  Multiple concurrent allocations are disambiguated
+ * by `allocation_id`, which is mixed into every internal handshake / barrier
+ * filename so a second allocation does not collide with the first.
  *
  * This is a collective operation across the subset only: every
  * participating chip must call this with matching arguments; non-members
@@ -137,9 +136,10 @@ int comm_derive_context(
  * subset, so the parent (orchestrator) only needs to dispatch and wait
  * for completion — it does not need to broker the cross-rank handshake.
  *
- * On HCCL this performs aclrtMalloc + the same Path-D IPC pattern as
- * comm_alloc_windows but on a fresh per-allocation buffer.  On sim it
- * shm_opens a fresh POSIX shm scoped by `allocation_id`.
+ * On HCCL/a2a3 this performs aclrtMalloc + the same Path-D IPC pattern as
+ * comm_alloc_windows but on a fresh per-allocation buffer.  On HCCL/a5 this
+ * derives a slice from the base URMA window and reuses the base native URMA
+ * workspace.  On sim it shm_opens a fresh POSIX shm scoped by `allocation_id`.
  *
  * Resources allocated here remain owned by the base handle; either an
  * explicit comm_release_domain_windows() or final comm_destroy(base)
@@ -172,8 +172,9 @@ int comm_alloc_domain_windows(
  * Collectively release a domain window pool allocated by
  * comm_alloc_domain_windows().
  *
- * Frees the per-rank buffer (HCCL: aclrtFree; sim: munmap + shm_unlink)
- * and the device-side CommContext.  Synchronises subset members via a
+ * Frees the per-domain resources (HCCL/a2a3: aclrtFree buffer; HCCL/a5:
+ * derived CommContext only; sim: munmap + shm_unlink) and the device-side
+ * CommContext.  Synchronises subset members via a
  * release barrier scoped by `allocation_id` + the caller's `domain_rank`
  * within the subset.  `rank_count` is the subset size — used only to
  * size the barrier wait, not the rank list (which was already established

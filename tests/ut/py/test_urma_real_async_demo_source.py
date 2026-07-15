@@ -116,22 +116,33 @@ def test_phase2_workspace_smoke_asserts_a5_acceptance_points() -> None:
 
 def test_phase2_comm_hccl_initializes_and_propagates_urma_workspace() -> None:
     source = (REPO_ROOT / "src/a5/platform/onboard/host/comm_hccl.cpp").read_text()
-    assert "ensure_base_urma_workspace(h);" in source
+    assert "if (!ensure_base_urma_workspace(h)) return -1;" in source
     assert "h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->urma_workspace->GetWorkspaceAddr())" in source
     assert "h->host_ctx.workSpaceSize = urma_workspace_bytes" in source
-    assert "ctx.workSpace = reinterpret_cast<uint64_t>(out->urma_workspace->GetWorkspaceAddr())" in source
     assert "ctx.workSpace = h->host_ctx.workSpace" in source
+    assert "slice_window_addr(h->host_ctx.windowsIn[base_rank], window_offset)" in source
+    assert "domain_alloc_via_ipc" not in source
+    assert "out->urma_workspace" not in source
     assert "rank_ids_are_dense_prefix" in source
     assert "URMA workspace disabled for non-dense rank mapping" in source
 
 
-def test_phase3_comm_hccl_requires_device_aiv_channel_handles() -> None:
+def test_phase3_comm_hccl_uses_native_urma_workspace_manager() -> None:
     source = (REPO_ROOT / "src/a5/platform/onboard/host/comm_hccl.cpp").read_text()
     cmake = (REPO_ROOT / "src/a5/platform/onboard/host/CMakeLists.txt").read_text()
-    assert "class A5UrmaWorkspaceManager" in source
-    assert "ResolveDeviceChannelEntity" in source
-    assert "refusing private conversion" in source
-    assert "HcclChannelGetRemoteMems" in source
+    assert '#include "pto/comm/async/urma/urma_workspace_manager.hpp"' in source
+    assert "pto::comm::urma::UrmaWorkspaceManager" in source
+    assert "class A5UrmaWorkspaceManager" not in source
+    assert "ResolveDeviceChannelEntity" not in source
+    assert "refusing private conversion" not in source
     assert "BuildChannelEntityToDevice" not in source
     assert "GetUserRemoteMem" not in source
     assert "set(HCCL_LINK_TARGETS ${HCCL_LIB} ${HCOMM_LIB})" in cmake
+
+
+def test_phase3_comm_alloc_windows_fails_without_urma_workspace() -> None:
+    source = (REPO_ROOT / "src/a5/platform/onboard/host/comm_hccl.cpp").read_text()
+
+    assert "static bool ensure_base_urma_workspace(CommHandle h)" in source
+    assert "if (!ensure_base_urma_workspace(h)) return -1;" in source
+    assert "CommContext::workSpace remains 0" not in source

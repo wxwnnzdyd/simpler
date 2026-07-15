@@ -16,8 +16,8 @@ real ``tensormap_and_ringbuffer`` runtime on Ascend.  The flow under test:
      base HCCL membership is established lazily on the first
      ``orch.allocate_domain`` call inside ``Worker.run``.
   2. Inside ``Worker.run(orch_fn)``, call ``orch.allocate_domain(...)``
-     to drive ``comm_alloc_domain_windows`` (aclrtMalloc + IPC announce +
-     SetImportPid + ImportByKey).
+     to drive ``comm_alloc_domain_windows``. On a5 this derives a slice from
+     the base URMA window; a2a3 still uses the ACL IPC import path.
   3. Verify the returned per-chip ``ChipDomainContext`` carries a non-zero
      ``device_ctx`` + ``local_window_base`` on every participating chip.
   4. Exit the ``with`` block to mark the handle for release; the actual

@@ -118,11 +118,11 @@ a known starting state (matching the historical static-path contract).
 
 For a5 URMA, dynamic communication domains currently reuse the base symmetric
 window created by `comm_alloc_windows`; domain contexts are derived slices of
-that base window and reuse its `UrmaWorkspaceManager` workspace. The base
-window is currently allocated with `ACL_MEM_MALLOC_HUGE_FIRST`, the same policy
-used by the HCCL Path-D window allocator. This keeps the first real-workspace
-integration compatible with existing comm-window allocation behavior while
-still preferring huge pages.
+that base window and reuse the native PTO-ISA `UrmaWorkspaceManager` workspace.
+The base window is currently allocated with `ACL_MEM_MALLOC_HUGE_FIRST`, the
+same policy used by the HCCL Path-D window allocator. This keeps the first
+real-workspace integration compatible with existing comm-window allocation
+behavior while still preferring huge pages.
 PTO-ISA's URMA documentation recommends `ACL_MEM_MALLOC_HUGE_ONLY` for the
 strictest memory-registration contract; switch the a5 URMA window path to
 `HUGE_ONLY` only after hardware validation shows `HUGE_FIRST` can fall back to

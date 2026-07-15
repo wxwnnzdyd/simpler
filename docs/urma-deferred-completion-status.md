@@ -34,7 +34,8 @@ Validated:
   - `HcclChannelGetRemoteMems`
   - `HcclRankGraphGetLinks`
   - `HcclChannelAcquire`
-- `comm_alloc_windows` initializes a base URMA workspace and mirrors
+- `comm_alloc_windows` initializes a base URMA workspace through PTO-ISA's
+  native `pto::comm::urma::UrmaWorkspaceManager` and mirrors
   `GetWorkspaceAddr()` into `CommContext::workSpace`.
 - `CommContext::workSpaceSize` is populated with the expected workspace table
   size.
