@@ -1416,7 +1416,11 @@ static int alloc_windows_via_ipc(CommHandle h, uint64_t win_size) {
     for (int p = 0; p < nranks; ++p) {
         if (p == rank) continue;
         void *peerVa = nullptr;
-        aret = aclrtIpcMemImportByKey(&peerVa, peers[p].name, 0);
+        // ENABLE_PEER_ACCESS: the imported buffer lives on a peer device, so the
+        // import must request cross-device peer access. Without it the driver's
+        // halShmemOpenHandle rejects the cross-card handle (drvRetCode=8 ->
+        // rtsIpcMemImportByKey 507899). This is the proper API for peer access.
+        aret = aclrtIpcMemImportByKey(&peerVa, peers[p].name, ACL_RT_IPC_MEM_IMPORT_FLAG_ENABLE_PEER_ACCESS);
         if (aret != ACL_SUCCESS) {
             LOG_ERROR(
                 "[comm rank %d] ipc: ImportByKey(peer=%d pid=%d) -> %d", rank, p, peers[p].pid, static_cast<int>(aret)
@@ -1714,7 +1718,11 @@ static int domain_alloc_via_ipc(
     for (int p = 0; p < subset_n; ++p) {
         if (p == my_dr) continue;
         void *peerVa = nullptr;
-        aret = aclrtIpcMemImportByKey(&peerVa, peers[p].name, 0);
+        // ENABLE_PEER_ACCESS: the imported buffer lives on a peer device, so the
+        // import must request cross-device peer access. Without it the driver's
+        // halShmemOpenHandle rejects the cross-card handle (drvRetCode=8 ->
+        // rtsIpcMemImportByKey 507899). This is the proper API for peer access.
+        aret = aclrtIpcMemImportByKey(&peerVa, peers[p].name, ACL_RT_IPC_MEM_IMPORT_FLAG_ENABLE_PEER_ACCESS);
         if (aret != ACL_SUCCESS) {
             LOG_ERROR(
                 "[comm rank %d] alloc_domain: ImportByKey(peer_dr=%d pid=%d) -> %d", h->rank, p, peers[p].pid,
