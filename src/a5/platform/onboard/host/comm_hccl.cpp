@@ -1405,6 +1405,14 @@ static int alloc_windows_via_ipc(CommHandle h, uint64_t win_size) {
         return -1;
     }
 
+    // host_ctx was value-initialized at handle construction (CommContext{}),
+    // and the idempotency guard in comm_alloc_windows prevents a second
+    // entry; no re-zero needed before populating it here.
+    h->host_ctx.rankId = static_cast<uint32_t>(rank);
+    h->host_ctx.rankNum = static_cast<uint32_t>(nranks);
+    h->host_ctx.winSize = win_size;
+    h->host_ctx.windowsIn[rank] = reinterpret_cast<uint64_t>(localBuf);
+
     // A5 URMA does not need peer ACL VAs in windowsIn[]: device kernels derive
     // remote addresses from CommContext::workSpace and the local-buffer offset.
     // Newer CANN builds reject cross-process ImportByKey for this path, while
@@ -1419,13 +1427,6 @@ static int alloc_windows_via_ipc(CommHandle h, uint64_t win_size) {
     // is kept in CommContext only to preserve byte-equivalence with pto-isa's
     // parallel HcclDeviceContext declaration; removing it is gated on the
     // F4 private-ization decision (see .docs/28.l3-comm/ext.01.pr-774-review.md).
-    // host_ctx was value-initialized at handle construction (CommContext{}),
-    // and the idempotency guard in comm_alloc_windows prevents a second
-    // entry; no re-zero needed before populating it here.
-    h->host_ctx.rankId = static_cast<uint32_t>(rank);
-    h->host_ctx.rankNum = static_cast<uint32_t>(nranks);
-    h->host_ctx.winSize = win_size;
-    h->host_ctx.windowsIn[rank] = reinterpret_cast<uint64_t>(localBuf);
 
     for (int p = 0; p < nranks; ++p) {
         if (p == rank) continue;
