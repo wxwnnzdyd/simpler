@@ -39,7 +39,11 @@ inline uint32_t load_device_u32(uint64_t addr) {
 inline void store_device_u32(uint64_t addr, uint32_t value) {
     auto *ptr = reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(addr));
     __atomic_store_n(ptr, value, __ATOMIC_RELEASE);
+#if defined(__aarch64__)
     __asm__ __volatile__("dsb sy" ::: "memory");
+#else
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+#endif
 }
 
 inline uint32_t load_cqe_dw0(uint64_t cqe_addr) {
