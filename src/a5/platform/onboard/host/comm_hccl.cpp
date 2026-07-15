@@ -1690,30 +1690,11 @@ static int domain_alloc_via_ipc(
     out->rank = my_dr;
     out->nranks = subset_n;
     out->local_buf = localBuf;
-    if (rank_ids_are_dense_prefix(rank_ids, rank_count)) {
-        (void)init_urma_workspace(
-            h, domain_rank, static_cast<uint32_t>(rank_count), localBuf, win_size, out->urma_workspace
-        );
-    } else {
-        LOG_WARN(
-            "[comm rank %d] alloc_domain: URMA workspace disabled for non-dense rank mapping "
-            "(first supported version requires rank_ids[i] == i)",
-            h->rank
-        );
-    }
-    if (!file_barrier(rootinfo, my_dr, subset_n, domain_barrier_tag(allocation_id, "urma_ready"), run_token)) {
-        aclrtFree(localBuf);
-        return -1;
-    }
 
     CommContext ctx{};
     ctx.rankId = domain_rank;
     ctx.rankNum = static_cast<uint32_t>(subset_n);
     ctx.winSize = win_size;
-    if (out->urma_workspace) {
-        ctx.workSpace = reinterpret_cast<uint64_t>(out->urma_workspace->GetWorkspaceAddr());
-        ctx.workSpaceSize = urma_workspace_bytes(static_cast<uint32_t>(rank_count));
-    }
     ctx.windowsIn[my_dr] = reinterpret_cast<uint64_t>(localBuf);
     for (int p = 0; p < subset_n; ++p) {
         if (p == my_dr) continue;
@@ -1732,6 +1713,26 @@ static int domain_alloc_via_ipc(
             return -1;
         }
         ctx.windowsIn[p] = reinterpret_cast<uint64_t>(peerVa);
+    }
+
+    if (rank_ids_are_dense_prefix(rank_ids, rank_count)) {
+        (void)init_urma_workspace(
+            h, domain_rank, static_cast<uint32_t>(rank_count), localBuf, win_size, out->urma_workspace
+        );
+    } else {
+        LOG_WARN(
+            "[comm rank %d] alloc_domain: URMA workspace disabled for non-dense rank mapping "
+            "(first supported version requires rank_ids[i] == i)",
+            h->rank
+        );
+    }
+    if (!file_barrier(rootinfo, my_dr, subset_n, domain_barrier_tag(allocation_id, "urma_ready"), run_token)) {
+        aclrtFree(localBuf);
+        return -1;
+    }
+    if (out->urma_workspace) {
+        ctx.workSpace = reinterpret_cast<uint64_t>(out->urma_workspace->GetWorkspaceAddr());
+        ctx.workSpaceSize = urma_workspace_bytes(static_cast<uint32_t>(rank_count));
     }
 
     void *newDevMem = nullptr;
