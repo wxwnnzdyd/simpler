@@ -141,10 +141,10 @@ target_include_directories(host_runtime
         ${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/include/driver
 )
 
-# Match pto-isa A5 communication tests: link libhccl before libhcomm.
-# The libhccl HcclChannelAcquire path converts AIV URMA channel handles to
-# device ChannelEntity pointers; using libhcomm alone returns opaque host
-# AivUrmaChannel handles that cannot be submitted from AIV.
+# Prefer libhccl when the CANN package ships it: on older A5 packages this was
+# the path that exposed device ChannelEntity handles for AIV URMA channels.
+# Newer CANN packages may only ship libhcomm, matching pto-isa's own A5 comm
+# tests, so fall back to hcomm-only rather than making the runtime unbuildable.
 find_library(HCCL_LIB
     NAMES hccl
     PATHS
@@ -162,9 +162,12 @@ find_library(HCOMM_LIB
 if(HCCL_LIB AND HCOMM_LIB)
     set(HCCL_LINK_TARGETS ${HCCL_LIB} ${HCOMM_LIB})
     message(STATUS "Using HCCL libraries: ${HCCL_LIB};${HCOMM_LIB}")
+elseif(HCOMM_LIB)
+    set(HCCL_LINK_TARGETS ${HCOMM_LIB})
+    message(WARNING "libhccl not found; using HCCL library: ${HCOMM_LIB}")
 else()
     message(FATAL_ERROR
-        "libhccl/libhcomm not found under ${ASCEND_HOME_PATH}/lib64 or ${ASCEND_ARCH_HOME}/lib64")
+        "libhcomm not found under ${ASCEND_HOME_PATH}/lib64 or ${ASCEND_ARCH_HOME}/lib64")
 endif()
 
 # Link against CANN runtime libraries
