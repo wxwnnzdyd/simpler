@@ -13,8 +13,10 @@
  *
  * Implements the five functions declared in host/comm.h using Ascend
  * HCCL (bundled with CANN) for the bootstrap / barrier / teardown plane
- * and the public ACL IPC primitives (aclrtIpcMem* + EnablePeerAccess)
- * for the per-rank symmetric window pool (Path D).
+ * and a local ACL allocation per rank for the symmetric window pool. A5 URMA
+ * remote access is described by the HCCL/URMA workspace, so this backend does
+ * not require importing peer ACL virtual addresses on CANN builds where
+ * cross-process ImportByKey is rejected.
  *
  * Scope: L3 single-host multi-card only. aclrtIpcMem* is host-local, so
  * cross-host (L4) deployments need a different windows backend -- see
@@ -965,6 +967,8 @@ struct CommHandle_ {
     uint64_t derived_domain_next_offset = 0;
 };
 
+constexpr bool kA5UrmaOnlyBackend = true;
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -1266,7 +1270,9 @@ static bool ipc_read_announce(
     return false;
 }
 
-// Fills h->host_ctx with rankId/rankNum/winSize/windowsIn[] via DIY IPC.
+// Fills h->host_ctx with rankId/rankNum/winSize/windowsIn[].  A5 URMA only
+// needs the local window base; peer memory is reached through the URMA
+// workspace metadata built from HCCL channels.
 // `win_size` is the per-rank pool byte size requested by the caller
 // (kDefaultIpcWinSize when 0).
 //
@@ -1397,6 +1403,14 @@ static int alloc_windows_via_ipc(CommHandle h, uint64_t win_size) {
     if (!file_barrier(rootinfo, rank, nranks, "ipc_auth_done", run_token)) {
         aclrtFree(localBuf);
         return -1;
+    }
+
+    // A5 URMA does not need peer ACL VAs in windowsIn[]: device kernels derive
+    // remote addresses from CommContext::workSpace and the local-buffer offset.
+    // Newer CANN builds reject cross-process ImportByKey for this path, while
+    // PTO-ISA's native URMA tests use HCCL/URMA metadata directly.
+    if (kA5UrmaOnlyBackend) {
+        return 0;
     }
 
     // Import every peer's buffer into our local VA space.

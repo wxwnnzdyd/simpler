@@ -41,11 +41,12 @@ Validated:
 - Dense prefix derived contexts reuse the base URMA workspace.
 - Non-dense derived contexts leave the URMA workspace disabled instead of
   reusing a mismatched base workspace.
-- Dense dynamic-domain allocations initialize an independent workspace for the
-  new symmetric buffer.
-- Documentation records that the A5 URMA symmetric window currently keeps the
-  HCCL Path-D allocation policy, `ACL_MEM_MALLOC_HUGE_FIRST`, and explains when
-  to tighten it to `ACL_MEM_MALLOC_HUGE_ONLY`.
+- Dense dynamic-domain allocations reuse the base URMA workspace and derive a
+  slice of the base symmetric window. They do not require a second ACL
+  `ImportByKey` flow.
+- Documentation records that the A5 URMA base symmetric window currently keeps
+  the HCCL Path-D allocation policy, `ACL_MEM_MALLOC_HUGE_FIRST`, and explains
+  when to tighten it to `ACL_MEM_MALLOC_HUGE_ONLY`.
 
 Hardware notes:
 

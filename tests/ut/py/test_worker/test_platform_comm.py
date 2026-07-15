@@ -131,8 +131,10 @@ def _rank_entry(
         if host_ctx.windowsIn[rank] != local_base:
             raise AssertionError(f"windowsIn[{rank}]=0x{host_ctx.windowsIn[rank]:x} != local_base=0x{local_base:x}")
         peer_windows = [int(host_ctx.windowsIn[i]) for i in range(nranks)]
-        if any(w == 0 for w in peer_windows):
+        if platform != "a5" and any(w == 0 for w in peer_windows):
             raise AssertionError(f"peer windowsIn contains zero: {peer_windows}")
+        if platform == "a5" and host_ctx.windowsIn[rank] == 0:
+            raise AssertionError(f"local windowsIn[{rank}] is zero: {peer_windows}")
         result["stage"] = "ctx_fields_ok"
         result["peer_windows"] = peer_windows
         result["win_size"] = int(win_size)
