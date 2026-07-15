@@ -96,7 +96,8 @@ inline __aicore__ uint64_t remote_base(__gm__ CommContext *comm_ctx, uint32_t pe
 #endif
 }
 
-inline __aicore__ uint64_t local_offset(__gm__ CommContext *comm_ctx, const void *ptr) {
+template <typename T>
+inline __aicore__ uint64_t local_offset(__gm__ CommContext *comm_ctx, __gm__ T *ptr) {
     return reinterpret_cast<uint64_t>(ptr) - comm_ctx->windowsIn[comm_ctx->rankId];
 }
 
