@@ -677,6 +677,8 @@ static int derive_context_device(
 
 static uint64_t align_up(uint64_t value, uint64_t alignment) { return (value + alignment - 1) / alignment * alignment; }
 
+}  // namespace
+
 extern "C" int comm_alloc_windows(CommHandle h, size_t win_size, uint64_t *device_ctx_out) try {
     if (!h || !device_ctx_out) return -1;
 

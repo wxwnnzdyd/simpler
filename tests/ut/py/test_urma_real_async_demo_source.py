@@ -146,3 +146,10 @@ def test_phase3_comm_alloc_windows_fails_without_urma_workspace() -> None:
     assert "static bool ensure_base_urma_workspace(CommHandle h)" in source
     assert "if (!ensure_base_urma_workspace(h)) return -1;" in source
     assert "CommContext::workSpace remains 0" not in source
+
+
+def test_phase3_comm_hccl_keeps_helper_namespace_closed_before_c_api() -> None:
+    source = (REPO_ROOT / "src/a5/platform/onboard/host/comm_hccl.cpp").read_text()
+
+    assert source.count("namespace {") == source.count("}  // namespace")
+    assert source.rfind("}  // namespace", 0, source.index('extern "C" int comm_alloc_windows')) != -1
