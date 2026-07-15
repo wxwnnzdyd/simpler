@@ -934,11 +934,10 @@ private:
 // ============================================================================
 
 // Per-domain dynamic allocation.  One of these per orch.allocate_domain call.
-// Tracks the local IPC buffer (aclrtMalloc'd here, freed in
-// comm_release_domain_windows) and the device CommContext we materialise for
-// the subset.  IPC import refs and EnablePeerAccess routes for this
-// allocation are NOT explicitly released — same contract as
-// alloc_windows_via_ipc (aclrtResetDevice at finalize reclaims them).
+// Tracks the domain-local device CommContext we materialise for the subset.
+// local_buf is non-null only for the fresh-IPC path; current A5 domains use
+// base-window slices because that is the hardware-validated URMA workspace
+// path.
 struct DomainAllocation {
     int rank = 0;    // this rank's index within the subset (domain_rank)
     int nranks = 0;  // subset size
@@ -963,6 +962,7 @@ struct CommHandle_ {
     std::vector<CommContext *> derived_contexts;
     std::unordered_map<uint64_t, std::unique_ptr<DomainAllocation>> domain_allocations;
     std::unique_ptr<A5UrmaWorkspaceManager> urma_workspace;
+    uint64_t derived_domain_next_offset = 0;
 };
 
 // ============================================================================
@@ -1561,6 +1561,78 @@ static void ensure_base_urma_workspace(CommHandle h) {
     h->host_ctx.workSpaceSize = urma_workspace_bytes(static_cast<uint32_t>(h->nranks));
 }
 
+static int derive_context_device(
+    CommHandle h, const uint32_t *rank_ids, size_t rank_count, uint32_t domain_rank, size_t window_offset,
+    size_t window_size, uint64_t *device_ctx_out, bool track_on_handle
+) {
+    if (!h || !rank_ids || !device_ctx_out) return -1;
+    if (h->host_ctx.rankNum == 0) {
+        LOG_ERROR("[comm rank %d] comm_derive_context: base windows are not allocated", h->rank);
+        return -1;
+    }
+    if (rank_count == 0 || rank_count > COMM_MAX_RANK_NUM || domain_rank >= rank_count) {
+        LOG_ERROR(
+            "[comm rank %d] comm_derive_context: invalid rank_count=%zu domain_rank=%u", h->rank, rank_count,
+            domain_rank
+        );
+        return -1;
+    }
+    if (window_offset + window_size > static_cast<size_t>(h->host_ctx.winSize)) {
+        LOG_ERROR(
+            "[comm rank %d] comm_derive_context: window range [%zu, %zu) exceeds base window size %llu", h->rank,
+            window_offset, window_offset + window_size, static_cast<unsigned long long>(h->host_ctx.winSize)
+        );
+        return -1;
+    }
+
+    CommContext ctx{};
+    if (rank_ids_are_dense_prefix(rank_ids, rank_count)) {
+        ctx.workSpace = h->host_ctx.workSpace;
+        ctx.workSpaceSize = h->host_ctx.workSpaceSize;
+    } else {
+        LOG_WARN(
+            "[comm rank %d] comm_derive_context: URMA workspace disabled for non-dense rank mapping "
+            "(first supported version requires rank_ids[i] == i)",
+            h->rank
+        );
+    }
+    ctx.rankId = domain_rank;
+    ctx.rankNum = static_cast<uint32_t>(rank_count);
+    ctx.winSize = window_size;
+    for (size_t i = 0; i < rank_count; ++i) {
+        uint32_t base_rank = rank_ids[i];
+        if (base_rank >= static_cast<uint32_t>(h->nranks)) {
+            LOG_ERROR(
+                "[comm rank %d] comm_derive_context: rank_ids[%zu]=%u out of range [0, %d)", h->rank, i, base_rank,
+                h->nranks
+            );
+            return -1;
+        }
+        ctx.windowsIn[i] = h->host_ctx.windowsIn[base_rank] + window_offset;
+        ctx.windowsOut[i] = h->host_ctx.windowsOut[base_rank] + window_offset;
+    }
+
+    void *newDevMem = nullptr;
+    aclError aRet = aclrtMalloc(&newDevMem, sizeof(CommContext), ACL_MEM_MALLOC_HUGE_FIRST);
+    if (aRet != ACL_SUCCESS) {
+        LOG_ERROR("[comm rank %d] comm_derive_context: aclrtMalloc failed: %d", h->rank, static_cast<int>(aRet));
+        return -1;
+    }
+    aRet = aclrtMemcpy(newDevMem, sizeof(CommContext), &ctx, sizeof(CommContext), ACL_MEMCPY_HOST_TO_DEVICE);
+    if (aRet != ACL_SUCCESS) {
+        LOG_ERROR("[comm rank %d] comm_derive_context: aclrtMemcpy H2D failed: %d", h->rank, static_cast<int>(aRet));
+        aclrtFree(newDevMem);
+        return -1;
+    }
+
+    auto *derived = reinterpret_cast<CommContext *>(newDevMem);
+    if (track_on_handle) h->derived_contexts.push_back(derived);
+    *device_ctx_out = reinterpret_cast<uint64_t>(derived);
+    return 0;
+}
+
+static uint64_t align_up(uint64_t value, uint64_t alignment) { return (value + alignment - 1) / alignment * alignment; }
+
 // Performs the per-allocation Path-D dance for one subset rank.  rank_ids
 // must list participating BASE-COMM rank ids in domain rank order; this
 // rank's domain_rank must match its base rank for the same invariant
@@ -1813,70 +1885,9 @@ extern "C" int comm_derive_context(
     CommHandle h, const uint32_t *rank_ids, size_t rank_count, uint32_t domain_rank, size_t window_offset,
     size_t window_size, uint64_t *device_ctx_out
 ) try {
-    if (!h || !rank_ids || !device_ctx_out) return -1;
-    if (h->host_ctx.rankNum == 0) {
-        LOG_ERROR("[comm rank %d] comm_derive_context: base windows are not allocated", h->rank);
-        return -1;
-    }
-    if (rank_count == 0 || rank_count > COMM_MAX_RANK_NUM || domain_rank >= rank_count) {
-        LOG_ERROR(
-            "[comm rank %d] comm_derive_context: invalid rank_count=%zu domain_rank=%u", h->rank, rank_count,
-            domain_rank
-        );
-        return -1;
-    }
-    if (window_offset + window_size > static_cast<size_t>(h->host_ctx.winSize)) {
-        LOG_ERROR(
-            "[comm rank %d] comm_derive_context: window range [%zu, %zu) exceeds base window size %llu", h->rank,
-            window_offset, window_offset + window_size, static_cast<unsigned long long>(h->host_ctx.winSize)
-        );
-        return -1;
-    }
-
-    CommContext ctx{};
-    if (rank_ids_are_dense_prefix(rank_ids, rank_count)) {
-        ctx.workSpace = h->host_ctx.workSpace;
-        ctx.workSpaceSize = h->host_ctx.workSpaceSize;
-    } else {
-        LOG_WARN(
-            "[comm rank %d] comm_derive_context: URMA workspace disabled for non-dense rank mapping "
-            "(first supported version requires rank_ids[i] == i)",
-            h->rank
-        );
-    }
-    ctx.rankId = domain_rank;
-    ctx.rankNum = static_cast<uint32_t>(rank_count);
-    ctx.winSize = window_size;
-    for (size_t i = 0; i < rank_count; ++i) {
-        uint32_t base_rank = rank_ids[i];
-        if (base_rank >= static_cast<uint32_t>(h->nranks)) {
-            LOG_ERROR(
-                "[comm rank %d] comm_derive_context: rank_ids[%zu]=%u out of range [0, %d)", h->rank, i, base_rank,
-                h->nranks
-            );
-            return -1;
-        }
-        ctx.windowsIn[i] = h->host_ctx.windowsIn[base_rank] + window_offset;
-        ctx.windowsOut[i] = h->host_ctx.windowsOut[base_rank] + window_offset;
-    }
-
-    void *newDevMem = nullptr;
-    aclError aRet = aclrtMalloc(&newDevMem, sizeof(CommContext), ACL_MEM_MALLOC_HUGE_FIRST);
-    if (aRet != ACL_SUCCESS) {
-        LOG_ERROR("[comm rank %d] comm_derive_context: aclrtMalloc failed: %d", h->rank, static_cast<int>(aRet));
-        return -1;
-    }
-    aRet = aclrtMemcpy(newDevMem, sizeof(CommContext), &ctx, sizeof(CommContext), ACL_MEMCPY_HOST_TO_DEVICE);
-    if (aRet != ACL_SUCCESS) {
-        LOG_ERROR("[comm rank %d] comm_derive_context: aclrtMemcpy H2D failed: %d", h->rank, static_cast<int>(aRet));
-        aclrtFree(newDevMem);
-        return -1;
-    }
-
-    auto *derived = reinterpret_cast<CommContext *>(newDevMem);
-    h->derived_contexts.push_back(derived);
-    *device_ctx_out = reinterpret_cast<uint64_t>(derived);
-    return 0;
+    return derive_context_device(
+        h, rank_ids, rank_count, domain_rank, window_offset, window_size, device_ctx_out, true
+    );
 } catch (const std::exception &e) {
     LOG_ERROR("[comm] comm_derive_context: exception: %s", e.what());
     return -1;
@@ -1925,31 +1936,50 @@ extern "C" int comm_alloc_domain_windows(
         );
         return -1;
     }
-    // The base communicator only needs comm_init to have run (rootinfo_path
-    // + run_token are set, used to scope barrier filenames).  We do NOT
-    // require comm_alloc_windows on the base in the orch-only model — the
-    // dynamic alloc path does its own per-allocation aclrtMalloc + IPC dance.
+    // The base communicator only needs comm_init to have run. A5 dynamic
+    // domains derive slices from the base window instead of allocating fresh
+    // ACL IPC pools; this reuses the hardware-validated Phase-2 URMA workspace
+    // path and avoids a second cross-process ImportByKey flow.
     if (h->rootinfo_path.empty() || h->hccl_comm == nullptr) {
         LOG_ERROR("[comm rank %d] alloc_domain: base communicator not initialised", h->rank);
         return -1;
     }
 
     auto alloc = std::make_unique<DomainAllocation>();
-    int rc = domain_alloc_via_ipc(h, allocation_id, rank_ids, rank_count, domain_rank, window_size, alloc.get());
-    if (rc != 0) return rc;
+    if (h->host_ctx.rankNum == 0) {
+        uint64_t base_ctx = 0;
+        const size_t base_hint = window_size <= kDefaultIpcWinSize ? 0 : window_size;
+        if (comm_alloc_windows(h, base_hint, &base_ctx) != 0) return -1;
+    }
 
-    // Zero the freshly-allocated local pool so kernels do not observe stale
-    // aclrtMalloc bytes (parity with the sim backend's memset).
-    aclError aret = aclrtMemset(alloc->local_buf, window_size, 0, window_size);
-    if (aret != ACL_SUCCESS) {
-        LOG_ERROR("[comm rank %d] alloc_domain: aclrtMemset -> %d", h->rank, static_cast<int>(aret));
-        aclrtFree(alloc->device_ctx);
-        aclrtFree(alloc->local_buf);
+    const uint64_t offset = align_up(h->derived_domain_next_offset, 4096);
+    if (offset + window_size > h->host_ctx.winSize) {
+        LOG_ERROR(
+            "[comm rank %d] alloc_domain: base window exhausted offset=%llu size=%zu winSize=%llu", h->rank,
+            static_cast<unsigned long long>(offset), window_size, static_cast<unsigned long long>(h->host_ctx.winSize)
+        );
         return -1;
     }
 
-    *device_ctx_out = reinterpret_cast<uint64_t>(alloc->device_ctx);
-    *local_window_base_out = reinterpret_cast<uint64_t>(alloc->local_buf);
+    uint64_t derived_ctx = 0;
+    if (derive_context_device(h, rank_ids, rank_count, domain_rank, offset, window_size, &derived_ctx, false) != 0) {
+        return -1;
+    }
+    void *local_slice = reinterpret_cast<void *>(static_cast<uintptr_t>(h->host_ctx.windowsIn[h->rank] + offset));
+    aclError aret = aclrtMemset(local_slice, window_size, 0, window_size);
+    if (aret != ACL_SUCCESS) {
+        LOG_ERROR("[comm rank %d] alloc_domain: aclrtMemset -> %d", h->rank, static_cast<int>(aret));
+        aclrtFree(reinterpret_cast<void *>(static_cast<uintptr_t>(derived_ctx)));
+        return -1;
+    }
+
+    alloc->rank = static_cast<int>(domain_rank);
+    alloc->nranks = static_cast<int>(rank_count);
+    alloc->local_buf = nullptr;
+    alloc->device_ctx = reinterpret_cast<CommContext *>(static_cast<uintptr_t>(derived_ctx));
+    *device_ctx_out = derived_ctx;
+    *local_window_base_out = reinterpret_cast<uint64_t>(local_slice);
+    h->derived_domain_next_offset = offset + window_size;
     h->domain_allocations.emplace(allocation_id, std::move(alloc));
     return 0;
 } catch (const std::exception &e) {

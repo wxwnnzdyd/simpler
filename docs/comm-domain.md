@@ -108,7 +108,7 @@ symmetric window is realized:
 
 | Aspect | Sim | HCCL (onboard) |
 | ------ | --- | -------------- |
-| Window memory | POSIX shm + `ftruncate`, mmap'd per rank | `aclrtMalloc` + `aclrtIpcMem*` import; peer access via `aclrtDeviceEnablePeerAccess` |
+| Window memory | POSIX shm + `ftruncate`, mmap'd per rank | a2a3 allocates a fresh `aclrtMalloc` + `aclrtIpcMem*` pool; a5 derives slices from the base `comm_alloc_windows` pool |
 | Subset barrier | shm-header atomic, `allocation_id`-scoped | file barriers, `allocation_id`-scoped |
 | Window init | window zeroed after handshake (`memset`) | window zeroed after handshake (`aclrtMemset`) |
 | PTO async workspace | n/a | a2a3 SDMA once per handle; a5 URMA in `CommContext::workSpace` |
@@ -116,11 +116,13 @@ symmetric window is realized:
 The window is zero-initialized on both backends so scratch/signal protocols see
 a known starting state (matching the historical static-path contract).
 
-For a5 URMA, the symmetric window passed to
-`UrmaWorkspaceManager::Init(...)` is currently allocated with
-`ACL_MEM_MALLOC_HUGE_FIRST`, the same policy used by the HCCL Path-D window
-allocator. This keeps the first real-workspace integration compatible with
-existing comm-window allocation behavior while still preferring huge pages.
+For a5 URMA, dynamic communication domains currently reuse the base symmetric
+window created by `comm_alloc_windows`; domain contexts are derived slices of
+that base window and reuse its `UrmaWorkspaceManager` workspace. The base
+window is currently allocated with `ACL_MEM_MALLOC_HUGE_FIRST`, the same policy
+used by the HCCL Path-D window allocator. This keeps the first real-workspace
+integration compatible with existing comm-window allocation behavior while
+still preferring huge pages.
 PTO-ISA's URMA documentation recommends `ACL_MEM_MALLOC_HUGE_ONLY` for the
 strictest memory-registration contract; switch the a5 URMA window path to
 `HUGE_ONLY` only after hardware validation shows `HUGE_FIRST` can fall back to
