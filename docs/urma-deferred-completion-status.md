@@ -216,34 +216,12 @@ Required A5 hardware acceptance command:
 python examples/a5/tensormap_and_ringbuffer/urma_real_deferred_demo/test_urma_real_deferred_demo.py -p a5 -d 0,1 --build
 ```
 
-Locked stress command, when `task-submit` is available:
+Stress note:
 
-```bash
-mkdir -p /tmp/simpler-urma-deferred-ascend
-export ASCEND_PROCESS_LOG_PATH=/tmp/simpler-urma-deferred-ascend
-task-submit --device auto --device-num 2 --max-time 3600 --timeout 3600 --run \
-  'python examples/a5/tensormap_and_ringbuffer/urma_real_deferred_demo/test_urma_real_deferred_demo.py -p a5 -d $TASK_DEVICE --build --repeat 20'
-```
-
-The `--repeat` option keeps the whole stress loop inside one process and one
-`task-submit` device lease. It creates one `Worker` and one base URMA workspace
-per repeat iteration, then runs the original per-size-case DAGs sequentially in
-that worker. This avoids combining different size cases into one graph while
-reducing `HcclChannelAcquire` calls from once per size case to once per repeat
-iteration.
-
-Direct stress fallback, when the A5 environment does not provide
-`task-submit`:
-
-```bash
-mkdir -p /tmp/simpler-urma-deferred-ascend
-export ASCEND_PROCESS_LOG_PATH=/tmp/simpler-urma-deferred-ascend
-python examples/a5/tensormap_and_ringbuffer/urma_real_deferred_demo/test_urma_real_deferred_demo.py -p a5 -d 0,1 --build --repeat 20
-```
-
-Use this fallback only on an otherwise idle two-card A5 environment. It still
-validates repeatability, but it does not prove isolation from other shared
-runner jobs.
+- The temporary `--repeat` harness was withdrawn because it changed the demo
+  execution shape and obscured the stable single-run signal. Use the required
+  A5 hardware acceptance command above for Phase 4 validation until a dedicated
+  stress runner is designed separately.
 
 Hardware acceptance criteria:
 
