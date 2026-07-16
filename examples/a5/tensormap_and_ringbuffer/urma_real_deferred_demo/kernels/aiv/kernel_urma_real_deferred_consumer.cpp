@@ -2,10 +2,17 @@
 
 namespace {
 
-inline __aicore__ bool tput_slot_matches(__gm__ float *slot, uint32_t elem_count, uint32_t peer) {
+inline __aicore__ bool tput_slot_matches(
+    __gm__ float *slot, uint32_t elem_count, uint32_t peer, __gm__ int32_t *status
+) {
     for (uint32_t i = 0; i < elem_count; ++i) {
         float expected = static_cast<float>(peer * 100000 + static_cast<int>(i));
         if (slot[i] != expected) {
+            urma_real_deferred::set_status(status, urma_real_deferred::Status::kTputMismatch, i, peer);
+            status[3] = static_cast<int32_t>(slot[i]);
+            status[4] = static_cast<int32_t>(expected);
+            status[5] = static_cast<int32_t>(slot[0]);
+            status[6] = static_cast<int32_t>(slot[elem_count - 1]);
             return false;
         }
     }
@@ -58,10 +65,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         return;
     }
 
-    if (tput_slot_matches(tget, elem_count, comm_ctx->rankId)) {
+    if (tput_slot_matches(tget, elem_count, comm_ctx->rankId, status)) {
         urma_real_deferred::set_status(status, urma_real_deferred::Status::kOk, elem_count, peer);
         return;
     }
-
-    urma_real_deferred::set_status(status, urma_real_deferred::Status::kTputMismatch, elem_count, peer);
 }
