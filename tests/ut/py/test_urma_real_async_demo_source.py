@@ -203,6 +203,8 @@ def test_phase4_real_deferred_demo_uses_deferred_urma_backend() -> None:
     assert "UrmaTput" in tput
     assert "first_chunk_count" in common
     assert "second_chunk_count" in common
+    assert "store_marker" in common
+    assert "defer_flush_range(marker" in common
     assert "event.Wait" not in tget
     assert "event.Wait" not in tput
     assert "TPUT_ASYNC" not in tget

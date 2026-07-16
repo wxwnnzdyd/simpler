@@ -95,6 +95,11 @@ inline __aicore__ uint32_t second_chunk_count(uint32_t elem_count) {
     return elem_count - first_chunk_count(elem_count);
 }
 
+inline __aicore__ void store_marker(__gm__ int32_t *marker, int32_t value) {
+    marker[0] = value;
+    pto2::detail::defer_flush_range(marker, sizeof(int32_t));
+}
+
 template <typename Event, typename Session>
 inline __aicore__ bool wait_urma_bounded(const Event &event, const Session &session) {
     for (uint32_t i = 0; i < kMaxRemoteWritePollIters; ++i) {

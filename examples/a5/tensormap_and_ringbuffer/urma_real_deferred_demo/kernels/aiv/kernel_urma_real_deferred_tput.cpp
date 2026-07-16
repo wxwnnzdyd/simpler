@@ -35,5 +35,5 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
             UrmaTput(remote_tput_tail, local_send_tail, reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace), peer)
         );
     }
-    marker[0] = static_cast<int32_t>(request_count);
+    urma_real_deferred::store_marker(marker, static_cast<int32_t>(request_count));
 }
