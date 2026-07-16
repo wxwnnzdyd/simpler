@@ -219,7 +219,8 @@ def test_phase4_real_deferred_consumer_depends_on_deferred_outputs() -> None:
     assert "consumer_args.add_input(tput_marker)" in orch
     assert "Status::kTgetMismatch" in consumer
     assert "Status::kTputMismatch" in consumer
-    assert "kMaxRemoteWritePollIters" in consumer
+    assert "TGET_ASYNC<pto::comm::DmaEngine::URMA>" in consumer
+    assert "Status::kTputReadbackFailed" in consumer
     assert "@pytest.mark.requires_hardware" in test_py
     assert "pytest.mark.platforms([\"a5\"])" in test_py
     assert "platform != \"a5\"" in test_py

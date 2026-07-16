@@ -41,6 +41,7 @@ enum class Status : int32_t {
     kInvalidComm = 2,
     kInvalidElementCount = 3,
     kSubmitFailed = 4,
+    kTputReadbackFailed = 5,
     kTgetMismatch = 100,
     kTputMismatch = 200,
 };
@@ -84,6 +85,16 @@ inline __aicore__ GlobalFloat global_float(__gm__ float *ptr, uint32_t elem_coun
     ShapeDyn shape(1, 1, 1, 1, elem_count);
     StrideDyn stride(elem_count, elem_count, elem_count, elem_count, 1);
     return GlobalFloat(ptr, shape, stride);
+}
+
+template <typename Event, typename Session>
+inline __aicore__ bool wait_urma_bounded(const Event &event, const Session &session) {
+    for (uint32_t i = 0; i < kMaxRemoteWritePollIters; ++i) {
+        if (event.Test(session)) {
+            return event.Wait(session);
+        }
+    }
+    return false;
 }
 
 inline __aicore__ uint64_t remote_base(__gm__ CommContext *comm_ctx, uint32_t peer) {

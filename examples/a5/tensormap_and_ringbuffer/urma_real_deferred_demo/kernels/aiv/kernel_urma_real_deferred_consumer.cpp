@@ -24,17 +24,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     __gm__ float *tget = urma_real_deferred::tensor_data<float>(tget_tensor);
     __gm__ float *tput = urma_real_deferred::tensor_data<float>(tput_tensor);
-    __gm__ int32_t *marker = urma_real_deferred::tensor_data<int32_t>(marker_tensor);
+    (void)urma_real_deferred::tensor_data<int32_t>(marker_tensor);
     __gm__ int32_t *status = urma_real_deferred::tensor_data<int32_t>(status_tensor);
 
     if (!urma_real_deferred::validate_comm(comm_ctx, elem_count, status)) {
         return;
     }
     uint32_t peer = urma_real_deferred::peer_rank(comm_ctx);
-    if (marker[0] != 1) {
-        urma_real_deferred::set_status(status, urma_real_deferred::Status::kSubmitFailed, marker[0], peer);
-        return;
-    }
 
     for (uint32_t i = 0; i < elem_count; ++i) {
         float expected = static_cast<float>(peer * 100000 + static_cast<int>(i));
@@ -45,12 +41,26 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         }
     }
 
-    __gm__ float *peer_slot = tput + static_cast<uint64_t>(peer) * elem_count;
-    for (uint32_t iter = 0; iter < urma_real_deferred::kMaxRemoteWritePollIters; ++iter) {
-        if (tput_slot_matches(peer_slot, elem_count, peer)) {
-            urma_real_deferred::set_status(status, urma_real_deferred::Status::kOk, elem_count, peer);
-            return;
-        }
+    uint64_t peer_base = urma_real_deferred::remote_base(comm_ctx, peer);
+    uint64_t tput_slot_offset = urma_real_deferred::local_offset(comm_ctx, tput) +
+                                static_cast<uint64_t>(comm_ctx->rankId) * elem_count * sizeof(float);
+    __gm__ float *remote_tput_slot = reinterpret_cast<__gm__ float *>(peer_base + tput_slot_offset);
+    auto local_scratch = urma_real_deferred::global_float(tget, elem_count);
+    auto remote_tput = urma_real_deferred::global_float(remote_tput_slot, elem_count);
+    pto::comm::AsyncSession readback_session;
+    pto::comm::BuildAsyncSession<pto::comm::DmaEngine::URMA>(
+        reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace), peer, readback_session
+    );
+    auto readback_event =
+        pto::comm::TGET_ASYNC<pto::comm::DmaEngine::URMA>(local_scratch, remote_tput, readback_session);
+    if (!urma_real_deferred::wait_urma_bounded(readback_event, readback_session)) {
+        urma_real_deferred::set_status(status, urma_real_deferred::Status::kTputReadbackFailed, elem_count, peer);
+        return;
+    }
+
+    if (tput_slot_matches(tget, elem_count, comm_ctx->rankId)) {
+        urma_real_deferred::set_status(status, urma_real_deferred::Status::kOk, elem_count, peer);
+        return;
     }
 
     urma_real_deferred::set_status(status, urma_real_deferred::Status::kTputMismatch, elem_count, peer);
