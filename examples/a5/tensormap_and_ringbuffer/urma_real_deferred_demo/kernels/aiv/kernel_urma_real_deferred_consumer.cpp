@@ -20,7 +20,8 @@ inline __aicore__ bool tput_slot_matches(
 }
 
 inline __aicore__ bool tget_matches(
-    __gm__ float *slot, uint32_t elem_count, uint32_t peer, __gm__ int32_t *status, int32_t which
+    __gm__ float *slot, uint32_t elem_count, uint32_t peer, __gm__ int32_t *status, int32_t which,
+    int32_t marker_sum, int32_t expected_marker_sum, __gm__ float *other_slot
 ) {
     for (uint32_t i = 0; i < elem_count; ++i) {
         float expected = static_cast<float>(peer * 100000 + static_cast<int>(i));
@@ -28,6 +29,9 @@ inline __aicore__ bool tget_matches(
             urma_real_deferred::set_status(status, urma_real_deferred::Status::kTgetMismatch, i, peer);
             status[3] = static_cast<int32_t>(slot[i]);
             status[4] = which;
+            status[5] = marker_sum;
+            status[6] = expected_marker_sum;
+            status[7] = static_cast<int32_t>(other_slot[0]);
             return false;
         }
     }
@@ -61,11 +65,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         return;
     }
     uint32_t peer = urma_real_deferred::peer_rank(comm_ctx);
+    int32_t expected_marker_sum = static_cast<int32_t>((elem_count > 1 ? 2 : 1) * 2);
+    int32_t tget_marker_sum = tget0_marker[0] + tget1_marker[0];
 
-    if (!tget_matches(tget0, elem_count, peer, status, 0)) {
+    if (!tget_matches(tget0, elem_count, peer, status, 0, tget_marker_sum, expected_marker_sum, tget1)) {
         return;
     }
-    if (!tget_matches(tget1, elem_count, peer, status, 1)) {
+    if (!tget_matches(tget1, elem_count, peer, status, 1, tget_marker_sum, expected_marker_sum, tget0)) {
         return;
     }
 
@@ -89,9 +95,9 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     if (tput_slot_matches(scratch, elem_count, comm_ctx->rankId, status)) {
         urma_real_deferred::set_status(status, urma_real_deferred::Status::kOk, elem_count, peer);
-        status[3] = tget0_marker[0] + tget1_marker[0];
+        status[3] = tget_marker_sum;
         status[4] = tput0_marker[0] + tput1_marker[0];
-        status[5] = static_cast<int32_t>((elem_count > 1 ? 2 : 1) * 2);
+        status[5] = expected_marker_sum;
         return;
     }
 }
