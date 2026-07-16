@@ -13,13 +13,10 @@ handle plus the native URMA workspace pointer needed to locate SQ/CQ context.
 
 ## Files
 
-- `urma_completion_abi.h`: scheduler-visible URMA ABI mirror and fake sim
-  workspace structures.
 - `urma_completion_kernel.h`: AICore-side `UrmaTget`/`UrmaTput` descriptors,
-  sim submitter, real PTO-ISA submit path, and deferred completion
-  registration.
-- `urma_completion_scheduler.h`: AICPU-side CQ polling and CQ/SQ tail/doorbell
-  update.
+  real PTO-ISA submit path, chunking, and deferred completion registration.
+- `urma_completion_scheduler.h`: AICPU-side URMA workspace ABI mirror, CQ
+  polling, and CQ/SQ tail/doorbell update.
 - `pto_async_wait.h`: completion-type dispatch that routes
   `COMPLETION_TYPE_URMA_EVENT_HANDLE` to this backend.
 
@@ -87,18 +84,10 @@ missing SQ/CQ pointers, unsupported CQ shape, or CQE error returns failed.
 
 ## Simulation Path
 
-The `__CPU_SIM` path does not include PTO-ISA URMA headers and does not require
-`PTO_URMA_SUPPORTED`. It uses a fake URMA workspace with the same scheduler
-fields needed by `poll_urma_event_handle`:
-
-- SQ context;
-- send-CQ context;
-- fake CQEs;
-- SQ/CQ tail and doorbell locations.
-
-The fake submitter performs a plain contiguous 1-D copy and publishes a pending
-fake CQE. Test kernels can later mark the fake CQE ready, allowing sim tests to
-observe both pending and ready scheduler states.
+The fake a5sim URMA submitter was removed after the real A5 path passed
+hardware validation. `send_request_entry` now reports an async-completion
+error when compiled without `PTO_URMA_SUPPORTED`, rather than emulating URMA
+data movement in software.
 
 ## Validated Status
 

@@ -2,20 +2,15 @@
 
 ## Phase 1: Sim Deferred Completion
 
-Status: complete.
+Status: retired.
 
-Validated:
+Historical note:
 
-- `a5sim` URMA deferred completion demo builds and runs.
-- Fake TGET and TPUT paths both publish a pending CQE before scheduler polling.
-- Scheduler observes pending before ready.
-- Dependent consumer runs only after the fake URMA completion becomes ready.
-
-Scope note:
-
-- Phase 1 uses fake copy and fake CQE production. It does not validate HCCL
-  channels, memory registration, huge pages, doorbells, or real URMA WQ/CQ
-  hardware behavior.
+- The initial `a5sim` fake-URMA smoke used synthetic copy and CQE production
+  to validate deferred-completion wiring before real A5 URMA was available.
+- After real A5 TGET/TPUT and deferred CQ polling passed on hardware, the
+  fake-URMA demo and fake backend path were removed to keep the runtime code
+  focused on the real PTO-ISA URMA path.
 
 ## Phase 2: Real A5 Build And Workspace
 
@@ -145,7 +140,7 @@ stress with isolated device logs is still pending.
 Goal:
 
 - Connect real PTO-ISA URMA events to the deferred completion path already
-  exercised by the Phase 1 a5sim demo.
+  originally sketched by the retired Phase 1 a5sim demo.
 
 Implemented wiring:
 

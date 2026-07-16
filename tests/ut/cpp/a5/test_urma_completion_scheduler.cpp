@@ -6,19 +6,43 @@
 
 namespace {
 
-using pto2::urma_backend::encode_fake_cqe_dw0;
-using pto2::urma_backend::encode_fake_pending_cqe_dw0;
 using pto2::urma_backend::encode_urma_event_handle;
-using pto2::urma_backend::FakeUrmaWorkspace;
 using pto2::urma_backend::kCqeBytes;
-using pto2::urma_backend::kFakeUrmaCqDepth;
-using pto2::urma_backend::kFakeUrmaCqeShift;
 using pto2::urma_backend::poll_urma_event_handle;
 using pto2::urma_backend::UrmaCqCtx;
 using pto2::urma_backend::UrmaWqCtx;
 
+constexpr uint32_t kTestCqDepth = 64;
+constexpr uint32_t kTestCqeShift = 6;
+
+struct alignas(kCqeBytes) TestUrmaCqe {
+    uint32_t dw[16];
+};
+
+struct TestUrmaWorkspace {
+    pto2::urma_backend::UrmaInfo info;
+    UrmaWqCtx sq[2];
+    UrmaCqCtx scq[2];
+    uint32_t sq_tail[2];
+    uint32_t cq_tail[2];
+    uint32_t cq_doorbell[2];
+    TestUrmaCqe scq_entries[2][kTestCqDepth];
+};
+
+inline bool test_cqe_ready_owner(uint32_t cqe_seq) { return ((cqe_seq / kTestCqDepth) & 1u) == 0; }
+
+inline uint32_t encode_test_cqe_dw0(uint32_t cqe_seq, uint8_t status, uint8_t substatus) {
+    const uint32_t owner = test_cqe_ready_owner(cqe_seq) ? 1u : 0u;
+    return (owner << 2) | (static_cast<uint32_t>(substatus) << 16) | (static_cast<uint32_t>(status) << 24);
+}
+
+inline uint32_t encode_test_pending_cqe_dw0(uint32_t cqe_seq) {
+    const uint32_t owner = test_cqe_ready_owner(cqe_seq) ? 0u : 1u;
+    return owner << 2;
+}
+
 struct SchedulerWorkspaceFixture {
-    FakeUrmaWorkspace ws{};
+    TestUrmaWorkspace ws{};
 
     SchedulerWorkspaceFixture() {
         std::memset(&ws, 0, sizeof(ws));
@@ -28,14 +52,14 @@ struct SchedulerWorkspaceFixture {
         ws.info.scq_ptr = reinterpret_cast<uint64_t>(&ws.scq[0]);
         for (uint32_t rank = 0; rank < ws.info.rank_count; ++rank) {
             UrmaWqCtx &sq = ws.sq[rank];
-            sq.wqe_shift_size = kFakeUrmaCqeShift;
-            sq.depth = kFakeUrmaCqDepth;
+            sq.wqe_shift_size = kTestCqeShift;
+            sq.depth = kTestCqDepth;
             sq.tail_addr = reinterpret_cast<uint64_t>(&ws.sq_tail[rank]);
 
             UrmaCqCtx &cq = ws.scq[rank];
             cq.buf_addr = reinterpret_cast<uint64_t>(&ws.scq_entries[rank][0]);
-            cq.cqe_shift_size = kFakeUrmaCqeShift;
-            cq.depth = kFakeUrmaCqDepth;
+            cq.cqe_shift_size = kTestCqeShift;
+            cq.depth = kTestCqDepth;
             cq.tail_addr = reinterpret_cast<uint64_t>(&ws.cq_tail[rank]);
             cq.db_addr = reinterpret_cast<uint64_t>(&ws.cq_doorbell[rank]);
         }
@@ -78,7 +102,7 @@ TEST(A5UrmaCompletionScheduler, TailAlreadyAtTargetIsReady) {
 
 TEST(A5UrmaCompletionScheduler, OwnerNotReadyReturnsPending) {
     SchedulerWorkspaceFixture fixture;
-    fixture.ws.scq_entries[1][0].dw[0] = encode_fake_pending_cqe_dw0(0);
+    fixture.ws.scq_entries[1][0].dw[0] = encode_test_pending_cqe_dw0(0);
 
     auto result = poll_urma_event_handle(encode_urma_event_handle(1, 1), fixture.addr());
     EXPECT_EQ(result.state, CompletionPollState::PENDING);
@@ -90,7 +114,7 @@ TEST(A5UrmaCompletionScheduler, OwnerNotReadyReturnsPending) {
 
 TEST(A5UrmaCompletionScheduler, ReadyCqeAdvancesCqDoorbellAndSqTail) {
     SchedulerWorkspaceFixture fixture;
-    fixture.ws.scq_entries[1][0].dw[0] = encode_fake_cqe_dw0(0, 0, 0);
+    fixture.ws.scq_entries[1][0].dw[0] = encode_test_cqe_dw0(0, 0, 0);
 
     auto result = poll_urma_event_handle(encode_urma_event_handle(1, 1), fixture.addr());
     EXPECT_EQ(result.state, CompletionPollState::READY);
@@ -102,7 +126,7 @@ TEST(A5UrmaCompletionScheduler, ReadyCqeAdvancesCqDoorbellAndSqTail) {
 
 TEST(A5UrmaCompletionScheduler, CqeErrorFailsWithoutAdvancingTail) {
     SchedulerWorkspaceFixture fixture;
-    fixture.ws.scq_entries[1][0].dw[0] = encode_fake_cqe_dw0(0, 2, 9);
+    fixture.ws.scq_entries[1][0].dw[0] = encode_test_cqe_dw0(0, 2, 9);
 
     auto result = poll_urma_event_handle(encode_urma_event_handle(1, 1), fixture.addr());
     EXPECT_EQ(result.state, CompletionPollState::FAILED);
@@ -112,4 +136,4 @@ TEST(A5UrmaCompletionScheduler, CqeErrorFailsWithoutAdvancingTail) {
     EXPECT_EQ(fixture.ws.sq_tail[1], 0u);
 }
 
-static_assert(sizeof(pto2::urma_backend::FakeUrmaCqe) == kCqeBytes);
+static_assert(sizeof(TestUrmaCqe) == kCqeBytes);

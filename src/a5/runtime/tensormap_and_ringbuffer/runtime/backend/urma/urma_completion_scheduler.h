@@ -19,9 +19,68 @@
 #include "aicore_completion_mailbox.h"
 #include "pto_completion_token.h"
 #include "pto_runtime_status.h"
-#include "backend/urma/urma_completion_abi.h"
 
 namespace pto2::urma_backend {
+
+inline constexpr uint32_t kHandleRankIdShift = 32;
+inline constexpr uint32_t kCqeBytes = 64;
+inline constexpr uint32_t kMaxCqeShift = 12;
+
+enum class UrmaDbMode : int32_t {
+    INVALID_DB = -1,
+    HW_DB = 0,
+    SW_DB = 1,
+};
+
+struct UrmaInfo {
+    uint32_t qp_num;
+    uint32_t local_token_id;
+    uint32_t rank_count;
+    uint64_t sq_ptr;
+    uint64_t rq_ptr;
+    uint64_t scq_ptr;
+    uint64_t rcq_ptr;
+    uint64_t mem_ptr;
+};
+
+struct UrmaWqCtx {
+    uint32_t wqn;
+    uint64_t buf_addr;
+    uint32_t wqe_shift_size;
+    uint32_t depth;
+    uint64_t head_addr;
+    uint64_t tail_addr;
+    UrmaDbMode db_mode;
+    uint64_t db_addr;
+    uint32_t sl;
+};
+
+struct UrmaCqCtx {
+    uint32_t cqn;
+    uint64_t buf_addr;
+    uint32_t cqe_shift_size;
+    uint32_t depth;
+    uint64_t head_addr;
+    uint64_t tail_addr;
+    UrmaDbMode db_mode;
+    uint64_t db_addr;
+};
+
+static_assert(sizeof(UrmaInfo) == 56, "URMA info ABI drift");
+static_assert(offsetof(UrmaInfo, sq_ptr) == 16, "URMA info ABI drift");
+static_assert(sizeof(UrmaWqCtx) == 64, "URMA WQ context ABI drift");
+static_assert(offsetof(UrmaWqCtx, db_addr) == 48, "URMA WQ context ABI drift");
+static_assert(sizeof(UrmaCqCtx) == 56, "URMA CQ context ABI drift");
+static_assert(offsetof(UrmaCqCtx, db_addr) == 48, "URMA CQ context ABI drift");
+
+inline uint64_t encode_urma_event_handle(uint32_t remote_rank, uint32_t target_head) {
+    return (static_cast<uint64_t>(remote_rank) << kHandleRankIdShift) | static_cast<uint64_t>(target_head);
+}
+
+inline void decode_urma_event_handle(uint64_t handle, uint32_t &remote_rank, uint32_t &target_head) {
+    remote_rank = static_cast<uint32_t>(handle >> kHandleRankIdShift);
+    target_head = static_cast<uint32_t>(handle & 0xFFFFFFFFu);
+}
 
 inline uintptr_t cache_line(const volatile void *addr) {
     return reinterpret_cast<uintptr_t>(addr) & ~(uintptr_t(PTO2_ALIGN_SIZE) - 1u);
