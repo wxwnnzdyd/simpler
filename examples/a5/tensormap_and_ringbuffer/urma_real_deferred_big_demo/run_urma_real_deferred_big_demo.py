@@ -110,10 +110,6 @@ def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: boo
     recv_nbytes = elem_count * DTYPE_NBYTES
     window_size = max(URMA_DATA_OFFSET_NBYTES + send_nbytes + recv_nbytes, 4 * 1024 * 1024)
 
-    send_host = [_pattern(rank, elem_count) for rank in range(nranks)]
-    recv_zero = [_zero_float(elem_count) for _ in range(nranks)]
-    status = [_zero_i32(STATUS_WORDS) for _ in range(nranks)]
-
     chip_callable = build_chip_callable(platform)
     worker = Worker(
         level=3,
@@ -126,6 +122,10 @@ def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: boo
     chip_handle = worker.register(chip_callable)
     try:
         worker.init()
+
+        send_host = [_pattern(rank, elem_count) for rank in range(nranks)]
+        recv_zero = [_zero_float(elem_count) for _ in range(nranks)]
+        status = [_zero_i32(STATUS_WORDS) for _ in range(nranks)]
 
         def orch_fn(orch, _args, cfg):
             with orch.allocate_domain(
