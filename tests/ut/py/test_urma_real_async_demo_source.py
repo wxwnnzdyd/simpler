@@ -212,6 +212,7 @@ def test_phase4_real_deferred_demo_uses_deferred_urma_backend() -> None:
     assert "rt_submit_aiv_task(0" in orch
     assert "rt_submit_aiv_task(1" in orch
     assert "rt_submit_aiv_task(2" in orch
+    assert "Tensor tget_marker" in orch
 
 
 def test_phase4_real_deferred_consumer_depends_on_deferred_outputs() -> None:
@@ -220,12 +221,16 @@ def test_phase4_real_deferred_consumer_depends_on_deferred_outputs() -> None:
     test_py = DEFERRED_TEST_PY.read_text()
 
     assert "consumer_args.add_input(tget_tmp)" in orch
+    assert "consumer_args.add_input(tget_marker)" in orch
     assert "consumer_args.add_input(tput_marker)" in orch
     assert "Status::kTgetMismatch" in consumer
     assert "Status::kTputMismatch" in consumer
     assert "TGET_ASYNC<pto::comm::DmaEngine::URMA>" in consumer
     assert "Status::kTputReadbackFailed" in consumer
     assert "comm_ctx->rankNum) * elem_count" in consumer
+    assert "status[3] = tget_marker[0]" in consumer
+    assert "status[4] = tput_marker[0]" in consumer
+    assert "status[5] = static_cast<int32_t>(elem_count > 1 ? 2 : 1)" in consumer
     assert "CASES = (1, 16, 64, 256, 4096, 16384)" in test_py
     assert "tput_elems = (nranks + 1) * elem_count" in test_py
     assert "@pytest.mark.requires_hardware" in test_py

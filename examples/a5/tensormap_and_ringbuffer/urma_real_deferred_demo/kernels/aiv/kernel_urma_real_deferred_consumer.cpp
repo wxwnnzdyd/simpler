@@ -24,14 +24,16 @@ inline __aicore__ bool tput_slot_matches(
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     __gm__ Tensor *tget_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ Tensor *tput_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
-    __gm__ Tensor *marker_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
-    __gm__ Tensor *status_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
-    __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[4]);
-    uint32_t elem_count = static_cast<uint32_t>(args[5]);
+    __gm__ Tensor *tget_marker_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ Tensor *tput_marker_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
+    __gm__ Tensor *status_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
+    __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[5]);
+    uint32_t elem_count = static_cast<uint32_t>(args[6]);
 
     __gm__ float *tget = urma_real_deferred::tensor_data<float>(tget_tensor);
     __gm__ float *tput = urma_real_deferred::tensor_data<float>(tput_tensor);
-    (void)urma_real_deferred::tensor_data<int32_t>(marker_tensor);
+    __gm__ int32_t *tget_marker = urma_real_deferred::tensor_data<int32_t>(tget_marker_tensor);
+    __gm__ int32_t *tput_marker = urma_real_deferred::tensor_data<int32_t>(tput_marker_tensor);
     __gm__ int32_t *status = urma_real_deferred::tensor_data<int32_t>(status_tensor);
 
     if (!urma_real_deferred::validate_comm(comm_ctx, elem_count, status)) {
@@ -68,6 +70,9 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     if (tput_slot_matches(scratch, elem_count, comm_ctx->rankId, status)) {
         urma_real_deferred::set_status(status, urma_real_deferred::Status::kOk, elem_count, peer);
+        status[3] = tget_marker[0];
+        status[4] = tput_marker[0];
+        status[5] = static_cast<int32_t>(elem_count > 1 ? 2 : 1);
         return;
     }
 }

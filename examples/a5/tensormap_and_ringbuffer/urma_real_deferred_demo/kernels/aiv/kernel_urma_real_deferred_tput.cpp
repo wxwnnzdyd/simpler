@@ -22,10 +22,12 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     auto local_send = urma_real_deferred::global_float(send, first_count);
     auto remote_tput = urma_real_deferred::global_float(remote_tput_slot, first_count);
+    uint32_t request_count = 1;
     (void)send_request_entry(
         async_ctx, UrmaTput(remote_tput, local_send, reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace), peer)
     );
     if (second_count != 0) {
+        request_count++;
         auto local_send_tail = urma_real_deferred::global_float(send + first_count, second_count);
         auto remote_tput_tail = urma_real_deferred::global_float(remote_tput_slot + first_count, second_count);
         (void)send_request_entry(
@@ -33,5 +35,5 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
             UrmaTput(remote_tput_tail, local_send_tail, reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace), peer)
         );
     }
-    marker[0] = 1;
+    marker[0] = static_cast<int32_t>(request_count);
 }

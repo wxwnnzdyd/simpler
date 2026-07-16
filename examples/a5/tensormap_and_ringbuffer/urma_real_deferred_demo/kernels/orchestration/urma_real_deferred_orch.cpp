@@ -33,12 +33,15 @@ __attribute__((visibility("default"))) void urma_real_deferred_orchestration(con
 
     L0TaskArgs tget_args;
     TensorCreateInfo tget_output_info(output_shape, 1, DataType::FLOAT32);
+    TensorCreateInfo tget_marker_info(marker_shape, 1, DataType::INT32);
     tget_args.add_input(send);
     tget_args.add_output(tget_output_info);
+    tget_args.add_output(tget_marker_info);
     tget_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     tget_args.add_scalar(elem_count);
     TaskOutputTensors tget_outputs = rt_submit_aiv_task(0, tget_args);
     Tensor tget_tmp = tget_outputs.get_ref(0);
+    Tensor tget_marker = tget_outputs.get_ref(1);
 
     L0TaskArgs tput_args;
     TensorCreateInfo marker_info(marker_shape, 1, DataType::INT32);
@@ -53,6 +56,7 @@ __attribute__((visibility("default"))) void urma_real_deferred_orchestration(con
     L0TaskArgs consumer_args;
     consumer_args.add_input(tget_tmp);
     consumer_args.add_input(tput_recv);
+    consumer_args.add_input(tget_marker);
     consumer_args.add_input(tput_marker);
     consumer_args.add_output(status);
     consumer_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
