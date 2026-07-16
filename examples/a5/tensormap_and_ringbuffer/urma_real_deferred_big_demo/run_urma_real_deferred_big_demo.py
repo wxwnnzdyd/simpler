@@ -123,9 +123,9 @@ def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: boo
     try:
         worker.init()
 
-        send_host = [_pattern(rank, elem_count) for rank in range(nranks)]
-        recv_zero = [_zero_float(elem_count) for _ in range(nranks)]
         status = [_zero_i32(STATUS_WORDS) for _ in range(nranks)]
+        send_host: list[torch.Tensor] = []
+        recv_zero: list[torch.Tensor] = []
 
         def orch_fn(orch, _args, cfg):
             with orch.allocate_domain(
@@ -143,6 +143,8 @@ def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: boo
                     CommBufferSpec(name="recv", dtype="float32", count=elem_count, nbytes=recv_nbytes),
                 ],
             ) as handle:
+                send_host.extend(_pattern(rank, elem_count) for rank in range(nranks))
+                recv_zero.extend(_zero_float(elem_count) for _ in range(nranks))
                 for rank in range(nranks):
                     domain = handle[rank]
                     orch.copy_to(rank, domain.buffer_ptrs["send"], send_host[rank].data_ptr(), send_nbytes)
