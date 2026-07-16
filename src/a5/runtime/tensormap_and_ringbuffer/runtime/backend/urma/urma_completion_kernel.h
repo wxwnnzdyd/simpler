@@ -120,7 +120,7 @@ inline __aicore__ __gm__ T *peer_mr_ptr(__gm__ uint8_t *workspace, uint32_t peer
 }
 
 template <typename TensorT>
-inline __aicore__ uint64_t tensor_element_count(const TensorT &tensor) {
+inline __aicore__ uint64_t tensor_element_count(TensorT &tensor) {
     return static_cast<uint64_t>(tensor.GetShape(pto::GlobalTensorDim::DIM_0)) *
            static_cast<uint64_t>(tensor.GetShape(pto::GlobalTensorDim::DIM_1)) *
            static_cast<uint64_t>(tensor.GetShape(pto::GlobalTensorDim::DIM_2)) *
@@ -133,7 +133,7 @@ inline __aicore__ uint64_t chunk_count(uint64_t total_bytes) {
 }
 
 template <typename TensorT>
-inline __aicore__ bool is_flat_contiguous_1d(const TensorT &tensor) {
+inline __aicore__ bool is_flat_contiguous_1d(TensorT &tensor) {
     const int64_t shp0 = tensor.GetShape(pto::GlobalTensorDim::DIM_0);
     const int64_t shp1 = tensor.GetShape(pto::GlobalTensorDim::DIM_1);
     const int64_t shp2 = tensor.GetShape(pto::GlobalTensorDim::DIM_2);
