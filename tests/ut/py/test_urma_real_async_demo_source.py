@@ -255,9 +255,10 @@ def test_phase4_real_deferred_consumer_depends_on_deferred_outputs() -> None:
     assert "CASES = (1, 16, 64, 256, 4096, 16384)" in test_py
     assert "def _run_case_on_worker" in test_py
     assert "chip_callable = build_chip_callable(platform)" in test_py
+    assert "worker = Worker(" in test_py
     assert "worker.init()" in test_py
     assert "for elem_count in CASES:" in test_py
-    assert "run_case(platform, device_ids, elem_count, build=build)" in test_py
+    assert "_run_case_on_worker(worker, chip_handle, elem_count, len(device_ids))" in test_py
     assert "def _run_iteration_on_worker" not in test_py
     assert 'parser.add_argument("--repeat"' not in test_py
     assert "tput_elems = (nranks + 1) * elem_count" in test_py

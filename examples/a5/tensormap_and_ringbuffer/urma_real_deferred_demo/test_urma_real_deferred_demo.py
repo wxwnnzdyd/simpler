@@ -235,9 +235,28 @@ def _print_status(elem_count: int, status: list[torch.Tensor]) -> bool:
 def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: bool = False) -> int:
     if device_ids is None:
         device_ids = [0, 1]
+    if platform != "a5":
+        raise ValueError("urma_real_deferred_demo requires platform 'a5'; a5sim cannot validate real URMA")
+    if len(device_ids) != 2:
+        raise ValueError(f"urma_real_deferred_demo needs exactly 2 devices, got {device_ids}")
+
+    chip_callable = build_chip_callable(platform)
+    worker = Worker(
+        level=3,
+        platform=platform,
+        runtime="tensormap_and_ringbuffer",
+        device_ids=device_ids,
+        num_sub_workers=0,
+        build=build,
+    )
+    chip_handle = worker.register(chip_callable)
     ok = True
-    for elem_count in CASES:
-        ok = run_case(platform, device_ids, elem_count, build=build) and ok
+    try:
+        worker.init()
+        for elem_count in CASES:
+            ok = _run_case_on_worker(worker, chip_handle, elem_count, len(device_ids)) and ok
+    finally:
+        worker.close()
     return 0 if ok else 1
 
 
