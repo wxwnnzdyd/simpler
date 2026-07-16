@@ -223,3 +223,4 @@ def test_phase4_real_deferred_consumer_depends_on_deferred_outputs() -> None:
     assert "@pytest.mark.requires_hardware" in test_py
     assert "pytest.mark.platforms([\"a5\"])" in test_py
     assert "platform != \"a5\"" in test_py
+    assert "ArgDirection.INOUT, ArgDirection.INOUT, ArgDirection.OUT, ArgDirection.IN, ArgDirection.IN" in test_py

@@ -83,7 +83,7 @@ def build_chip_callable(platform: str) -> ChipCallable:
         extra_include_dirs=[str(kc.project_root / "src" / "common")],
     )
     return ChipCallable.build(
-        signature=[ArgDirection.IN, ArgDirection.INOUT, ArgDirection.INOUT, ArgDirection.OUT],
+        signature=[ArgDirection.IN, ArgDirection.INOUT, ArgDirection.INOUT, ArgDirection.OUT, ArgDirection.IN, ArgDirection.IN],
         func_name="urma_real_deferred_orchestration",
         config_name="urma_real_deferred_orchestration_config",
         binary=orch,
