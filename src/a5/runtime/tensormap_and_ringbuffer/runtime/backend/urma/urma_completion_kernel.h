@@ -92,6 +92,15 @@ UrmaTput(const DstTensor &dst, const SrcTensor &src, __gm__ uint8_t *workspace, 
     return UrmaRequestDescriptor<DstTensor, SrcTensor>{UrmaOp::TPUT, dst, src, workspace, dest_rank};
 }
 
+namespace pto2::detail {
+
+template <typename PtoAsyncEvent, typename PtoAsyncSession>
+inline __aicore__ void register_urma_async_event(
+    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session, __gm__ uint8_t *workspace
+);
+
+}  // namespace pto2::detail
+
 namespace pto2::urma_backend {
 
 inline constexpr uint64_t kUrmaMaxTransferBytes = 256ULL * 1024ULL * 1024ULL;
