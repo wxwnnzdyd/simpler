@@ -87,6 +87,14 @@ inline __aicore__ GlobalFloat global_float(__gm__ float *ptr, uint32_t elem_coun
     return GlobalFloat(ptr, shape, stride);
 }
 
+inline __aicore__ uint32_t first_chunk_count(uint32_t elem_count) {
+    return elem_count > 1 ? elem_count / 2 : elem_count;
+}
+
+inline __aicore__ uint32_t second_chunk_count(uint32_t elem_count) {
+    return elem_count - first_chunk_count(elem_count);
+}
+
 template <typename Event, typename Session>
 inline __aicore__ bool wait_urma_bounded(const Event &event, const Session &session) {
     for (uint32_t i = 0; i < kMaxRemoteWritePollIters; ++i) {

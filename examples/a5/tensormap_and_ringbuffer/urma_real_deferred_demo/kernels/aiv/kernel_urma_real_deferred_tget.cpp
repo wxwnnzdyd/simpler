@@ -13,10 +13,21 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     uint64_t send_offset = urma_real_deferred::local_offset(comm_ctx, send);
     __gm__ float *remote_send = reinterpret_cast<__gm__ float *>(peer_base + send_offset);
 
-    auto local_tget = urma_real_deferred::global_float(tget, elem_count);
-    auto remote_send_g = urma_real_deferred::global_float(remote_send, elem_count);
+    uint32_t first_count = urma_real_deferred::first_chunk_count(elem_count);
+    uint32_t second_count = urma_real_deferred::second_chunk_count(elem_count);
     AsyncCtx async_ctx = get_async_ctx(args);
+
+    auto local_tget = urma_real_deferred::global_float(tget, first_count);
+    auto remote_send_g = urma_real_deferred::global_float(remote_send, first_count);
     (void)send_request_entry(
         async_ctx, UrmaTget(local_tget, remote_send_g, reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace), peer)
     );
+    if (second_count != 0) {
+        auto local_tget_tail = urma_real_deferred::global_float(tget + first_count, second_count);
+        auto remote_send_tail = urma_real_deferred::global_float(remote_send + first_count, second_count);
+        (void)send_request_entry(
+            async_ctx,
+            UrmaTget(local_tget_tail, remote_send_tail, reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace), peer)
+        );
+    }
 }

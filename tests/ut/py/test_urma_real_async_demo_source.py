@@ -197,8 +197,12 @@ def test_phase4_real_deferred_demo_uses_deferred_urma_backend() -> None:
     assert "UrmaPeerMrBaseAddr" in common
     assert "send_request_entry" in tget
     assert "send_request_entry" in tput
+    assert tget.count("send_request_entry") >= 2
+    assert tput.count("send_request_entry") >= 2
     assert "UrmaTget" in tget
     assert "UrmaTput" in tput
+    assert "first_chunk_count" in common
+    assert "second_chunk_count" in common
     assert "event.Wait" not in tget
     assert "event.Wait" not in tput
     assert "TPUT_ASYNC" not in tget

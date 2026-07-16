@@ -170,15 +170,20 @@ Accepted hardware result:
 - The A5 run completed without scheduler timeout, URMA CQE error, or device
   reset.
 - The accepted command was repeated 6-7 times on A5 without failure.
-- Both ranks passed `count=16` and `count=4096` cases with
-  `status[0] == 0`.
+- Both ranks passed `count=1`, `16`, `64`, `256`, `4096`, and `16384` cases
+  with `status[0] == 0`.
 - `count=16` covers the small 64-byte path.
 - `count=4096` covers a 16 KiB path that previously exposed incorrect demo
   readback-buffer placement.
+- `count=16384` covers a 64 KiB path.
 - The accepted demo keeps all URMA data movement buffers inside the registered
   communication window. The consumer uses a scratch slot inside `tput_recv`
   rather than a runtime-created output buffer, because URMA read/write buffers
   must be in the registered symmetric window.
+- The demo submit kernels now split each payload into two URMA requests when
+  `count >= 2`, so one simpler task registers multiple URMA completion entries
+  in the deferred completion slab. Hardware validation for this multi-entry
+  shape is pending.
 
 Validation commands:
 
@@ -207,18 +212,23 @@ Hardware acceptance criteria:
 Observed accepted statuses:
 
 ```text
+[urma_real_deferred_demo] count=1 rank=0 status=[0, 1, 1, 0, 0, 0, 0, 0]
+[urma_real_deferred_demo] count=1 rank=1 status=[0, 1, 0, 0, 0, 0, 0, 0]
 [urma_real_deferred_demo] count=16 rank=0 status=[0, 16, 1, 0, 0, 0, 0, 0]
 [urma_real_deferred_demo] count=16 rank=1 status=[0, 16, 0, 0, 0, 0, 0, 0]
+[urma_real_deferred_demo] count=64 rank=0 status=[0, 64, 1, 0, 0, 0, 0, 0]
+[urma_real_deferred_demo] count=64 rank=1 status=[0, 64, 0, 0, 0, 0, 0, 0]
+[urma_real_deferred_demo] count=256 rank=0 status=[0, 256, 1, 0, 0, 0, 0, 0]
+[urma_real_deferred_demo] count=256 rank=1 status=[0, 256, 0, 0, 0, 0, 0, 0]
 [urma_real_deferred_demo] count=4096 rank=0 status=[0, 4096, 1, 0, 0, 0, 0, 0]
 [urma_real_deferred_demo] count=4096 rank=1 status=[0, 4096, 0, 0, 0, 0, 0, 0]
+[urma_real_deferred_demo] count=16384 rank=0 status=[0, 16384, 1, 0, 0, 0, 0, 0]
+[urma_real_deferred_demo] count=16384 rank=1 status=[0, 16384, 0, 0, 0, 0, 0, 0]
 ```
 
 Remaining Phase 4 coverage:
 
-- Validate the implemented size sweep: `1`, `16`, `64`, `256`, `4096`, and
-  `16384` float elements.
-- Add a multi-completion task that registers multiple URMA events in one
-  deferred completion slab.
+- Validate the implemented multi-completion task shape on A5.
 - Add concurrent deferred URMA tasks to stress wait-list ordering and CQ/SQ
   retirement.
 - Re-run under the shared hardware locking workflow with per-run device-log
