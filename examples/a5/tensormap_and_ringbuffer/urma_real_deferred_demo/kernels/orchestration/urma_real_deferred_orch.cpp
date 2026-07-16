@@ -51,11 +51,9 @@ __attribute__((visibility("default"))) void urma_real_deferred_orchestration(con
     Tensor tput_marker = tput_outputs.get_ref(0);
 
     L0TaskArgs consumer_args;
-    TensorCreateInfo readback_scratch_info(output_shape, 1, DataType::FLOAT32);
     consumer_args.add_input(tget_tmp);
     consumer_args.add_input(tput_recv);
     consumer_args.add_input(tput_marker);
-    consumer_args.add_output(readback_scratch_info);
     consumer_args.add_output(status);
     consumer_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     consumer_args.add_scalar(elem_count);

@@ -64,15 +64,7 @@ def build_chip_callable(platform: str) -> ChipCallable:
         (
             2,
             "kernels/aiv/kernel_urma_real_deferred_consumer.cpp",
-            [
-                ArgDirection.IN,
-                ArgDirection.IN,
-                ArgDirection.IN,
-                ArgDirection.OUT,
-                ArgDirection.OUT,
-                ArgDirection.IN,
-                ArgDirection.IN,
-            ],
+            [ArgDirection.IN, ArgDirection.IN, ArgDirection.IN, ArgDirection.OUT, ArgDirection.IN, ArgDirection.IN],
         ),
     ]:
         kernel = kc.compile_incore(
@@ -120,12 +112,13 @@ def run_case(platform: str, device_ids: list[int], elem_count: int, *, build: bo
     nranks = len(device_ids)
     send_nbytes = elem_count * DTYPE_NBYTES
     tget_nbytes = elem_count * DTYPE_NBYTES
-    tput_nbytes = nranks * elem_count * DTYPE_NBYTES
+    tput_elems = (nranks + 1) * elem_count
+    tput_nbytes = tput_elems * DTYPE_NBYTES
     window_size = max(URMA_DATA_OFFSET_NBYTES + send_nbytes + tget_nbytes + tput_nbytes, 4 * 1024 * 1024)
 
     send_host = [_send_pattern(rank, elem_count) for rank in range(nranks)]
     tget_zero = [_zero_float(elem_count) for _ in range(nranks)]
-    tput_zero = [_zero_float(nranks * elem_count) for _ in range(nranks)]
+    tput_zero = [_zero_float(tput_elems) for _ in range(nranks)]
     status = [_zero_i32(STATUS_WORDS) for _ in range(nranks)]
 
     chip_callable = build_chip_callable(platform)
@@ -155,7 +148,7 @@ def run_case(platform: str, device_ids: list[int], elem_count: int, *, build: bo
                     ),
                     CommBufferSpec(name="send", dtype="float32", count=elem_count, nbytes=send_nbytes),
                     CommBufferSpec(name="tget_recv", dtype="float32", count=elem_count, nbytes=tget_nbytes),
-                    CommBufferSpec(name="tput_recv", dtype="float32", count=nranks * elem_count, nbytes=tput_nbytes),
+                    CommBufferSpec(name="tput_recv", dtype="float32", count=tput_elems, nbytes=tput_nbytes),
                 ],
             ) as handle:
                 for rank in range(nranks):
@@ -188,7 +181,7 @@ def run_case(platform: str, device_ids: list[int], elem_count: int, *, build: bo
                     args.add_tensor(
                         Tensor.make(
                             data=domain.buffer_ptrs["tput_recv"],
-                            shapes=(nranks * elem_count,),
+                            shapes=(tput_elems,),
                             dtype=DataType.FLOAT32,
                             child_memory=True,
                         ),
