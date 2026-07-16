@@ -118,13 +118,10 @@ def _zero_i32(count: int) -> torch.Tensor:
     return torch.zeros(count, dtype=torch.int32).share_memory_()
 
 
-def run_case(platform: str, device_ids: list[int], elem_count: int, *, build: bool = False) -> bool:
-    if platform != "a5":
-        raise ValueError("urma_real_deferred_demo requires platform 'a5'; a5sim cannot validate real URMA")
-    if len(device_ids) != 2:
-        raise ValueError(f"urma_real_deferred_demo needs exactly 2 devices, got {device_ids}")
+def _run_case_on_worker(worker: Worker, chip_handle, elem_count: int, nranks: int) -> bool:
+    if nranks != 2:
+        raise ValueError(f"urma_real_deferred_demo needs exactly 2 devices, got {nranks}")
 
-    nranks = len(device_ids)
     send_nbytes = elem_count * DTYPE_NBYTES
     tget_nbytes = elem_count * DTYPE_NBYTES
     tput_elems = (nranks + 1) * elem_count
@@ -135,6 +132,166 @@ def run_case(platform: str, device_ids: list[int], elem_count: int, *, build: bo
     tget_zero = [_zero_float(elem_count) for _ in range(nranks)]
     tput_zero = [_zero_float(tput_elems) for _ in range(nranks)]
     status = [_zero_i32(STATUS_WORDS) for _ in range(nranks)]
+
+    def orch_fn(orch, _args, cfg):
+        with orch.allocate_domain(
+            name=f"urma_real_deferred_{elem_count}",
+            workers=list(range(nranks)),
+            window_size=window_size,
+            buffers=[
+                CommBufferSpec(
+                    name="urma_reserved",
+                    dtype="int32",
+                    count=URMA_DATA_OFFSET_NBYTES // 4,
+                    nbytes=URMA_DATA_OFFSET_NBYTES,
+                ),
+                CommBufferSpec(name="send", dtype="float32", count=elem_count, nbytes=send_nbytes),
+                CommBufferSpec(name="tget_recv", dtype="float32", count=elem_count, nbytes=tget_nbytes),
+                CommBufferSpec(name="tput_recv", dtype="float32", count=tput_elems, nbytes=tput_nbytes),
+            ],
+        ) as handle:
+            for rank in range(nranks):
+                domain = handle[rank]
+                orch.copy_to(rank, domain.buffer_ptrs["send"], send_host[rank].data_ptr(), send_nbytes)
+                orch.copy_to(rank, domain.buffer_ptrs["tget_recv"], tget_zero[rank].data_ptr(), tget_nbytes)
+                orch.copy_to(rank, domain.buffer_ptrs["tput_recv"], tput_zero[rank].data_ptr(), tput_nbytes)
+
+            for rank in range(nranks):
+                domain = handle[rank]
+                args = TaskArgs()
+                args.add_tensor(
+                    Tensor.make(
+                        data=domain.buffer_ptrs["send"],
+                        shapes=(elem_count,),
+                        dtype=DataType.FLOAT32,
+                        child_memory=True,
+                    ),
+                    TensorArgType.INPUT,
+                )
+                args.add_tensor(
+                    Tensor.make(
+                        data=domain.buffer_ptrs["tget_recv"],
+                        shapes=(elem_count,),
+                        dtype=DataType.FLOAT32,
+                        child_memory=True,
+                    ),
+                    TensorArgType.INOUT,
+                )
+                args.add_tensor(
+                    Tensor.make(
+                        data=domain.buffer_ptrs["tput_recv"],
+                        shapes=(tput_elems,),
+                        dtype=DataType.FLOAT32,
+                        child_memory=True,
+                    ),
+                    TensorArgType.INOUT,
+                )
+                args.add_tensor(make_tensor_arg(status[rank]), TensorArgType.OUTPUT_EXISTING)
+                args.add_scalar(domain.device_ctx)
+                args.add_scalar(elem_count)
+                orch.submit_next_level(chip_handle, args, cfg, worker=rank)
+
+    try:
+        worker.run(orch_fn, args=None, config=CallConfig())
+    except RuntimeError:
+        _print_status(elem_count, status)
+        raise
+
+    return _print_status(elem_count, status)
+
+
+def _run_iteration_on_worker(worker: Worker, chip_handle, iteration: int, nranks: int) -> bool:
+    if nranks != 2:
+        raise ValueError(f"urma_real_deferred_demo needs exactly 2 devices, got {nranks}")
+
+    send_offsets: list[int] = []
+    tget_offsets: list[int] = []
+    tput_offsets: list[int] = []
+    send_total = 0
+    tget_total = 0
+    tput_total = 0
+    for elem_count in CASES:
+        send_offsets.append(send_total * DTYPE_NBYTES)
+        tget_offsets.append(tget_total * DTYPE_NBYTES)
+        tput_offsets.append(tput_total * DTYPE_NBYTES)
+        send_total += elem_count
+        tget_total += elem_count
+        tput_total += (nranks + 1) * elem_count
+
+    send_nbytes = send_total * DTYPE_NBYTES
+    tget_nbytes = tget_total * DTYPE_NBYTES
+    tput_nbytes = tput_total * DTYPE_NBYTES
+    window_size = max(URMA_DATA_OFFSET_NBYTES + send_nbytes + tget_nbytes + tput_nbytes, 4 * 1024 * 1024)
+
+    send_host = [[_send_pattern(rank, elem_count) for rank in range(nranks)] for elem_count in CASES]
+    tget_zero = [_zero_float(elem_count) for elem_count in CASES]
+    tput_zero = [_zero_float((nranks + 1) * elem_count) for elem_count in CASES]
+    status = [[_zero_i32(STATUS_WORDS) for _ in range(nranks)] for _ in CASES]
+
+    def orch_fn(orch, _args, cfg):
+        with orch.allocate_domain(
+            name=f"urma_real_deferred_iter_{iteration}",
+            workers=list(range(nranks)),
+            window_size=window_size,
+            buffers=[
+                CommBufferSpec(
+                    name="urma_reserved",
+                    dtype="int32",
+                    count=URMA_DATA_OFFSET_NBYTES // 4,
+                    nbytes=URMA_DATA_OFFSET_NBYTES,
+                ),
+                CommBufferSpec(name="send", dtype="float32", count=send_total, nbytes=send_nbytes),
+                CommBufferSpec(name="tget_recv", dtype="float32", count=tget_total, nbytes=tget_nbytes),
+                CommBufferSpec(name="tput_recv", dtype="float32", count=tput_total, nbytes=tput_nbytes),
+            ],
+        ) as handle:
+            for case_index, elem_count in enumerate(CASES):
+                tput_elems = (nranks + 1) * elem_count
+                for rank in range(nranks):
+                    domain = handle[rank]
+                    send_ptr = domain.buffer_ptrs["send"] + send_offsets[case_index]
+                    tget_ptr = domain.buffer_ptrs["tget_recv"] + tget_offsets[case_index]
+                    tput_ptr = domain.buffer_ptrs["tput_recv"] + tput_offsets[case_index]
+                    orch.copy_to(rank, send_ptr, send_host[case_index][rank].data_ptr(), elem_count * DTYPE_NBYTES)
+                    orch.copy_to(rank, tget_ptr, tget_zero[case_index].data_ptr(), elem_count * DTYPE_NBYTES)
+                    orch.copy_to(rank, tput_ptr, tput_zero[case_index].data_ptr(), tput_elems * DTYPE_NBYTES)
+
+                    args = TaskArgs()
+                    args.add_tensor(
+                        Tensor.make(data=send_ptr, shapes=(elem_count,), dtype=DataType.FLOAT32, child_memory=True),
+                        TensorArgType.INPUT,
+                    )
+                    args.add_tensor(
+                        Tensor.make(data=tget_ptr, shapes=(elem_count,), dtype=DataType.FLOAT32, child_memory=True),
+                        TensorArgType.INOUT,
+                    )
+                    args.add_tensor(
+                        Tensor.make(data=tput_ptr, shapes=(tput_elems,), dtype=DataType.FLOAT32, child_memory=True),
+                        TensorArgType.INOUT,
+                    )
+                    args.add_tensor(make_tensor_arg(status[case_index][rank]), TensorArgType.OUTPUT_EXISTING)
+                    args.add_scalar(domain.device_ctx)
+                    args.add_scalar(elem_count)
+                    orch.submit_next_level(chip_handle, args, cfg, worker=rank)
+
+    try:
+        worker.run(orch_fn, args=None, config=CallConfig())
+    except RuntimeError:
+        for case_index, elem_count in enumerate(CASES):
+            _print_status(elem_count, status[case_index])
+        raise
+
+    ok = True
+    for case_index, elem_count in enumerate(CASES):
+        ok = _print_status(elem_count, status[case_index]) and ok
+    return ok
+
+
+def run_case(platform: str, device_ids: list[int], elem_count: int, *, build: bool = False) -> bool:
+    if platform != "a5":
+        raise ValueError("urma_real_deferred_demo requires platform 'a5'; a5sim cannot validate real URMA")
+    if len(device_ids) != 2:
+        raise ValueError(f"urma_real_deferred_demo needs exactly 2 devices, got {device_ids}")
 
     chip_callable = build_chip_callable(platform)
     worker = Worker(
@@ -148,74 +305,9 @@ def run_case(platform: str, device_ids: list[int], elem_count: int, *, build: bo
     chip_handle = worker.register(chip_callable)
     try:
         worker.init()
-
-        def orch_fn(orch, _args, cfg):
-            with orch.allocate_domain(
-                name=f"urma_real_deferred_{elem_count}",
-                workers=list(range(nranks)),
-                window_size=window_size,
-                buffers=[
-                    CommBufferSpec(
-                        name="urma_reserved",
-                        dtype="int32",
-                        count=URMA_DATA_OFFSET_NBYTES // 4,
-                        nbytes=URMA_DATA_OFFSET_NBYTES,
-                    ),
-                    CommBufferSpec(name="send", dtype="float32", count=elem_count, nbytes=send_nbytes),
-                    CommBufferSpec(name="tget_recv", dtype="float32", count=elem_count, nbytes=tget_nbytes),
-                    CommBufferSpec(name="tput_recv", dtype="float32", count=tput_elems, nbytes=tput_nbytes),
-                ],
-            ) as handle:
-                for rank in range(nranks):
-                    domain = handle[rank]
-                    orch.copy_to(rank, domain.buffer_ptrs["send"], send_host[rank].data_ptr(), send_nbytes)
-                    orch.copy_to(rank, domain.buffer_ptrs["tget_recv"], tget_zero[rank].data_ptr(), tget_nbytes)
-                    orch.copy_to(rank, domain.buffer_ptrs["tput_recv"], tput_zero[rank].data_ptr(), tput_nbytes)
-
-                for rank in range(nranks):
-                    domain = handle[rank]
-                    args = TaskArgs()
-                    args.add_tensor(
-                        Tensor.make(
-                            data=domain.buffer_ptrs["send"],
-                            shapes=(elem_count,),
-                            dtype=DataType.FLOAT32,
-                            child_memory=True,
-                        ),
-                        TensorArgType.INPUT,
-                    )
-                    args.add_tensor(
-                        Tensor.make(
-                            data=domain.buffer_ptrs["tget_recv"],
-                            shapes=(elem_count,),
-                            dtype=DataType.FLOAT32,
-                            child_memory=True,
-                        ),
-                        TensorArgType.INOUT,
-                    )
-                    args.add_tensor(
-                        Tensor.make(
-                            data=domain.buffer_ptrs["tput_recv"],
-                            shapes=(tput_elems,),
-                            dtype=DataType.FLOAT32,
-                            child_memory=True,
-                        ),
-                        TensorArgType.INOUT,
-                    )
-                    args.add_tensor(make_tensor_arg(status[rank]), TensorArgType.OUTPUT_EXISTING)
-                    args.add_scalar(domain.device_ctx)
-                    args.add_scalar(elem_count)
-                    orch.submit_next_level(chip_handle, args, cfg, worker=rank)
-
-        try:
-            worker.run(orch_fn, args=None, config=CallConfig())
-        except RuntimeError:
-            _print_status(elem_count, status)
-            raise
+        return _run_case_on_worker(worker, chip_handle, elem_count, len(device_ids))
     finally:
         worker.close()
-
-    return _print_status(elem_count, status)
 
 
 def _print_status(elem_count: int, status: list[torch.Tensor]) -> bool:
@@ -230,15 +322,31 @@ def _print_status(elem_count: int, status: list[torch.Tensor]) -> bool:
 def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: bool = False, repeat: int = 1) -> int:
     if device_ids is None:
         device_ids = [0, 1]
+    if platform != "a5":
+        raise ValueError("urma_real_deferred_demo requires platform 'a5'; a5sim cannot validate real URMA")
+    if len(device_ids) != 2:
+        raise ValueError(f"urma_real_deferred_demo needs exactly 2 devices, got {device_ids}")
     if repeat < 1:
         raise ValueError(f"repeat must be >= 1, got {repeat}")
     ok = True
-    for iteration in range(repeat):
-        if repeat > 1:
-            print(f"[urma_real_deferred_demo] iteration={iteration + 1}/{repeat}")
-        iteration_build = build and iteration == 0
-        for elem_count in CASES:
-            ok = run_case(platform, device_ids, elem_count, build=iteration_build) and ok
+    chip_callable = build_chip_callable(platform)
+    worker = Worker(
+        level=3,
+        platform=platform,
+        runtime="tensormap_and_ringbuffer",
+        device_ids=device_ids,
+        num_sub_workers=0,
+        build=build,
+    )
+    chip_handle = worker.register(chip_callable)
+    try:
+        worker.init()
+        for iteration in range(repeat):
+            if repeat > 1:
+                print(f"[urma_real_deferred_demo] iteration={iteration + 1}/{repeat}")
+            ok = _run_iteration_on_worker(worker, chip_handle, iteration, len(device_ids)) and ok
+    finally:
+        worker.close()
     return 0 if ok else 1
 
 

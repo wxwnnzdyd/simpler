@@ -20,6 +20,9 @@ DEFERRED_TPUT = DEFERRED_DEMO / "kernels/aiv/kernel_urma_real_deferred_tput.cpp"
 DEFERRED_CONSUMER = DEFERRED_DEMO / "kernels/aiv/kernel_urma_real_deferred_consumer.cpp"
 DEFERRED_ORCH = DEFERRED_DEMO / "kernels/orchestration/urma_real_deferred_orch.cpp"
 DEFERRED_TEST_PY = DEFERRED_DEMO / "test_urma_real_deferred_demo.py"
+URMA_BACKEND_DESIGN = (
+    REPO_ROOT / "src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/design.md"
+)
 STATUS_DOC = REPO_ROOT / "docs/urma-deferred-completion-status.md"
 
 
@@ -244,9 +247,28 @@ def test_phase4_real_deferred_consumer_depends_on_deferred_outputs() -> None:
     assert "CASES = (1, 16, 64, 256, 4096, 16384)" in test_py
     assert 'parser.add_argument("--repeat", type=int, default=1)' in test_py
     assert "if repeat < 1:" in test_py
-    assert "iteration_build = build and iteration == 0" in test_py
+    assert "def _run_case_on_worker" in test_py
+    assert "def _run_iteration_on_worker" in test_py
+    assert 'name=f"urma_real_deferred_iter_{iteration}"' in test_py
+    assert "chip_callable = build_chip_callable(platform)" in test_py
+    assert "worker.init()" in test_py
+    assert "for iteration in range(repeat):" in test_py
+    assert "_run_iteration_on_worker(worker, chip_handle, iteration" in test_py
     assert "tput_elems = (nranks + 1) * elem_count" in test_py
     assert "@pytest.mark.requires_hardware" in test_py
     assert "pytest.mark.platforms([\"a5\"])" in test_py
     assert "platform != \"a5\"" in test_py
     assert "ArgDirection.INOUT, ArgDirection.INOUT, ArgDirection.OUT, ArgDirection.IN, ArgDirection.IN" in test_py
+
+
+def test_phase4_urma_backend_design_tracks_current_contract() -> None:
+    source = URMA_BACKEND_DESIGN.read_text()
+
+    assert "PTO-ISA URMA async operations" in source
+    assert "backend_cookie = workspace" in source
+    assert "COMPLETION_TYPE_URMA_EVENT_HANDLE" in source
+    assert "poll_urma_event_handle(event_handle, workspace)" in source
+    assert "UrmaWorkspaceManager" in source
+    assert "Transfer splitting" in source
+    assert "Event coalescing" in source
+    assert "Address helper" in source

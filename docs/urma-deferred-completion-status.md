@@ -204,13 +204,19 @@ cmake --build tests/ut/cpp/build --target test_a5_urma_completion_scheduler
 ctest --test-dir tests/ut/cpp/build -R test_a5_urma_completion_scheduler --output-on-failure
 ```
 
+Backend design note:
+
+- `src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/design.md`
+  records the current AICore submit contract, AICPU poll contract, sim path,
+  validated status, and Phase 5 entry points.
+
 Required A5 hardware acceptance command:
 
 ```bash
 python examples/a5/tensormap_and_ringbuffer/urma_real_deferred_demo/test_urma_real_deferred_demo.py -p a5 -d 0,1 --build
 ```
 
-Locked stress command:
+Locked stress command, when `task-submit` is available:
 
 ```bash
 mkdir -p /tmp/simpler-urma-deferred-ascend
@@ -220,8 +226,24 @@ task-submit --device auto --device-num 2 --max-time 3600 --timeout 3600 --run \
 ```
 
 The `--repeat` option keeps the whole stress loop inside one process and one
-`task-submit` device lease. `--build` is applied only to the first repeat
-iteration; later iterations reuse the built runtime and kernel artifacts.
+`task-submit` device lease. It also reuses one `Worker` and one base URMA
+workspace across repeat iterations, and allocates one dynamic domain per
+iteration to cover all size cases. This avoids repeatedly calling
+`HcclChannelAcquire` for every size case and keeps dynamic-domain window usage
+bounded during the 20-iteration stress.
+
+Direct stress fallback, when the A5 environment does not provide
+`task-submit`:
+
+```bash
+mkdir -p /tmp/simpler-urma-deferred-ascend
+export ASCEND_PROCESS_LOG_PATH=/tmp/simpler-urma-deferred-ascend
+python examples/a5/tensormap_and_ringbuffer/urma_real_deferred_demo/test_urma_real_deferred_demo.py -p a5 -d 0,1 --build --repeat 20
+```
+
+Use this fallback only on an otherwise idle two-card A5 environment. It still
+validates repeatability, but it does not prove isolation from other shared
+runner jobs.
 
 Hardware acceptance criteria:
 
