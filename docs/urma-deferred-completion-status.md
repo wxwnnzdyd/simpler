@@ -226,11 +226,11 @@ task-submit --device auto --device-num 2 --max-time 3600 --timeout 3600 --run \
 ```
 
 The `--repeat` option keeps the whole stress loop inside one process and one
-`task-submit` device lease. It also reuses one `Worker` and one base URMA
-workspace across repeat iterations, and allocates one dynamic domain per
-iteration to cover all size cases. This avoids repeatedly calling
-`HcclChannelAcquire` for every size case and keeps dynamic-domain window usage
-bounded during the 20-iteration stress.
+`task-submit` device lease. It creates one `Worker` and one base URMA workspace
+per repeat iteration, then runs the original per-size-case DAGs sequentially in
+that worker. This avoids combining different size cases into one graph while
+reducing `HcclChannelAcquire` calls from once per size case to once per repeat
+iteration.
 
 Direct stress fallback, when the A5 environment does not provide
 `task-submit`:

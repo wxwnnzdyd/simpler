@@ -248,12 +248,13 @@ def test_phase4_real_deferred_consumer_depends_on_deferred_outputs() -> None:
     assert 'parser.add_argument("--repeat", type=int, default=1)' in test_py
     assert "if repeat < 1:" in test_py
     assert "def _run_case_on_worker" in test_py
-    assert "def _run_iteration_on_worker" in test_py
-    assert 'name=f"urma_real_deferred_iter_{iteration}"' in test_py
     assert "chip_callable = build_chip_callable(platform)" in test_py
     assert "worker.init()" in test_py
     assert "for iteration in range(repeat):" in test_py
-    assert "_run_iteration_on_worker(worker, chip_handle, iteration" in test_py
+    assert "build=build and iteration == 0" in test_py
+    assert "for elem_count in CASES:" in test_py
+    assert "_run_case_on_worker(worker, chip_handle, elem_count" in test_py
+    assert "def _run_iteration_on_worker" not in test_py
     assert "tput_elems = (nranks + 1) * elem_count" in test_py
     assert "@pytest.mark.requires_hardware" in test_py
     assert "pytest.mark.platforms([\"a5\"])" in test_py
