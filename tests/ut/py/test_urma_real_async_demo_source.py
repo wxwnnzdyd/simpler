@@ -20,6 +20,10 @@ DEFERRED_TPUT = DEFERRED_DEMO / "kernels/aiv/kernel_urma_real_deferred_tput.cpp"
 DEFERRED_CONSUMER = DEFERRED_DEMO / "kernels/aiv/kernel_urma_real_deferred_consumer.cpp"
 DEFERRED_ORCH = DEFERRED_DEMO / "kernels/orchestration/urma_real_deferred_orch.cpp"
 DEFERRED_TEST_PY = DEFERRED_DEMO / "test_urma_real_deferred_demo.py"
+DEFERRED_BIG_DEMO = REPO_ROOT / "examples/a5/tensormap_and_ringbuffer/urma_real_deferred_big_demo"
+DEFERRED_BIG_RUN = DEFERRED_BIG_DEMO / "run_urma_real_deferred_big_demo.py"
+DEFERRED_BIG_TGET = DEFERRED_BIG_DEMO / "kernels/aiv/kernel_urma_real_deferred_big_tget.cpp"
+DEFERRED_BIG_ORCH = DEFERRED_BIG_DEMO / "kernels/orchestration/urma_real_deferred_big_orch.cpp"
 URMA_BACKEND_DESIGN = (
     REPO_ROOT / "src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/design.md"
 )
@@ -248,6 +252,22 @@ def test_phase5_urma_backend_exposes_chunked_submission_helpers() -> None:
     assert "chunk_count" in backend
     assert "submit_chunked_urma_request" in backend
     assert "send_request_entry" in backend
+
+
+def test_phase5_real_deferred_big_smoke_exercises_backend_chunking() -> None:
+    run_source = DEFERRED_BIG_RUN.read_text()
+    kernel = DEFERRED_BIG_TGET.read_text()
+    orch = DEFERRED_BIG_ORCH.read_text()
+
+    assert "URMA_SINGLE_WQE_FLOATS = (256 * 1024 * 1024) // DTYPE_NBYTES" in run_source
+    assert "BIG_COUNT = URMA_SINGLE_WQE_FLOATS + 1" in run_source
+    assert "pytest.mark" not in run_source
+    assert "rt_submit_aiv_task(0" in orch
+    assert kernel.count("send_request_entry") == 1
+    assert "first_chunk_count" not in kernel
+    assert "second_chunk_count" not in kernel
+    assert "UrmaTget" in kernel
+    assert "UrmaTput" not in kernel
 
 
 def test_phase4_real_deferred_consumer_depends_on_deferred_outputs() -> None:

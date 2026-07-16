@@ -214,6 +214,17 @@ Backend design note:
 - `send_request_entry` now auto-splits flat contiguous URMA transfers larger
   than the PTO-ISA single-WQE limit before submission.
 
+Large-transfer chunking smoke:
+
+```bash
+python examples/a5/tensormap_and_ringbuffer/urma_real_deferred_big_demo/run_urma_real_deferred_big_demo.py \
+  -p a5 -d 0,1 --build
+```
+
+This manual A5 smoke submits one flat contiguous TGET of
+`256 MiB + 4 bytes`, forcing the backend `send_request_entry` chunking path
+instead of the deferred demo's manual two-request split.
+
 Required A5 hardware acceptance command:
 
 ```bash

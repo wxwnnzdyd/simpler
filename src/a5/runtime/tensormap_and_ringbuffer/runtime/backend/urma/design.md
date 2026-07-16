@@ -123,8 +123,9 @@ start from these entry points:
 
 - **Transfer splitting**: `send_request_entry` now chunks flat contiguous
   transfers larger than `kUrmaMaxTransferBytes` before submission. The next
-  step is to validate the split path on hardware and extend it beyond the flat
-  1-D case if needed.
+  step is to validate the split path on hardware with
+  `urma_real_deferred_big_demo` and extend it beyond the flat 1-D case if
+  needed.
 - **Event coalescing**: coalesce per-task/per-peer URMA events before writing
   deferred completion entries. URMA quiet semantics allow the largest target
   SQ head for a peer to cover earlier events on the same QP.
