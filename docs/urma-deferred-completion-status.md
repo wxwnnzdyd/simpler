@@ -220,11 +220,10 @@ python examples/a5/tensormap_and_ringbuffer/urma_real_deferred_demo/test_urma_re
 
 Stress note:
 
-- The demo now reuses one `Worker` across the full size sweep so repeated
-  `HcclChannelAcquire` does not trip the workspace init path between counts.
-  The temporary `--repeat` harness was withdrawn; use the required A5 hardware
-  acceptance command above for Phase 4 validation until a dedicated stress
-  runner is designed separately.
+- The acceptance path runs each `count` in its own `Worker` again. That keeps
+  the size sweep isolated while avoiding the withdrawn `--repeat` harness.
+  Use the required A5 hardware acceptance command above for Phase 4
+  validation until a dedicated stress runner is designed separately.
 
 Hardware acceptance criteria:
 

@@ -196,6 +196,8 @@ def test_phase4_real_deferred_demo_uses_deferred_urma_backend() -> None:
     common = DEFERRED_COMMON.read_text()
     orch = DEFERRED_ORCH.read_text()
     backend = URMA_BACKEND_KERNEL.read_text()
+    test_py = DEFERRED_TEST_PY.read_text()
+    run_source = test_py[test_py.index("def run(") : test_py.index("\n\n@pytest.mark.requires_hardware")]
 
     assert "backend/urma/urma_completion_kernel.h" in common
     assert "CommContext" in common
@@ -229,6 +231,14 @@ def test_phase4_real_deferred_demo_uses_deferred_urma_backend() -> None:
     assert "Tensor tget1_marker" in orch
     assert "TaskOutputTensors tput0_outputs" in orch
     assert "TaskOutputTensors tput1_outputs" in orch
+    assert "def run_case(" in test_py
+    assert "for elem_count in CASES:" in test_py
+    assert "ok = run_case(platform, device_ids, elem_count, build=build) and ok" in run_source
+    assert "Worker(" not in run_source
+    assert "build_chip_callable" not in run_source
+    assert "worker = Worker(" in test_py
+    assert "worker.init()" in test_py
+    assert "worker.close()" in test_py
 
 
 def test_phase4_real_deferred_consumer_depends_on_deferred_outputs() -> None:
