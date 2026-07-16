@@ -38,7 +38,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DTYPE_NBYTES = 4
 STATUS_WORDS = 8
 URMA_DATA_OFFSET_NBYTES = 64 * 4
-CASES = (16, 4096)
+CASES = (1, 16, 64, 256, 4096, 16384)
 
 
 def parse_device_range(spec: str) -> list[int]:

@@ -222,6 +222,7 @@ def test_phase4_real_deferred_consumer_depends_on_deferred_outputs() -> None:
     assert "TGET_ASYNC<pto::comm::DmaEngine::URMA>" in consumer
     assert "Status::kTputReadbackFailed" in consumer
     assert "comm_ctx->rankNum) * elem_count" in consumer
+    assert "CASES = (1, 16, 64, 256, 4096, 16384)" in test_py
     assert "tput_elems = (nranks + 1) * elem_count" in test_py
     assert "@pytest.mark.requires_hardware" in test_py
     assert "pytest.mark.platforms([\"a5\"])" in test_py
