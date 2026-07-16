@@ -25,12 +25,14 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     __gm__ Tensor *tget_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ Tensor *tput_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ Tensor *marker_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
-    __gm__ Tensor *status_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
-    __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[4]);
-    uint32_t elem_count = static_cast<uint32_t>(args[5]);
+    __gm__ Tensor *scratch_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
+    __gm__ Tensor *status_tensor = reinterpret_cast<__gm__ Tensor *>(args[4]);
+    __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[5]);
+    uint32_t elem_count = static_cast<uint32_t>(args[6]);
 
     __gm__ float *tget = urma_real_deferred::tensor_data<float>(tget_tensor);
     __gm__ float *tput = urma_real_deferred::tensor_data<float>(tput_tensor);
+    __gm__ float *scratch = urma_real_deferred::tensor_data<float>(scratch_tensor);
     (void)urma_real_deferred::tensor_data<int32_t>(marker_tensor);
     __gm__ int32_t *status = urma_real_deferred::tensor_data<int32_t>(status_tensor);
 
@@ -52,7 +54,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     uint64_t tput_slot_offset = urma_real_deferred::local_offset(comm_ctx, tput) +
                                 static_cast<uint64_t>(comm_ctx->rankId) * elem_count * sizeof(float);
     __gm__ float *remote_tput_slot = reinterpret_cast<__gm__ float *>(peer_base + tput_slot_offset);
-    auto local_scratch = urma_real_deferred::global_float(tget, elem_count);
+    auto local_scratch = urma_real_deferred::global_float(scratch, elem_count);
     auto remote_tput = urma_real_deferred::global_float(remote_tput_slot, elem_count);
     pto::comm::AsyncSession readback_session;
     pto::comm::BuildAsyncSession<pto::comm::DmaEngine::URMA>(
@@ -65,7 +67,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         return;
     }
 
-    if (tput_slot_matches(tget, elem_count, comm_ctx->rankId, status)) {
+    if (tput_slot_matches(scratch, elem_count, comm_ctx->rankId, status)) {
         urma_real_deferred::set_status(status, urma_real_deferred::Status::kOk, elem_count, peer);
         return;
     }
