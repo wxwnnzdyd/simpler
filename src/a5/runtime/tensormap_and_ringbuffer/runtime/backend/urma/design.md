@@ -42,6 +42,14 @@ The real A5 path requires:
 - real remote addresses are derived from the URMA MR base, not from SDMA-style
   peer VAs.
 
+Use the backend helpers for remote MR address derivation:
+
+```cpp
+uint64_t base = pto2::urma_backend::peer_mr_base_addr(workspace, peer);
+__gm__ float *remote =
+    pto2::urma_backend::peer_mr_ptr<float>(workspace, peer, offset);
+```
+
 When the task has a valid deferred `AsyncCtx`, the backend registers a
 completion token instead of waiting inline:
 
@@ -119,9 +127,9 @@ start from these entry points:
 - **Event coalescing**: coalesce per-task/per-peer URMA events before writing
   deferred completion entries. URMA quiet semantics allow the largest target
   SQ head for a peer to cover earlier events on the same QP.
-- **Address helper**: add a helper near the AICore submit API that derives
-  `UrmaPeerMrBaseAddr(workspace, peer) + local_offset`, reducing caller risk of
-  passing a non-MR remote address.
+- **Address helper**: `peer_mr_base_addr` and `peer_mr_ptr` now centralize
+  `UrmaPeerMrBaseAddr(workspace, peer) + local_offset` derivation. Future
+  callers should use these helpers instead of calling PTO-ISA directly.
 - **Non-dense rank mapping**: update host workspace ownership and peer-index
   mapping before enabling URMA for non-dense derived contexts.
 - **CQE diagnostics**: extend `poll_urma_event_handle` error reporting beyond

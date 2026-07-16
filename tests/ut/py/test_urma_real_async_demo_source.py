@@ -23,6 +23,9 @@ DEFERRED_TEST_PY = DEFERRED_DEMO / "test_urma_real_deferred_demo.py"
 URMA_BACKEND_DESIGN = (
     REPO_ROOT / "src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/design.md"
 )
+URMA_BACKEND_KERNEL = (
+    REPO_ROOT / "src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/urma_completion_kernel.h"
+)
 STATUS_DOC = REPO_ROOT / "docs/urma-deferred-completion-status.md"
 
 
@@ -192,12 +195,17 @@ def test_phase4_real_deferred_demo_uses_deferred_urma_backend() -> None:
     tput = DEFERRED_TPUT.read_text()
     common = DEFERRED_COMMON.read_text()
     orch = DEFERRED_ORCH.read_text()
+    backend = URMA_BACKEND_KERNEL.read_text()
 
     assert "backend/urma/urma_completion_kernel.h" in common
     assert "CommContext" in common
     assert "comm_ctx->workSpace" in tget
     assert "comm_ctx->workSpace" in tput
-    assert "UrmaPeerMrBaseAddr" in common
+    assert "peer_mr_base_addr" in backend
+    assert "peer_mr_ptr" in backend
+    assert "UrmaPeerMrBaseAddr" in backend
+    assert "pto2::urma_backend::peer_mr_base_addr" in common
+    assert "UrmaPeerMrBaseAddr" not in common
     assert "send_request_entry" in tget
     assert "send_request_entry" in tput
     assert tget.count("send_request_entry") >= 2
@@ -261,6 +269,8 @@ def test_phase4_real_deferred_consumer_depends_on_deferred_outputs() -> None:
 
 def test_phase4_urma_backend_design_tracks_current_contract() -> None:
     source = URMA_BACKEND_DESIGN.read_text()
+    design = (REPO_ROOT.parent / "design.md").read_text()
+    design_zn = (REPO_ROOT.parent / "design_zn.md").read_text()
 
     assert "PTO-ISA URMA async operations" in source
     assert "backend_cookie = workspace" in source
@@ -270,3 +280,8 @@ def test_phase4_urma_backend_design_tracks_current_contract() -> None:
     assert "Transfer splitting" in source
     assert "Event coalescing" in source
     assert "Address helper" in source
+    assert "peer_mr_base_addr" in source
+    assert "peer_mr_ptr" in source
+    assert "peer_mr_base_addr" in design
+    assert "peer_mr_ptr" in design
+    assert "peer_mr_base_addr" in design_zn

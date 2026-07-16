@@ -112,7 +112,9 @@ inline __aicore__ bool wait_urma_bounded(const Event &event, const Session &sess
 
 inline __aicore__ uint64_t remote_base(__gm__ CommContext *comm_ctx, uint32_t peer) {
 #ifdef PTO_URMA_SUPPORTED
-    return pto::comm::urma::UrmaPeerMrBaseAddr(reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace), peer);
+    return pto2::urma_backend::peer_mr_base_addr(
+        reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace), peer
+    );
 #else
     (void)comm_ctx;
     (void)peer;

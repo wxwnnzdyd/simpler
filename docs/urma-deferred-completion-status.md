@@ -209,6 +209,8 @@ Backend design note:
 - `src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/urma/design.md`
   records the current AICore submit contract, AICPU poll contract, sim path,
   validated status, and Phase 5 entry points.
+- The backend now provides `peer_mr_base_addr` / `peer_mr_ptr` helpers so
+  examples do not call PTO-ISA `UrmaPeerMrBaseAddr` directly.
 
 Required A5 hardware acceptance command:
 

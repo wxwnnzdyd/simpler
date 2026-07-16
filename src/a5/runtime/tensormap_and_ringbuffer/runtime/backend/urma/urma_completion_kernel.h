@@ -90,6 +90,29 @@ UrmaTput(const DstTensor &dst, const SrcTensor &src, __gm__ uint8_t *workspace, 
     return UrmaRequestDescriptor<DstTensor, SrcTensor>{UrmaOp::TPUT, dst, src, workspace, dest_rank};
 }
 
+namespace pto2::urma_backend {
+
+inline __aicore__ uint64_t peer_mr_base_addr(__gm__ uint8_t *workspace, uint32_t peer) {
+#if defined(__CPU_SIM)
+    (void)workspace;
+    (void)peer;
+    return 0;
+#elif defined(PTO_URMA_SUPPORTED)
+    return pto::comm::urma::UrmaPeerMrBaseAddr(workspace, peer);
+#else
+    (void)workspace;
+    (void)peer;
+    return 0;
+#endif
+}
+
+template <typename T>
+inline __aicore__ __gm__ T *peer_mr_ptr(__gm__ uint8_t *workspace, uint32_t peer, uint64_t local_offset) {
+    return reinterpret_cast<__gm__ T *>(peer_mr_base_addr(workspace, peer) + local_offset);
+}
+
+}  // namespace pto2::urma_backend
+
 #if defined(__CPU_SIM)
 inline __aicore__ AsyncCtx get_async_ctx(__gm__ int64_t *args) {
     __gm__ LocalContext *lc =
