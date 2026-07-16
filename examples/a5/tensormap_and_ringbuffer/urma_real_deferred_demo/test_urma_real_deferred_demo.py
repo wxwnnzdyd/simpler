@@ -68,7 +68,18 @@ def build_chip_callable(platform: str) -> ChipCallable:
         (
             2,
             "kernels/aiv/kernel_urma_real_deferred_consumer.cpp",
-            [ArgDirection.IN, ArgDirection.IN, ArgDirection.IN, ArgDirection.IN, ArgDirection.OUT, ArgDirection.IN, ArgDirection.IN],
+            [
+                ArgDirection.IN,
+                ArgDirection.IN,
+                ArgDirection.IN,
+                ArgDirection.IN,
+                ArgDirection.IN,
+                ArgDirection.IN,
+                ArgDirection.IN,
+                ArgDirection.OUT,
+                ArgDirection.IN,
+                ArgDirection.IN,
+            ],
         ),
     ]:
         kernel = kc.compile_incore(
