@@ -241,6 +241,15 @@ def test_phase4_real_deferred_demo_uses_deferred_urma_backend() -> None:
     assert "worker.close()" in test_py
 
 
+def test_phase5_urma_backend_exposes_chunked_submission_helpers() -> None:
+    backend = URMA_BACKEND_KERNEL.read_text()
+
+    assert "kUrmaMaxTransferBytes" in backend
+    assert "chunk_count" in backend
+    assert "submit_chunked_urma_request" in backend
+    assert "send_request_entry" in backend
+
+
 def test_phase4_real_deferred_consumer_depends_on_deferred_outputs() -> None:
     consumer = DEFERRED_CONSUMER.read_text()
     orch = DEFERRED_ORCH.read_text()

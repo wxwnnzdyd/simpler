@@ -211,6 +211,8 @@ Backend design note:
   validated status, and Phase 5 entry points.
 - The backend now provides `peer_mr_base_addr` / `peer_mr_ptr` helpers so
   examples do not call PTO-ISA `UrmaPeerMrBaseAddr` directly.
+- `send_request_entry` now auto-splits flat contiguous URMA transfers larger
+  than the PTO-ISA single-WQE limit before submission.
 
 Required A5 hardware acceptance command:
 

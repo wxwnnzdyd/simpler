@@ -14,6 +14,8 @@
 
 #include <stdint.h>
 
+#include <type_traits>
+
 #if defined(__CPU_SIM)
 #include <type_traits>
 #else
@@ -92,6 +94,12 @@ UrmaTput(const DstTensor &dst, const SrcTensor &src, __gm__ uint8_t *workspace, 
 
 namespace pto2::urma_backend {
 
+inline constexpr uint64_t kUrmaMaxTransferBytes = 256ULL * 1024ULL * 1024ULL;
+
+#if defined(PTO_URMA_SUPPORTED)
+static_assert(kUrmaMaxTransferBytes == pto::comm::urma::kUrmaMaxWqeTransferBytes, "URMA transfer limit drift");
+#endif
+
 inline __aicore__ uint64_t peer_mr_base_addr(__gm__ uint8_t *workspace, uint32_t peer) {
 #if defined(__CPU_SIM)
     (void)workspace;
@@ -109,6 +117,130 @@ inline __aicore__ uint64_t peer_mr_base_addr(__gm__ uint8_t *workspace, uint32_t
 template <typename T>
 inline __aicore__ __gm__ T *peer_mr_ptr(__gm__ uint8_t *workspace, uint32_t peer, uint64_t local_offset) {
     return reinterpret_cast<__gm__ T *>(peer_mr_base_addr(workspace, peer) + local_offset);
+}
+
+template <typename TensorT>
+inline __aicore__ uint64_t tensor_element_count(const TensorT &tensor) {
+    return static_cast<uint64_t>(tensor.GetShape(pto::GlobalTensorDim::DIM_0)) *
+           static_cast<uint64_t>(tensor.GetShape(pto::GlobalTensorDim::DIM_1)) *
+           static_cast<uint64_t>(tensor.GetShape(pto::GlobalTensorDim::DIM_2)) *
+           static_cast<uint64_t>(tensor.GetShape(pto::GlobalTensorDim::DIM_3)) *
+           static_cast<uint64_t>(tensor.GetShape(pto::GlobalTensorDim::DIM_4));
+}
+
+inline __aicore__ uint64_t chunk_count(uint64_t total_bytes) {
+    return (total_bytes + kUrmaMaxTransferBytes - 1) / kUrmaMaxTransferBytes;
+}
+
+template <typename TensorT>
+inline __aicore__ bool is_flat_contiguous_1d(const TensorT &tensor) {
+    const int64_t shp0 = tensor.GetShape(pto::GlobalTensorDim::DIM_0);
+    const int64_t shp1 = tensor.GetShape(pto::GlobalTensorDim::DIM_1);
+    const int64_t shp2 = tensor.GetShape(pto::GlobalTensorDim::DIM_2);
+    const int64_t shp3 = tensor.GetShape(pto::GlobalTensorDim::DIM_3);
+    const int64_t shp4 = tensor.GetShape(pto::GlobalTensorDim::DIM_4);
+
+    const int64_t step0 = tensor.GetStride(pto::GlobalTensorDim::DIM_0);
+    const int64_t step1 = tensor.GetStride(pto::GlobalTensorDim::DIM_1);
+    const int64_t step2 = tensor.GetStride(pto::GlobalTensorDim::DIM_2);
+    const int64_t step3 = tensor.GetStride(pto::GlobalTensorDim::DIM_3);
+    const int64_t step4 = tensor.GetStride(pto::GlobalTensorDim::DIM_4);
+
+    const bool packed_layout = (step4 == 1) && (step3 == shp4) && (step2 == shp3 * step3) && (step1 == shp2 * step2) &&
+                               (step0 == shp1 * step1);
+    const bool one_dim_logical = (shp0 == 1 && shp1 == 1 && shp2 == 1 && shp3 == 1);
+    return packed_layout && one_dim_logical;
+}
+
+template <typename TensorT>
+inline __aicore__ TensorT make_tensor_slice(TensorT &tensor, uint64_t elem_offset, uint64_t elem_count) {
+    using ShapeT = typename TensorT::Shape;
+    using StrideT = typename TensorT::Stride;
+    ShapeT shape(tensor.GetShape(pto::GlobalTensorDim::DIM_0), tensor.GetShape(pto::GlobalTensorDim::DIM_1),
+                 tensor.GetShape(pto::GlobalTensorDim::DIM_2), tensor.GetShape(pto::GlobalTensorDim::DIM_3),
+                 static_cast<int64_t>(elem_count));
+    StrideT stride(tensor.GetStride(pto::GlobalTensorDim::DIM_0), tensor.GetStride(pto::GlobalTensorDim::DIM_1),
+                   tensor.GetStride(pto::GlobalTensorDim::DIM_2), tensor.GetStride(pto::GlobalTensorDim::DIM_3),
+                   tensor.GetStride(pto::GlobalTensorDim::DIM_4));
+    return TensorT(tensor.data() + elem_offset, shape, stride);
+}
+
+template <typename DstTensor, typename SrcTensor>
+inline __aicore__ bool submit_urma_request_once(AsyncCtx &ctx, UrmaRequestDescriptor<DstTensor, SrcTensor> desc) {
+#if defined(__CPU_SIM)
+    pto2::urma_backend::FakeUrmaAsyncSession session;
+    if (!pto2::urma_backend::build_fake_urma_session(desc.workspace, desc.remote_rank, session)) {
+        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+        return false;
+    }
+
+    pto2::urma_backend::FakeUrmaAsyncEvent event;
+    if (!pto2::urma_backend::submit_fake_urma_request(desc, event)) {
+        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+        return false;
+    }
+    pto2::detail::register_urma_async_event(ctx, event, session, desc.workspace);
+    pto2::detail::defer_flush(ctx);
+    return true;
+#elif defined(PTO_URMA_SUPPORTED)
+    pto::comm::AsyncSession session;
+    if (!pto::comm::BuildAsyncSession<pto::comm::DmaEngine::URMA>(desc.workspace, desc.remote_rank, session)) {
+        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+        return false;
+    }
+
+    pto::comm::AsyncEvent event;
+    if (desc.op == UrmaOp::TGET) {
+        event = pto::comm::TGET_ASYNC<pto::comm::DmaEngine::URMA>(desc.dst, desc.src, session);
+    } else {
+        event = pto::comm::TPUT_ASYNC<pto::comm::DmaEngine::URMA>(desc.dst, desc.src, session);
+    }
+    pto2::detail::register_urma_async_event(ctx, event, session, desc.workspace);
+    pto2::detail::defer_flush(ctx);
+    return true;
+#else
+    (void)desc;
+    pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+    return false;
+#endif
+}
+
+template <typename DstTensor, typename SrcTensor>
+inline __aicore__ bool submit_chunked_urma_request(AsyncCtx &ctx, UrmaRequestDescriptor<DstTensor, SrcTensor> desc) {
+    using RawDType = typename DstTensor::RawDType;
+    static_assert(std::is_same_v<RawDType, typename SrcTensor::RawDType>, "URMA transfer requires matching dtypes");
+
+    if (!is_flat_contiguous_1d(desc.dst) || !is_flat_contiguous_1d(desc.src)) {
+        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+        return false;
+    }
+
+    const uint64_t elem_count = tensor_element_count(desc.dst);
+    const uint64_t total_bytes = elem_count * sizeof(RawDType);
+    const uint64_t max_bytes = kUrmaMaxTransferBytes;
+    if (total_bytes <= max_bytes) {
+        return submit_urma_request_once(ctx, desc);
+    }
+
+    const uint64_t chunk_elems = max_bytes / sizeof(RawDType);
+    if (chunk_elems == 0 || (max_bytes % sizeof(RawDType)) != 0) {
+        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+        return false;
+    }
+
+    uint64_t offset = 0;
+    while (offset < elem_count) {
+        const uint64_t remaining = elem_count - offset;
+        const uint64_t current_elems = (remaining < chunk_elems) ? remaining : chunk_elems;
+        auto chunk_desc = desc;
+        chunk_desc.dst = make_tensor_slice(desc.dst, offset, current_elems);
+        chunk_desc.src = make_tensor_slice(desc.src, offset, current_elems);
+        if (!submit_urma_request_once(ctx, chunk_desc)) {
+            return false;
+        }
+        offset += current_elems;
+    }
+    return true;
 }
 
 }  // namespace pto2::urma_backend
@@ -422,42 +554,7 @@ inline __aicore__ void UrmaFakeReset(__gm__ uint8_t *workspace) {
 
 template <typename DstTensor, typename SrcTensor>
 inline __aicore__ bool send_request_entry(AsyncCtx &ctx, UrmaRequestDescriptor<DstTensor, SrcTensor> desc) {
-#if defined(__CPU_SIM)
-    pto2::urma_backend::FakeUrmaAsyncSession session;
-    if (!pto2::urma_backend::build_fake_urma_session(desc.workspace, desc.remote_rank, session)) {
-        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
-        return false;
-    }
-
-    pto2::urma_backend::FakeUrmaAsyncEvent event;
-    if (!pto2::urma_backend::submit_fake_urma_request(desc, event)) {
-        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
-        return false;
-    }
-    pto2::detail::register_urma_async_event(ctx, event, session, desc.workspace);
-    pto2::detail::defer_flush(ctx);
-    return true;
-#elif defined(PTO_URMA_SUPPORTED)
-    pto::comm::AsyncSession session;
-    if (!pto::comm::BuildAsyncSession<pto::comm::DmaEngine::URMA>(desc.workspace, desc.remote_rank, session)) {
-        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
-        return false;
-    }
-
-    pto::comm::AsyncEvent event;
-    if (desc.op == UrmaOp::TGET) {
-        event = pto::comm::TGET_ASYNC<pto::comm::DmaEngine::URMA>(desc.dst, desc.src, session);
-    } else {
-        event = pto::comm::TPUT_ASYNC<pto::comm::DmaEngine::URMA>(desc.dst, desc.src, session);
-    }
-    pto2::detail::register_urma_async_event(ctx, event, session, desc.workspace);
-    pto2::detail::defer_flush(ctx);
-    return true;
-#else
-    (void)desc;
-    pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
-    return false;
-#endif
+    return pto2::urma_backend::submit_chunked_urma_request(ctx, desc);
 }
 
 #endif  // SRC_A5_RUNTIME_TENSORMAP_AND_RINGBUFFER_RUNTIME_BACKEND_URMA_URMA_COMPLETION_KERNEL_H_
