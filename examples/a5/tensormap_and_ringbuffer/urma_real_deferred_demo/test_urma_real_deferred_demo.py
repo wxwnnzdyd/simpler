@@ -227,12 +227,18 @@ def _print_status(elem_count: int, status: list[torch.Tensor]) -> bool:
     return ok
 
 
-def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: bool = False) -> int:
+def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: bool = False, repeat: int = 1) -> int:
     if device_ids is None:
         device_ids = [0, 1]
+    if repeat < 1:
+        raise ValueError(f"repeat must be >= 1, got {repeat}")
     ok = True
-    for elem_count in CASES:
-        ok = run_case(platform, device_ids, elem_count, build=build) and ok
+    for iteration in range(repeat):
+        if repeat > 1:
+            print(f"[urma_real_deferred_demo] iteration={iteration + 1}/{repeat}")
+        iteration_build = build and iteration == 0
+        for elem_count in CASES:
+            ok = run_case(platform, device_ids, elem_count, build=iteration_build) and ok
     return 0 if ok else 1
 
 
@@ -248,8 +254,9 @@ def main() -> int:
     parser.add_argument("-p", "--platform", default="a5")
     parser.add_argument("-d", "--device", default="0-1")
     parser.add_argument("--build", action="store_true")
+    parser.add_argument("--repeat", type=int, default=1)
     args = parser.parse_args()
-    return run(args.platform, parse_device_range(args.device), build=args.build)
+    return run(args.platform, parse_device_range(args.device), build=args.build, repeat=args.repeat)
 
 
 if __name__ == "__main__":

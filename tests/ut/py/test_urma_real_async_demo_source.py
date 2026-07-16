@@ -242,6 +242,9 @@ def test_phase4_real_deferred_consumer_depends_on_deferred_outputs() -> None:
     assert "status[6] = expected_marker_sum" in consumer
     assert "status[7] = static_cast<int32_t>(other_slot[0])" in consumer
     assert "CASES = (1, 16, 64, 256, 4096, 16384)" in test_py
+    assert 'parser.add_argument("--repeat", type=int, default=1)' in test_py
+    assert "if repeat < 1:" in test_py
+    assert "iteration_build = build and iteration == 0" in test_py
     assert "tput_elems = (nranks + 1) * elem_count" in test_py
     assert "@pytest.mark.requires_hardware" in test_py
     assert "pytest.mark.platforms([\"a5\"])" in test_py

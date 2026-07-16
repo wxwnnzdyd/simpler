@@ -138,8 +138,9 @@ Acceptance decision:
 
 ## Phase 4: Real A5 Deferred Runtime
 
-Status: basic real-hardware end-to-end accepted on A5; stress and
-multi-completion coverage still pending.
+Status: real-hardware end-to-end accepted on A5 for the current size sweep,
+multi-completion, and concurrent deferred-task smoke. Shared `task-submit`
+stress with isolated device logs is still pending.
 
 Goal:
 
@@ -186,9 +187,13 @@ Accepted hardware result:
   counts in `status[3:5]`: `1/1/1` for `count=1`, and `2/2/2` for all larger
   cases.
 - The current demo also submits two independent TGET deferred tasks and two
-  independent TPUT deferred tasks before the consumer. Hardware validation for
-  this concurrent-task shape is pending. In that shape, `status[3:6]` should be
-  `[2, 2, 2]` for `count=1` and `[4, 4, 4]` for larger counts.
+  independent TPUT deferred tasks before the consumer. The A5 run confirmed
+  this concurrent-task shape with `status[3:6] == [2, 2, 2]` for `count=1`
+  and `[4, 4, 4]` for larger cases.
+- One earlier direct run produced a single `count=16` TGET mismatch on rank 0
+  with `status[0] == 100`; immediate reruns and later repeated runs did not
+  reproduce it. Treat this as a low-frequency observation, not a current
+  blocker, unless it recurs under locked stress.
 
 Validation commands:
 
@@ -205,6 +210,19 @@ Required A5 hardware acceptance command:
 python examples/a5/tensormap_and_ringbuffer/urma_real_deferred_demo/test_urma_real_deferred_demo.py -p a5 -d 0,1 --build
 ```
 
+Locked stress command:
+
+```bash
+mkdir -p /tmp/simpler-urma-deferred-ascend
+export ASCEND_PROCESS_LOG_PATH=/tmp/simpler-urma-deferred-ascend
+task-submit --device auto --device-num 2 --max-time 3600 --timeout 3600 --run \
+  'python examples/a5/tensormap_and_ringbuffer/urma_real_deferred_demo/test_urma_real_deferred_demo.py -p a5 -d $TASK_DEVICE --build --repeat 20'
+```
+
+The `--repeat` option keeps the whole stress loop inside one process and one
+`task-submit` device lease. `--build` is applied only to the first repeat
+iteration; later iterations reuse the built runtime and kernel artifacts.
+
 Hardware acceptance criteria:
 
 - no scheduler timeout;
@@ -217,23 +235,22 @@ Hardware acceptance criteria:
 Observed accepted statuses:
 
 ```text
-[urma_real_deferred_demo] count=1 rank=0 status=[0, 1, 1, 1, 1, 1, 0, 0]
-[urma_real_deferred_demo] count=1 rank=1 status=[0, 1, 0, 1, 1, 1, 0, 0]
-[urma_real_deferred_demo] count=16 rank=0 status=[0, 16, 1, 2, 2, 2, 0, 0]
-[urma_real_deferred_demo] count=16 rank=1 status=[0, 16, 0, 2, 2, 2, 0, 0]
-[urma_real_deferred_demo] count=64 rank=0 status=[0, 64, 1, 2, 2, 2, 0, 0]
-[urma_real_deferred_demo] count=64 rank=1 status=[0, 64, 0, 2, 2, 2, 0, 0]
-[urma_real_deferred_demo] count=256 rank=0 status=[0, 256, 1, 2, 2, 2, 0, 0]
-[urma_real_deferred_demo] count=256 rank=1 status=[0, 256, 0, 2, 2, 2, 0, 0]
-[urma_real_deferred_demo] count=4096 rank=0 status=[0, 4096, 1, 2, 2, 2, 0, 0]
-[urma_real_deferred_demo] count=4096 rank=1 status=[0, 4096, 0, 2, 2, 2, 0, 0]
-[urma_real_deferred_demo] count=16384 rank=0 status=[0, 16384, 1, 2, 2, 2, 0, 0]
-[urma_real_deferred_demo] count=16384 rank=1 status=[0, 16384, 0, 2, 2, 2, 0, 0]
+[urma_real_deferred_demo] count=1 rank=0 status=[0, 1, 1, 2, 2, 2, 0, 0]
+[urma_real_deferred_demo] count=1 rank=1 status=[0, 1, 0, 2, 2, 2, 0, 0]
+[urma_real_deferred_demo] count=16 rank=0 status=[0, 16, 1, 4, 4, 4, 0, 0]
+[urma_real_deferred_demo] count=16 rank=1 status=[0, 16, 0, 4, 4, 4, 0, 0]
+[urma_real_deferred_demo] count=64 rank=0 status=[0, 64, 1, 4, 4, 4, 0, 0]
+[urma_real_deferred_demo] count=64 rank=1 status=[0, 64, 0, 4, 4, 4, 0, 0]
+[urma_real_deferred_demo] count=256 rank=0 status=[0, 256, 1, 4, 4, 4, 0, 0]
+[urma_real_deferred_demo] count=256 rank=1 status=[0, 256, 0, 4, 4, 4, 0, 0]
+[urma_real_deferred_demo] count=4096 rank=0 status=[0, 4096, 1, 4, 4, 4, 0, 0]
+[urma_real_deferred_demo] count=4096 rank=1 status=[0, 4096, 0, 4, 4, 4, 0, 0]
+[urma_real_deferred_demo] count=16384 rank=0 status=[0, 16384, 1, 4, 4, 4, 0, 0]
+[urma_real_deferred_demo] count=16384 rank=1 status=[0, 16384, 0, 4, 4, 4, 0, 0]
 ```
 
 Remaining Phase 4 coverage:
 
-- Validate the implemented concurrent deferred URMA task shape on A5.
 - Re-run under the shared hardware locking workflow with per-run device-log
   redirection when available.
 
@@ -241,6 +258,7 @@ Resolved Phase 4 hardware risk for the basic path:
 
 - PTO-ISA's blocking wait path updates CQ tail and doorbell from AICore with
   device load/store. The deferred path updates them from AICPU via the scheduler
-  mirror. The accepted A5 run confirms this is sufficient for the current
-  two-rank, one-URMA-event-per-task smoke. Larger stress cases still need to
-  confirm queue retirement under repeated and concurrent submissions.
+  mirror. The accepted A5 runs confirm this is sufficient for the current
+  two-rank size sweep, multi-completion, and concurrent deferred-task smoke.
+  Longer locked stress still needs to confirm repeatability under shared-runner
+  conditions.
