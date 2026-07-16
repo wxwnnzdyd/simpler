@@ -85,11 +85,11 @@ def build_chip_callable(platform: str) -> ChipCallable:
 
 
 def _pattern(rank: int, count: int) -> torch.Tensor:
-    return (torch.arange(count, dtype=torch.float32) + float(rank * 100000)).share_memory_()
+    return torch.arange(count, dtype=torch.float32) + float(rank * 100000)
 
 
 def _zero_float(count: int) -> torch.Tensor:
-    return torch.zeros(count, dtype=torch.float32).share_memory_()
+    return torch.zeros(count, dtype=torch.float32)
 
 
 def _zero_i32(count: int) -> torch.Tensor:
