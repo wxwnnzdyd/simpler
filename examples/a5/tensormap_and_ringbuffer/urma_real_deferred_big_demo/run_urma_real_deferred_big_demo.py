@@ -39,7 +39,7 @@ STATUS_WORDS = 8
 URMA_DATA_OFFSET_NBYTES = 64 * 4
 URMA_SINGLE_WQE_FLOATS = (256 * 1024 * 1024) // DTYPE_NBYTES
 BIG_COUNT = URMA_SINGLE_WQE_FLOATS + 1
-COPY_CHUNK_NBYTES = 4 * 1024 * 1024
+SIGNAL_NBYTES = 16 * 4
 
 
 def parse_device_range(spec: str) -> list[int]:
@@ -61,48 +61,61 @@ def build_chip_callable(platform: str) -> ChipCallable:
         str(kc.project_root / "examples" / "a5" / "tensormap_and_ringbuffer"),
     ]
 
-    kernel = kc.compile_incore(
-        source_path=os.path.join(HERE, "kernels/aiv/kernel_urma_real_deferred_big_tget.cpp"),
-        core_type="aiv",
-        pto_isa_root=pto_isa_root,
-        extra_include_dirs=extra_includes,
-    )
-    if not platform.endswith("sim"):
-        kernel = extract_text_section(kernel)
+    children = []
+    for func_id, rel, child_signature in [
+        (
+            0,
+            "kernels/aiv/kernel_urma_real_deferred_big_tget.cpp",
+            [
+                ArgDirection.OUT,
+                ArgDirection.OUT,
+                ArgDirection.OUT,
+                ArgDirection.OUT,
+                ArgDirection.OUT,
+                ArgDirection.IN,
+                ArgDirection.IN,
+            ],
+        ),
+        (
+            1,
+            "kernels/aiv/kernel_urma_real_deferred_big_consumer.cpp",
+            [ArgDirection.IN, ArgDirection.IN, ArgDirection.OUT, ArgDirection.IN, ArgDirection.IN],
+        ),
+    ]:
+        kernel = kc.compile_incore(
+            source_path=os.path.join(HERE, rel),
+            core_type="aiv",
+            pto_isa_root=pto_isa_root,
+            extra_include_dirs=extra_includes,
+        )
+        if not platform.endswith("sim"):
+            kernel = extract_text_section(kernel)
+        children.append((func_id, CoreCallable.build(signature=child_signature, binary=kernel)))
 
     orch = kc.compile_orchestration(
         runtime_name=runtime,
         source_path=os.path.join(HERE, "kernels/orchestration/urma_real_deferred_big_orch.cpp"),
         extra_include_dirs=[str(kc.project_root / "src" / "common")],
     )
-    signature = [ArgDirection.IN, ArgDirection.INOUT, ArgDirection.OUT, ArgDirection.IN, ArgDirection.IN]
+    signature = [
+        ArgDirection.INOUT,
+        ArgDirection.INOUT,
+        ArgDirection.INOUT,
+        ArgDirection.OUT,
+        ArgDirection.IN,
+        ArgDirection.IN,
+    ]
     return ChipCallable.build(
         signature=signature,
         func_name="urma_real_deferred_big_orchestration",
         config_name="urma_real_deferred_big_orchestration_config",
         binary=orch,
-        children=[(0, CoreCallable.build(signature=signature, binary=kernel))],
+        children=children,
     )
-
-
-def _pattern(rank: int, count: int) -> torch.Tensor:
-    return torch.arange(count, dtype=torch.float32) + float(rank * 100000)
-
-
-def _zero_float(count: int) -> torch.Tensor:
-    return torch.zeros(count, dtype=torch.float32)
 
 
 def _zero_i32(count: int) -> torch.Tensor:
     return torch.zeros(count, dtype=torch.int32).share_memory_()
-
-
-def _copy_to_chunked(orch, rank: int, dst: int, src: int, nbytes: int) -> None:
-    offset = 0
-    while offset < nbytes:
-        chunk = min(COPY_CHUNK_NBYTES, nbytes - offset)
-        orch.copy_to(rank, dst + offset, src + offset, chunk)
-        offset += chunk
 
 
 def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: bool = False) -> int:
@@ -117,7 +130,7 @@ def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: boo
     elem_count = BIG_COUNT
     send_nbytes = elem_count * DTYPE_NBYTES
     recv_nbytes = elem_count * DTYPE_NBYTES
-    window_size = max(URMA_DATA_OFFSET_NBYTES + send_nbytes + recv_nbytes, 4 * 1024 * 1024)
+    window_size = max(URMA_DATA_OFFSET_NBYTES + send_nbytes + recv_nbytes + SIGNAL_NBYTES, 4 * 1024 * 1024)
 
     chip_callable = build_chip_callable(platform)
     worker = Worker(
@@ -133,8 +146,6 @@ def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: boo
         worker.init()
 
         status = [_zero_i32(STATUS_WORDS) for _ in range(nranks)]
-        send_host: list[torch.Tensor] = []
-        recv_zero: list[torch.Tensor] = []
 
         def orch_fn(orch, _args, cfg):
             with orch.allocate_domain(
@@ -150,20 +161,9 @@ def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: boo
                     ),
                     CommBufferSpec(name="send", dtype="float32", count=elem_count, nbytes=send_nbytes),
                     CommBufferSpec(name="recv", dtype="float32", count=elem_count, nbytes=recv_nbytes),
+                    CommBufferSpec(name="signal", dtype="int32", count=16, nbytes=SIGNAL_NBYTES),
                 ],
             ) as handle:
-                send_host.extend(_pattern(rank, elem_count) for rank in range(nranks))
-                recv_zero.extend(_zero_float(elem_count) for _ in range(nranks))
-                for rank in range(nranks):
-                    domain = handle[rank]
-                    _copy_to_chunked(
-                        orch=orch,
-                        rank=rank,
-                        dst=domain.buffer_ptrs["send"],
-                        src=send_host[rank].data_ptr(),
-                        nbytes=send_nbytes,
-                    )
-
                 for rank in range(nranks):
                     domain = handle[rank]
                     args = TaskArgs()
@@ -174,13 +174,22 @@ def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: boo
                             dtype=DataType.FLOAT32,
                             child_memory=True,
                         ),
-                        TensorArgType.INPUT,
+                        TensorArgType.INOUT,
                     )
                     args.add_tensor(
                         Tensor.make(
                             data=domain.buffer_ptrs["recv"],
                             shapes=(elem_count,),
                             dtype=DataType.FLOAT32,
+                            child_memory=True,
+                        ),
+                        TensorArgType.INOUT,
+                    )
+                    args.add_tensor(
+                        Tensor.make(
+                            data=domain.buffer_ptrs["signal"],
+                            shapes=(16,),
+                            dtype=DataType.INT32,
                             child_memory=True,
                         ),
                         TensorArgType.INOUT,
@@ -196,16 +205,12 @@ def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: boo
 
     ok = True
     for rank in range(nranks):
-        peer = (rank + 1) % nranks
         words = [int(x) for x in status[rank].tolist()]
-        max_err = float(torch.max(torch.abs(recv_zero[rank] - send_host[peer])))
-        first = float(recv_zero[rank][0])
-        last = float(recv_zero[rank][-1])
         print(
             f"[urma_real_deferred_big_demo] count={elem_count} rank={rank} "
-            f"status={words} max_err={max_err:.3e} first={first:.1f} last={last:.1f}"
+            f"status={words}"
         )
-        ok = ok and words[0] == 0 and max_err <= 1e-6
+        ok = ok and words[0] == 0 and words[1] == elem_count
     return 0 if ok else 1
 
 
