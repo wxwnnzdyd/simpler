@@ -39,7 +39,7 @@ STATUS_WORDS = 8
 URMA_DATA_OFFSET_NBYTES = 64 * 4
 URMA_SINGLE_WQE_FLOATS = (256 * 1024 * 1024) // DTYPE_NBYTES
 BIG_COUNT = URMA_SINGLE_WQE_FLOATS + 1
-COPY_CHUNK_NBYTES = 64 * 1024 * 1024
+COPY_CHUNK_NBYTES = 4 * 1024 * 1024
 
 
 def parse_device_range(spec: str) -> list[int]:
@@ -162,13 +162,6 @@ def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: boo
                         dst=domain.buffer_ptrs["send"],
                         src=send_host[rank].data_ptr(),
                         nbytes=send_nbytes,
-                    )
-                    _copy_to_chunked(
-                        orch=orch,
-                        rank=rank,
-                        dst=domain.buffer_ptrs["recv"],
-                        src=recv_zero[rank].data_ptr(),
-                        nbytes=recv_nbytes,
                     )
 
                 for rank in range(nranks):
