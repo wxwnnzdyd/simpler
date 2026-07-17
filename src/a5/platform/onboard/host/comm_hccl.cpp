@@ -13,8 +13,10 @@
  *
  * Implements the five functions declared in host/comm.h using Ascend
  * HCCL (bundled with CANN) for the bootstrap / barrier / teardown plane
- * and the public ACL IPC primitives (aclrtIpcMem* + EnablePeerAccess)
- * for the per-rank symmetric window pool (Path D).
+ * and a local ACL allocation per rank for the symmetric window pool. A5 URMA
+ * remote access is described by the HCCL/URMA workspace, so this backend does
+ * not require importing peer ACL virtual addresses on CANN builds where
+ * cross-process ImportByKey is rejected.
  *
  * Scope: L3 single-host multi-card only. aclrtIpcMem* is host-local, so
  * cross-host (L4) deployments need a different windows backend -- see
@@ -45,6 +47,7 @@
 #include "acl/acl.h"
 #include "hccl/hccl_comm.h"
 #include "hccl/hccl_types.h"
+#include "pto/comm/async/urma/urma_workspace_manager.hpp"
 
 // Thin wrappers around the HCCL public APIs we use. Kept as a translation
 // layer in case we need to swap (e.g., InitConfig variant) later.
@@ -60,15 +63,12 @@ static inline HcclResult hccl_comm_destroy(HcclComm c) { return HcclCommDestroy(
 // ============================================================================
 
 // Per-domain dynamic allocation.  One of these per orch.allocate_domain call.
-// Tracks the local IPC buffer (aclrtMalloc'd here, freed in
-// comm_release_domain_windows) and the device CommContext we materialise for
-// the subset.  IPC import refs and EnablePeerAccess routes for this
-// allocation are NOT explicitly released — same contract as
-// alloc_windows_via_ipc (aclrtResetDevice at finalize reclaims them).
+// Tracks the domain-local device CommContext we materialise for the subset.
+// A5 domains are derived slices of the base symmetric window; the base
+// handle owns the native PTO-ISA URMA workspace referenced by each context.
 struct DomainAllocation {
     int rank = 0;    // this rank's index within the subset (domain_rank)
     int nranks = 0;  // subset size
-    void *local_buf = nullptr;
     CommContext *device_ctx = nullptr;  // aclrtMalloc'd CommContext mirror
 };
 
@@ -87,6 +87,8 @@ struct CommHandle_ {
     bool owns_device_ctx = false;
     std::vector<CommContext *> derived_contexts;
     std::unordered_map<uint64_t, std::unique_ptr<DomainAllocation>> domain_allocations;
+    std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> urma_workspace;
+    uint64_t derived_domain_next_offset = 0;
 };
 
 // ============================================================================
@@ -297,6 +299,12 @@ extern "C" CommHandle comm_init(int rank, int nranks, void *stream, const char *
         return nullptr;
     }
 
+    if (!file_barrier(h->rootinfo_path, h->rank, h->nranks, "hccl_comm_ready", h->run_token)) {
+        hccl_comm_destroy(h->hccl_comm);
+        delete h;
+        return nullptr;
+    }
+
     return h;
 } catch (const std::exception &e) {
     LOG_ERROR("[comm rank %d] comm_init: exception: %s", rank, e.what());
@@ -308,11 +316,9 @@ extern "C" CommHandle comm_init(int rank, int nranks, void *stream, const char *
 
 namespace {
 
-// Path D: build the per-rank symmetric pool ourselves via the public ACL
-// IPC primitives (aclrtMalloc + aclrtIpcMemGetExportKey + SetImportPid +
-// ImportByKey). This mirrors HCCL's own internal cross-rank IPC pattern
-// (refs/hcomm adapter_rts.cc::hrtIpc* + p2p_mgmt.cc::EnableP2P) so we
-// depend only on stable ACL surface, no HCCL-private struct ABI.
+// Path D: build the per-rank symmetric pool ourselves via stable ACL APIs.
+// A5 URMA registers each rank's local window with native PTO-ISA
+// UrmaWorkspaceManager and does not import peer ACL VAs into windowsIn[].
 // Spike-validated in hw-native-sys/comm-spike; see project memory.
 
 // Default per-rank symmetric pool size when comm_alloc_windows is called
@@ -384,7 +390,9 @@ static bool ipc_read_announce(
     return false;
 }
 
-// Fills h->host_ctx with rankId/rankNum/winSize/windowsIn[] via DIY IPC.
+// Fills h->host_ctx with rankId/rankNum/winSize/windowsIn[].  A5 URMA only
+// needs the local window base; peer memory is reached through the URMA
+// workspace metadata built from HCCL channels.
 // `win_size` is the per-rank pool byte size requested by the caller
 // (kDefaultIpcWinSize when 0).
 //
@@ -517,12 +525,6 @@ static int alloc_windows_via_ipc(CommHandle h, uint64_t win_size) {
         return -1;
     }
 
-    // Import every peer's buffer into our local VA space.
-    // windowsOut[] is intentionally left zero by the memset below: no kernel
-    // path reads it (verified by grep across simpler + pto-isa). The field
-    // is kept in CommContext only to preserve byte-equivalence with pto-isa's
-    // parallel HcclDeviceContext declaration; removing it is gated on the
-    // F4 private-ization decision (see .docs/28.l3-comm/ext.01.pr-774-review.md).
     // host_ctx was value-initialized at handle construction (CommContext{}),
     // and the idempotency guard in comm_alloc_windows prevents a second
     // entry; no re-zero needed before populating it here.
@@ -531,88 +533,10 @@ static int alloc_windows_via_ipc(CommHandle h, uint64_t win_size) {
     h->host_ctx.winSize = win_size;
     h->host_ctx.windowsIn[rank] = reinterpret_cast<uint64_t>(localBuf);
 
-    for (int p = 0; p < nranks; ++p) {
-        if (p == rank) continue;
-        void *peerVa = nullptr;
-        aret = aclrtIpcMemImportByKey(&peerVa, peers[p].name, 0);
-        if (aret != ACL_SUCCESS) {
-            LOG_ERROR(
-                "[comm rank %d] ipc: ImportByKey(peer=%d pid=%d) -> %d", rank, p, peers[p].pid, static_cast<int>(aret)
-            );
-            aclrtFree(localBuf);
-            return -1;
-        }
-        h->host_ctx.windowsIn[p] = reinterpret_cast<uint64_t>(peerVa);
-    }
-
+    // A5 URMA does not import peer ACL VAs into windowsIn[]. Device kernels
+    // derive remote addresses from CommContext::workSpace using the native
+    // PTO-ISA URMA metadata and the local-buffer offset.
     return 0;
-}
-
-// ============================================================================
-// Per-domain dynamic allocation (for orch.allocate_domain).
-//
-// Same Path-D IPC dance as alloc_windows_via_ipc, but on a fresh per-allocation
-// local buffer.  Every barrier filename and announce filename is scoped by
-// allocation_id so concurrent allocations from different orch.allocate_domain
-// calls do not collide.  Participation is by subset (domain_rank within
-// rank_count), so non-members of the subset are not involved.
-// ============================================================================
-
-// Announce file path scoped by allocation_id so two concurrent allocations
-// from different orch calls do not collide.  Same dir + cleanup-friendly
-// prefix as the base-comm IPC announce.
-static std::string
-domain_announce_path(const std::string &rootinfo, uint64_t allocation_id, uint32_t domain_rank, uint64_t run_token) {
-    return handshake_dir(rootinfo) + "/barrier_" + handshake_prefix(rootinfo) + "_alloc_" +
-           std::to_string(allocation_id) + "_ipc_announce_" + run_token_hex(run_token) + "_" +
-           std::to_string(domain_rank) + ".ready";
-}
-
-static bool domain_write_announce(
-    const std::string &rootinfo, uint64_t allocation_id, uint32_t domain_rank, uint64_t run_token, int32_t pid,
-    int32_t device_id, const char *name
-) {
-    IpcAnnounceFile a{};
-    a.magic = kIpcAnnounceMagic;
-    a.pid = pid;
-    a.rank = domain_rank;
-    a.device_id = device_id;
-    memcpy(a.name, name, kIpcNameLen);
-    std::string p = domain_announce_path(rootinfo, allocation_id, domain_rank, run_token);
-    std::string tmp = p + ".tmp." + std::to_string(getpid());
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        f.write(reinterpret_cast<const char *>(&a), sizeof(a));
-        if (!f.good()) {
-            std::remove(tmp.c_str());
-            return false;
-        }
-    }
-    if (std::rename(tmp.c_str(), p.c_str()) != 0) {
-        std::remove(tmp.c_str());
-        return false;
-    }
-    return true;
-}
-
-static bool domain_read_announce(
-    const std::string &rootinfo, uint64_t allocation_id, uint32_t peer_domain_rank, uint64_t run_token,
-    IpcAnnounceFile *out, int timeout_sec = 60
-) {
-    std::string p = domain_announce_path(rootinfo, allocation_id, peer_domain_rank, run_token);
-    for (int i = 0; i < timeout_sec * 10; ++i) {
-        std::ifstream f(p, std::ios::binary);
-        if (f.good()) {
-            IpcAnnounceFile a{};
-            f.read(reinterpret_cast<char *>(&a), sizeof(a));
-            if (f.good() && a.magic == kIpcAnnounceMagic && a.rank == peer_domain_rank) {
-                *out = a;
-                return true;
-            }
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    return false;
 }
 
 // Tag helper for allocation-scoped file barriers.  Tag is fed straight into
@@ -623,203 +547,135 @@ static std::string domain_barrier_tag(uint64_t allocation_id, const char *phase)
     return std::string("alloc_") + std::to_string(allocation_id) + "_" + phase;
 }
 
-// Idempotently provision the process-global PTO-ISA async-SDMA scratch
-// workspace on the comm handle and mirror its address into host_ctx.  Both
-// the base-window path and the dynamic per-domain path call this; only the
-// first call allocates.  CANN 9.0+ feature: on 8.5 the aclnn dlsym fails by
-// design, so we leave workSpace == 0 and SDMA demos self-skip.  No-op when
-// the build-time PTO-ISA dependency is absent.
-static void ensure_sdma_workspace(CommHandle h) {
-#ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
-    if (h->sdma_workspace) return;
-    h->sdma_workspace = std::make_unique<pto::comm::sdma::SdmaWorkspaceManager>();
-    if (h->sdma_workspace->Init()) {
-        h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->sdma_workspace->GetWorkspaceAddr());
-        h->host_ctx.workSpaceSize = 16 * 1024;
-    } else {
-        h->sdma_workspace.reset();
-    }
-#else
-    (void)h;
-#endif
+static uint64_t urma_workspace_bytes(uint32_t rank_count) {
+    using namespace pto::comm::urma;
+    constexpr uint32_t qp_num = 1;
+    return sizeof(UrmaInfo) +
+           static_cast<uint64_t>(rank_count) *
+               (2ULL * sizeof(UrmaWQCtx) * qp_num + 2ULL * sizeof(UrmaCqCtx) * qp_num + sizeof(UrmaMemInfo) * qp_num);
 }
 
-// Performs the per-allocation Path-D dance for one subset rank.  rank_ids
-// must list participating BASE-COMM rank ids in domain rank order; this
-// rank's domain_rank must match its base rank for the same invariant
-// alloc_windows_via_ipc relies on (rank_ids[domain_rank] == h->rank).
-//
-// Failure paths free the local buffer if it was allocated.  IPC imports are
-// NOT explicitly torn down on failure — mirrors alloc_windows_via_ipc; ACL
-// reset at finalize cleans them up.
-static int domain_alloc_via_ipc(
-    CommHandle h, uint64_t allocation_id, const uint32_t *rank_ids, size_t rank_count, uint32_t domain_rank,
-    uint64_t win_size, DomainAllocation *out
+static bool rank_ids_are_dense_prefix(const uint32_t *rank_ids, size_t rank_count) {
+    if (rank_ids == nullptr) return false;
+    for (size_t i = 0; i < rank_count; ++i) {
+        if (rank_ids[i] != static_cast<uint32_t>(i)) return false;
+    }
+    return true;
+}
+
+static uint64_t slice_window_addr(uint64_t base, size_t window_offset) {
+    return base == 0 ? 0 : base + window_offset;
+}
+
+static bool init_urma_workspace(
+    CommHandle h, uint32_t rank_id, uint32_t rank_count, void *symmetric_addr, uint64_t symmetric_size,
+    std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> &workspace
 ) {
-    const std::string &rootinfo = h->rootinfo_path;
-    const uint64_t run_token = h->run_token;
-    const int subset_n = static_cast<int>(rank_count);
-    const int my_dr = static_cast<int>(domain_rank);
-
-    int32_t myDevice = -1;
-    if (aclrtGetDevice(&myDevice) != ACL_SUCCESS) {
-        LOG_ERROR("[comm rank %d] alloc_domain: aclrtGetDevice failed", h->rank);
-        return -1;
+    if (workspace) return workspace->GetWorkspaceAddr() != nullptr;
+    if (h == nullptr || h->hccl_comm == nullptr || symmetric_addr == nullptr || symmetric_size == 0 ||
+        rank_id >= rank_count) {
+        return false;
     }
 
-    void *localBuf = nullptr;
-    aclError aret = aclrtMalloc(&localBuf, win_size, ACL_MEM_MALLOC_HUGE_FIRST);
-    if (aret != ACL_SUCCESS) {
-        LOG_ERROR("[comm rank %d] alloc_domain: aclrtMalloc -> %d", h->rank, static_cast<int>(aret));
-        return -1;
+    auto manager = std::make_unique<pto::comm::urma::UrmaWorkspaceManager>();
+    if (!manager->Init(h->hccl_comm, rank_id, rank_count, symmetric_addr, symmetric_size)) {
+        LOG_WARN(
+            "[comm rank %d] URMA workspace init failed (rank_id=%u rank_count=%u size=%llu); "
+            "comm_alloc_windows will fail",
+            h->rank, rank_id, rank_count, static_cast<unsigned long long>(symmetric_size)
+        );
+        return false;
     }
-    char myName[kIpcNameLen]{};
-    aret = aclrtIpcMemGetExportKey(localBuf, win_size, myName, kIpcNameLen, 0);
-    if (aret != ACL_SUCCESS) {
-        LOG_ERROR("[comm rank %d] alloc_domain: GetExportKey -> %d", h->rank, static_cast<int>(aret));
-        aclrtFree(localBuf);
-        return -1;
-    }
+    workspace = std::move(manager);
+    return true;
+}
 
-    const int32_t myPid = static_cast<int32_t>(getpid());
-    if (!domain_write_announce(rootinfo, allocation_id, domain_rank, run_token, myPid, myDevice, myName)) {
-        LOG_ERROR("[comm rank %d] alloc_domain: write_announce failed", h->rank);
-        aclrtFree(localBuf);
+static bool ensure_base_urma_workspace(CommHandle h) {
+    if (h == nullptr) return false;
+    if (h->urma_workspace) return h->host_ctx.workSpace != 0 && h->host_ctx.workSpaceSize != 0;
+    void *local_buf = reinterpret_cast<void *>(static_cast<uintptr_t>(h->host_ctx.windowsIn[h->rank]));
+    if (!init_urma_workspace(
+            h, static_cast<uint32_t>(h->rank), static_cast<uint32_t>(h->nranks), local_buf, h->host_ctx.winSize,
+            h->urma_workspace
+        )) {
+        return false;
+    }
+    h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->urma_workspace->GetWorkspaceAddr());
+    h->host_ctx.workSpaceSize = urma_workspace_bytes(static_cast<uint32_t>(h->nranks));
+    return h->host_ctx.workSpace != 0 && h->host_ctx.workSpaceSize != 0;
+}
+
+static int derive_context_device(
+    CommHandle h, const uint32_t *rank_ids, size_t rank_count, uint32_t domain_rank, size_t window_offset,
+    size_t window_size, uint64_t *device_ctx_out, bool track_on_handle
+) {
+    if (!h || !rank_ids || !device_ctx_out) return -1;
+    if (h->host_ctx.rankNum == 0) {
+        LOG_ERROR("[comm rank %d] comm_derive_context: base windows are not allocated", h->rank);
         return -1;
     }
-    std::vector<IpcAnnounceFile> peers(subset_n);
-    for (int p = 0; p < subset_n; ++p) {
-        if (p == my_dr) {
-            peers[p].magic = kIpcAnnounceMagic;
-            peers[p].pid = myPid;
-            peers[p].rank = domain_rank;
-            peers[p].device_id = myDevice;
-            memcpy(peers[p].name, myName, kIpcNameLen);
-            continue;
-        }
-        if (!domain_read_announce(rootinfo, allocation_id, static_cast<uint32_t>(p), run_token, &peers[p])) {
-            LOG_ERROR("[comm rank %d] alloc_domain: read_announce(peer_dr=%d) timed out", h->rank, p);
-            aclrtFree(localBuf);
-            return -1;
-        }
-    }
-
-    // Enable cross-card P2P for every domain peer, then a best-effort
-    // confirmation poll. The orch-only allocate_domain model has no base
-    // comm_alloc_windows to own the P2P route, so each allocation must
-    // (idempotently) ensure it. aclrtDeviceEnablePeerAccess is process-global
-    // and per device-pair; once any allocation opens a pair, later ones simply
-    // observe it. The enable is the operative call (resolves the peer physical
-    // id via the HCCL adapter and opens the HCCS route).
-    for (int p = 0; p < subset_n; ++p) {
-        if (p == my_dr) continue;
-        aclError r = aclrtDeviceEnablePeerAccess(peers[p].device_id, 0);
-        if (r != ACL_SUCCESS) {
-            LOG_WARN(
-                "[comm rank %d] alloc_domain: EnablePeerAccess(peer_dev=%d) -> %d", h->rank, peers[p].device_id,
-                static_cast<int>(r)
-            );
-        }
-    }
-    for (int p = 0; p < subset_n; ++p) {
-        if (p == my_dr) continue;
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-        while (true) {
-            int32_t status = 0;
-            aclError r = aclrtDevicePeerAccessStatus(myDevice, peers[p].device_id, &status);
-            if (r != ACL_SUCCESS) {
-                LOG_ERROR(
-                    "[comm rank %d] alloc_domain: PeerAccessStatus(local_dev=%d peer_dev=%d) -> %d", h->rank, myDevice,
-                    peers[p].device_id, static_cast<int>(r)
-                );
-                aclrtFree(localBuf);
-                return -1;
-            }
-            if (status == 1) break;
-            if (std::chrono::steady_clock::now() >= deadline) {
-                LOG_WARN(
-                    "[comm rank %d] alloc_domain: P2P status unconfirmed peer_dr=%d peer_dev=%d status=%d "
-                    "(proceeding after best-effort enable attempt, see device-remap note)",
-                    h->rank, p, peers[p].device_id, status
-                );
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    }
-
-    if (!file_barrier(rootinfo, my_dr, subset_n, domain_barrier_tag(allocation_id, "p2p_ready"), run_token)) {
-        aclrtFree(localBuf);
+    if (rank_count == 0 || rank_count > COMM_MAX_RANK_NUM || domain_rank >= rank_count) {
+        LOG_ERROR(
+            "[comm rank %d] comm_derive_context: invalid rank_count=%zu domain_rank=%u", h->rank, rank_count,
+            domain_rank
+        );
         return -1;
     }
-
-    std::vector<int32_t> peerPids;
-    peerPids.reserve(subset_n - 1);
-    for (int p = 0; p < subset_n; ++p) {
-        if (p == my_dr) continue;
-        peerPids.push_back(peers[p].pid);
-    }
-    aret = aclrtIpcMemSetImportPid(myName, peerPids.data(), peerPids.size());
-    if (aret != ACL_SUCCESS) {
-        LOG_ERROR("[comm rank %d] alloc_domain: SetImportPid -> %d", h->rank, static_cast<int>(aret));
-        aclrtFree(localBuf);
+    if (window_offset + window_size > static_cast<size_t>(h->host_ctx.winSize)) {
+        LOG_ERROR(
+            "[comm rank %d] comm_derive_context: window range [%zu, %zu) exceeds base window size %llu", h->rank,
+            window_offset, window_offset + window_size, static_cast<unsigned long long>(h->host_ctx.winSize)
+        );
         return -1;
     }
-    if (!file_barrier(rootinfo, my_dr, subset_n, domain_barrier_tag(allocation_id, "auth_done"), run_token)) {
-        aclrtFree(localBuf);
-        return -1;
-    }
-
-    out->rank = my_dr;
-    out->nranks = subset_n;
-    out->local_buf = localBuf;
-    // Build a host-side CommContext for the subset and upload it as device_ctx.
-    // PTO-ISA async SDMA ops (SdmaTget) read the scratch workspace off
-    // CommContext::workSpace.  The dynamic-domain path does not go through
-    // comm_alloc_windows, so provision the workspace here; without it a
-    // freshly zero-initialized per-domain ctx would leave workSpace == 0 and
-    // those kernels early-return on the workSpace guard.
-    ensure_sdma_workspace(h);
 
     CommContext ctx{};
+    if (rank_ids_are_dense_prefix(rank_ids, rank_count)) {
+        ctx.workSpace = h->host_ctx.workSpace;
+        ctx.workSpaceSize = h->host_ctx.workSpaceSize;
+    } else {
+        LOG_WARN(
+            "[comm rank %d] comm_derive_context: URMA workspace disabled for non-dense rank mapping "
+            "(first supported version requires rank_ids[i] == i)",
+            h->rank
+        );
+    }
     ctx.rankId = domain_rank;
-    ctx.rankNum = static_cast<uint32_t>(subset_n);
-    ctx.winSize = win_size;
-    ctx.workSpace = h->host_ctx.workSpace;
-    ctx.workSpaceSize = h->host_ctx.workSpaceSize;
-    ctx.windowsIn[my_dr] = reinterpret_cast<uint64_t>(localBuf);
-    for (int p = 0; p < subset_n; ++p) {
-        if (p == my_dr) continue;
-        void *peerVa = nullptr;
-        aret = aclrtIpcMemImportByKey(&peerVa, peers[p].name, 0);
-        if (aret != ACL_SUCCESS) {
+    ctx.rankNum = static_cast<uint32_t>(rank_count);
+    ctx.winSize = window_size;
+    for (size_t i = 0; i < rank_count; ++i) {
+        uint32_t base_rank = rank_ids[i];
+        if (base_rank >= static_cast<uint32_t>(h->nranks)) {
             LOG_ERROR(
-                "[comm rank %d] alloc_domain: ImportByKey(peer_dr=%d pid=%d) -> %d", h->rank, p, peers[p].pid,
-                static_cast<int>(aret)
+                "[comm rank %d] comm_derive_context: rank_ids[%zu]=%u out of range [0, %d)", h->rank, i, base_rank,
+                h->nranks
             );
-            aclrtFree(localBuf);
             return -1;
         }
-        ctx.windowsIn[p] = reinterpret_cast<uint64_t>(peerVa);
+        ctx.windowsIn[i] = slice_window_addr(h->host_ctx.windowsIn[base_rank], window_offset);
+        ctx.windowsOut[i] = slice_window_addr(h->host_ctx.windowsOut[base_rank], window_offset);
     }
 
     void *newDevMem = nullptr;
-    aret = aclrtMalloc(&newDevMem, sizeof(CommContext), ACL_MEM_MALLOC_HUGE_FIRST);
-    if (aret != ACL_SUCCESS) {
-        LOG_ERROR("[comm rank %d] alloc_domain: ctx aclrtMalloc -> %d", h->rank, static_cast<int>(aret));
-        aclrtFree(localBuf);
+    aclError aRet = aclrtMalloc(&newDevMem, sizeof(CommContext), ACL_MEM_MALLOC_HUGE_FIRST);
+    if (aRet != ACL_SUCCESS) {
+        LOG_ERROR("[comm rank %d] comm_derive_context: aclrtMalloc failed: %d", h->rank, static_cast<int>(aRet));
         return -1;
     }
-    aret = aclrtMemcpy(newDevMem, sizeof(CommContext), &ctx, sizeof(CommContext), ACL_MEMCPY_HOST_TO_DEVICE);
-    if (aret != ACL_SUCCESS) {
-        LOG_ERROR("[comm rank %d] alloc_domain: ctx Memcpy H2D -> %d", h->rank, static_cast<int>(aret));
+    aRet = aclrtMemcpy(newDevMem, sizeof(CommContext), &ctx, sizeof(CommContext), ACL_MEMCPY_HOST_TO_DEVICE);
+    if (aRet != ACL_SUCCESS) {
+        LOG_ERROR("[comm rank %d] comm_derive_context: aclrtMemcpy H2D failed: %d", h->rank, static_cast<int>(aRet));
         aclrtFree(newDevMem);
-        aclrtFree(localBuf);
         return -1;
     }
-    out->device_ctx = reinterpret_cast<CommContext *>(newDevMem);
+
+    auto *derived = reinterpret_cast<CommContext *>(newDevMem);
+    if (track_on_handle) h->derived_contexts.push_back(derived);
+    *device_ctx_out = reinterpret_cast<uint64_t>(derived);
     return 0;
 }
+
+static uint64_t align_up(uint64_t value, uint64_t alignment) { return (value + alignment - 1) / alignment * alignment; }
 
 }  // namespace
 
@@ -842,11 +698,8 @@ extern "C" int comm_alloc_windows(CommHandle h, size_t win_size, uint64_t *devic
     const uint64_t effective_win_size = win_size != 0 ? static_cast<uint64_t>(win_size) : kDefaultIpcWinSize;
     if (alloc_windows_via_ipc(h, effective_win_size) != 0) return -1;
 
-    // Optional PTO-ISA async SDMA workspace pre-allocation (overlays the comm
-    // backend's output; comm-side flow does not care about workSpace).  No-op
-    // when SIMPLER_ENABLE_PTO_SDMA_WORKSPACE is undefined (this PR ships A
-    // without the macro; the overlay PR turns it on).
-    ensure_sdma_workspace(h);
+    if (!ensure_base_urma_workspace(h)) return -1;
+    if (!file_barrier(h->rootinfo_path, h->rank, h->nranks, "base_urma_ready", h->run_token)) return -1;
 
     void *newDevMem = nullptr;
     aclError aRet = aclrtMalloc(&newDevMem, sizeof(CommContext), ACL_MEM_MALLOC_HUGE_FIRST);
@@ -884,62 +737,9 @@ extern "C" int comm_derive_context(
     CommHandle h, const uint32_t *rank_ids, size_t rank_count, uint32_t domain_rank, size_t window_offset,
     size_t window_size, uint64_t *device_ctx_out
 ) try {
-    if (!h || !rank_ids || !device_ctx_out) return -1;
-    if (h->host_ctx.rankNum == 0) {
-        LOG_ERROR("[comm rank %d] comm_derive_context: base windows are not allocated", h->rank);
-        return -1;
-    }
-    if (rank_count == 0 || rank_count > COMM_MAX_RANK_NUM || domain_rank >= rank_count) {
-        LOG_ERROR(
-            "[comm rank %d] comm_derive_context: invalid rank_count=%zu domain_rank=%u", h->rank, rank_count,
-            domain_rank
-        );
-        return -1;
-    }
-    if (window_offset + window_size > static_cast<size_t>(h->host_ctx.winSize)) {
-        LOG_ERROR(
-            "[comm rank %d] comm_derive_context: window range [%zu, %zu) exceeds base window size %llu", h->rank,
-            window_offset, window_offset + window_size, static_cast<unsigned long long>(h->host_ctx.winSize)
-        );
-        return -1;
-    }
-
-    CommContext ctx{};
-    ctx.workSpace = h->host_ctx.workSpace;
-    ctx.workSpaceSize = h->host_ctx.workSpaceSize;
-    ctx.rankId = domain_rank;
-    ctx.rankNum = static_cast<uint32_t>(rank_count);
-    ctx.winSize = window_size;
-    for (size_t i = 0; i < rank_count; ++i) {
-        uint32_t base_rank = rank_ids[i];
-        if (base_rank >= static_cast<uint32_t>(h->nranks)) {
-            LOG_ERROR(
-                "[comm rank %d] comm_derive_context: rank_ids[%zu]=%u out of range [0, %d)", h->rank, i, base_rank,
-                h->nranks
-            );
-            return -1;
-        }
-        ctx.windowsIn[i] = h->host_ctx.windowsIn[base_rank] + window_offset;
-        ctx.windowsOut[i] = h->host_ctx.windowsOut[base_rank] + window_offset;
-    }
-
-    void *newDevMem = nullptr;
-    aclError aRet = aclrtMalloc(&newDevMem, sizeof(CommContext), ACL_MEM_MALLOC_HUGE_FIRST);
-    if (aRet != ACL_SUCCESS) {
-        LOG_ERROR("[comm rank %d] comm_derive_context: aclrtMalloc failed: %d", h->rank, static_cast<int>(aRet));
-        return -1;
-    }
-    aRet = aclrtMemcpy(newDevMem, sizeof(CommContext), &ctx, sizeof(CommContext), ACL_MEMCPY_HOST_TO_DEVICE);
-    if (aRet != ACL_SUCCESS) {
-        LOG_ERROR("[comm rank %d] comm_derive_context: aclrtMemcpy H2D failed: %d", h->rank, static_cast<int>(aRet));
-        aclrtFree(newDevMem);
-        return -1;
-    }
-
-    auto *derived = reinterpret_cast<CommContext *>(newDevMem);
-    h->derived_contexts.push_back(derived);
-    *device_ctx_out = reinterpret_cast<uint64_t>(derived);
-    return 0;
+    return derive_context_device(
+        h, rank_ids, rank_count, domain_rank, window_offset, window_size, device_ctx_out, true
+    );
 } catch (const std::exception &e) {
     LOG_ERROR("[comm] comm_derive_context: exception: %s", e.what());
     return -1;
@@ -988,31 +788,49 @@ extern "C" int comm_alloc_domain_windows(
         );
         return -1;
     }
-    // The base communicator only needs comm_init to have run (rootinfo_path
-    // + run_token are set, used to scope barrier filenames).  We do NOT
-    // require comm_alloc_windows on the base in the orch-only model — the
-    // dynamic alloc path does its own per-allocation aclrtMalloc + IPC dance.
+    // The base communicator only needs comm_init to have run. A5 dynamic
+    // domains derive slices from the base window instead of allocating fresh
+    // ACL IPC pools; this reuses the hardware-validated Phase-2 URMA workspace
+    // path and avoids a second cross-process ImportByKey flow.
     if (h->rootinfo_path.empty() || h->hccl_comm == nullptr) {
         LOG_ERROR("[comm rank %d] alloc_domain: base communicator not initialised", h->rank);
         return -1;
     }
 
     auto alloc = std::make_unique<DomainAllocation>();
-    int rc = domain_alloc_via_ipc(h, allocation_id, rank_ids, rank_count, domain_rank, window_size, alloc.get());
-    if (rc != 0) return rc;
+    if (h->host_ctx.rankNum == 0) {
+        uint64_t base_ctx = 0;
+        const size_t base_hint = window_size <= kDefaultIpcWinSize ? 0 : window_size;
+        if (comm_alloc_windows(h, base_hint, &base_ctx) != 0) return -1;
+    }
 
-    // Zero the freshly-allocated local pool so kernels do not observe stale
-    // aclrtMalloc bytes (parity with the sim backend's memset).
-    aclError aret = aclrtMemset(alloc->local_buf, window_size, 0, window_size);
-    if (aret != ACL_SUCCESS) {
-        LOG_ERROR("[comm rank %d] alloc_domain: aclrtMemset -> %d", h->rank, static_cast<int>(aret));
-        aclrtFree(alloc->device_ctx);
-        aclrtFree(alloc->local_buf);
+    const uint64_t offset = align_up(h->derived_domain_next_offset, 4096);
+    if (offset + window_size > h->host_ctx.winSize) {
+        LOG_ERROR(
+            "[comm rank %d] alloc_domain: base window exhausted offset=%llu size=%zu winSize=%llu", h->rank,
+            static_cast<unsigned long long>(offset), window_size, static_cast<unsigned long long>(h->host_ctx.winSize)
+        );
         return -1;
     }
 
-    *device_ctx_out = reinterpret_cast<uint64_t>(alloc->device_ctx);
-    *local_window_base_out = reinterpret_cast<uint64_t>(alloc->local_buf);
+    uint64_t derived_ctx = 0;
+    if (derive_context_device(h, rank_ids, rank_count, domain_rank, offset, window_size, &derived_ctx, false) != 0) {
+        return -1;
+    }
+    void *local_slice = reinterpret_cast<void *>(static_cast<uintptr_t>(h->host_ctx.windowsIn[h->rank] + offset));
+    aclError aret = aclrtMemset(local_slice, window_size, 0, window_size);
+    if (aret != ACL_SUCCESS) {
+        LOG_ERROR("[comm rank %d] alloc_domain: aclrtMemset -> %d", h->rank, static_cast<int>(aret));
+        aclrtFree(reinterpret_cast<void *>(static_cast<uintptr_t>(derived_ctx)));
+        return -1;
+    }
+
+    alloc->rank = static_cast<int>(domain_rank);
+    alloc->nranks = static_cast<int>(rank_count);
+    alloc->device_ctx = reinterpret_cast<CommContext *>(static_cast<uintptr_t>(derived_ctx));
+    *device_ctx_out = derived_ctx;
+    *local_window_base_out = reinterpret_cast<uint64_t>(local_slice);
+    h->derived_domain_next_offset = offset + window_size;
     h->domain_allocations.emplace(allocation_id, std::move(alloc));
     return 0;
 } catch (const std::exception &e) {
@@ -1059,10 +877,6 @@ comm_release_domain_windows(CommHandle h, uint64_t allocation_id, size_t rank_co
         aclError aret = aclrtFree(alloc->device_ctx);
         if (aret != ACL_SUCCESS && rc == 0) rc = -1;
     }
-    if (alloc->local_buf) {
-        aclError aret = aclrtFree(alloc->local_buf);
-        if (aret != ACL_SUCCESS && rc == 0) rc = -1;
-    }
     h->domain_allocations.erase(it);
     return rc;
 } catch (const std::exception &e) {
@@ -1099,9 +913,9 @@ extern "C" int comm_destroy(CommHandle h) try {
     for (auto &kv : h->domain_allocations) {
         auto &alloc = kv.second;
         if (alloc->device_ctx) aclrtFree(alloc->device_ctx);
-        if (alloc->local_buf) aclrtFree(alloc->local_buf);
     }
     h->domain_allocations.clear();
+    h->urma_workspace.reset();
     if (h->hccl_comm) {
         HcclResult hret = hccl_comm_destroy(h->hccl_comm);
         if (hret != HCCL_SUCCESS) {
