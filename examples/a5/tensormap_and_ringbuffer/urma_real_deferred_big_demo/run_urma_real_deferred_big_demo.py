@@ -39,6 +39,7 @@ STATUS_WORDS = 8
 URMA_DATA_OFFSET_NBYTES = 64 * 4
 URMA_SINGLE_WQE_FLOATS = (256 * 1024 * 1024) // DTYPE_NBYTES
 BIG_COUNT = URMA_SINGLE_WQE_FLOATS + 1
+COPY_CHUNK_NBYTES = 64 * 1024 * 1024
 
 
 def parse_device_range(spec: str) -> list[int]:
@@ -96,6 +97,14 @@ def _zero_i32(count: int) -> torch.Tensor:
     return torch.zeros(count, dtype=torch.int32).share_memory_()
 
 
+def _copy_to_chunked(orch, rank: int, dst: int, src: int, nbytes: int) -> None:
+    offset = 0
+    while offset < nbytes:
+        chunk = min(COPY_CHUNK_NBYTES, nbytes - offset)
+        orch.copy_to(rank, dst + offset, src + offset, chunk)
+        offset += chunk
+
+
 def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: bool = False) -> int:
     if device_ids is None:
         device_ids = [0, 1]
@@ -147,8 +156,20 @@ def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: boo
                 recv_zero.extend(_zero_float(elem_count) for _ in range(nranks))
                 for rank in range(nranks):
                     domain = handle[rank]
-                    orch.copy_to(rank, domain.buffer_ptrs["send"], send_host[rank].data_ptr(), send_nbytes)
-                    orch.copy_to(rank, domain.buffer_ptrs["recv"], recv_zero[rank].data_ptr(), recv_nbytes)
+                    _copy_to_chunked(
+                        orch=orch,
+                        rank=rank,
+                        dst=domain.buffer_ptrs["send"],
+                        src=send_host[rank].data_ptr(),
+                        nbytes=send_nbytes,
+                    )
+                    _copy_to_chunked(
+                        orch=orch,
+                        rank=rank,
+                        dst=domain.buffer_ptrs["recv"],
+                        src=recv_zero[rank].data_ptr(),
+                        nbytes=recv_nbytes,
+                    )
 
                 for rank in range(nranks):
                     domain = handle[rank]
