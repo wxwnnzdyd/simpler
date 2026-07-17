@@ -29,22 +29,56 @@ inline __aicore__ void write_sentinel(__gm__ float *send, uint32_t elem_count, u
     pto2::detail::defer_flush_range(send + elem_count - 1u, sizeof(float));
 }
 
-inline __aicore__ bool wait_peer_ready(
+inline __aicore__ uint32_t ready_token(uint32_t rank, uint32_t elem_count) {
+    return 0x5A000000u | ((rank & 0xFFu) << 16) | (elem_count & 0xFFFFu);
+}
+
+using SignalShape = pto::Shape<1, 1, 1, 1, 1>;
+using SignalStride = pto::Stride<1, 1, 1, 1, 1>;
+using GlobalSignal = pto::GlobalTensor<int32_t, SignalShape, SignalStride>;
+
+inline __aicore__ GlobalSignal global_signal(__gm__ int32_t *ptr) {
+    SignalShape shape;
+    SignalStride stride;
+    return GlobalSignal(ptr, shape, stride);
+}
+
+inline __aicore__ bool publish_and_wait_peer_ready(
     __gm__ CommContext *comm_ctx, __gm__ int32_t *signal, uint32_t peer, uint32_t token, __gm__ int32_t *status
 ) {
-    urma_real_deferred::store_marker(signal, static_cast<int32_t>(token));
-    uint64_t peer_base = urma_real_deferred::remote_base(comm_ctx, peer);
+    uint32_t my_rank = comm_ctx->rankId;
+    __gm__ int32_t *local_slot = signal + my_rank;
+    __gm__ int32_t *peer_slot = signal + peer;
+    local_slot[0] = static_cast<int32_t>(token);
+    pto2::detail::defer_flush_range(local_slot, sizeof(int32_t));
     uint64_t signal_offset = urma_real_deferred::local_offset(comm_ctx, signal);
-    __gm__ int32_t *remote_signal = reinterpret_cast<__gm__ int32_t *>(peer_base + signal_offset);
+    __gm__ int32_t *remote_signal_base = pto2::urma_backend::peer_mr_ptr<int32_t>(
+        reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace), peer, signal_offset
+    );
+    __gm__ int32_t *remote_slot = remote_signal_base + my_rank;
+
+    pto::comm::AsyncSession session;
+    pto::comm::BuildAsyncSession<pto::comm::DmaEngine::URMA>(
+        reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace), peer, session
+    );
+    auto local_signal = global_signal(local_slot);
+    auto peer_signal = global_signal(remote_slot);
+    auto event = pto::comm::TPUT_ASYNC<pto::comm::DmaEngine::URMA>(peer_signal, local_signal, session);
+    if (!urma_real_deferred::wait_urma_bounded(event, session)) {
+        urma_real_deferred::set_status(status, urma_real_deferred::Status::kSubmitFailed, static_cast<int32_t>(token), peer);
+        return false;
+    }
+
+    uint32_t peer_token = ready_token(peer, static_cast<uint32_t>(token & 0xFFFFu));
     for (uint32_t iter = 0; iter < urma_real_deferred::kMaxRemoteWritePollIters; ++iter) {
         __asm__ __volatile__("" ::: "memory");
-        dcci((__gm__ void *)remote_signal, SINGLE_CACHE_LINE);
+        dcci((__gm__ void *)peer_slot, SINGLE_CACHE_LINE);
         __asm__ __volatile__("" ::: "memory");
-        if (remote_signal[0] == static_cast<int32_t>(token)) {
+        if (peer_slot[0] == static_cast<int32_t>(peer_token)) {
             return true;
         }
     }
-    urma_real_deferred::set_status(status, urma_real_deferred::Status::kSubmitFailed, static_cast<int32_t>(token), peer);
+    urma_real_deferred::set_status(status, urma_real_deferred::Status::kSubmitFailed, static_cast<int32_t>(peer_token), peer);
     return false;
 }
 
@@ -71,8 +105,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     uint32_t peer = urma_real_deferred::peer_rank(comm_ctx);
     write_sentinel(send, elem_count, comm_ctx->rankId);
-    uint32_t token = 0x5A000000u | (elem_count & 0x00FFFFFFu);
-    if (!wait_peer_ready(comm_ctx, signal, peer, token, status)) {
+    uint32_t token = ready_token(comm_ctx->rankId, elem_count);
+    if (!publish_and_wait_peer_ready(comm_ctx, signal, peer, token, status)) {
         return;
     }
 
