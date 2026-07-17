@@ -23,7 +23,7 @@
 // Performance profiling headers
 #include "aicpu/l2_swimlane_collector_aicpu.h"
 #include "aicpu/pmu_collector_aicpu.h"
-#include "aicpu/tensor_dump_aicpu.h"
+#include "aicpu/args_dump_aicpu.h"
 
 // =============================================================================
 // Dual-slot state machine helpers
@@ -71,12 +71,12 @@ void SchedulerContext::complete_slot_task(
     PTO2TaskSlotState &slot_state, int32_t expected_reg_task_id, [[maybe_unused]] PTO2SubtaskSlot subslot,
     int32_t thread_idx, int32_t core_id, Handshake *hank, int32_t &completed_this_turn,
     PTO2TaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
-#if PTO2_PROFILING
+#if SIMPLER_DFX
     ,
     uint64_t dispatch_ts, uint64_t finish_ts
 #endif
 ) {
-#if PTO2_PROFILING
+#if SIMPLER_DFX
     auto &l2_swimlane = sched_l2_swimlane_[thread_idx];
 #else
     (void)hank;
@@ -138,10 +138,10 @@ void SchedulerContext::complete_slot_task(
     }
 
     if (task_complete && !defer_completion_to_consumer) {
-#if PTO2_PROFILING
+#if SIMPLER_DFX
         if (is_dump_args_enabled()) {
             dump_args_for_task<PTO2_SUBTASK_SLOT_COUNT>(
-                thread_idx, slot_state, TensorDumpStage::AFTER_COMPLETION,
+                thread_idx, slot_state, ArgsDumpStage::AFTER_COMPLETION,
                 [](ActiveMask active_mask, int raw_subtask_id) {
                     return active_mask.subtask_active(static_cast<PTO2SubtaskSlot>(raw_subtask_id));
                 },
@@ -151,7 +151,7 @@ void SchedulerContext::complete_slot_task(
             );
         }
 #endif
-#if PTO2_SCHED_PROFILING
+#if SIMPLER_SCHED_PROFILING
         // SCHED_PROFILING variant takes thread_idx for its per-thread atomic
         // counter side-effects (g_sched_*_atomic_count[thread_idx], consumed
         // by the otc_* log lines). Its return value is unused.
@@ -159,7 +159,7 @@ void SchedulerContext::complete_slot_task(
 #else
         sched_->on_task_complete(slot_state);
 #endif
-#if PTO2_PROFILING
+#if SIMPLER_DFX
         l2_swimlane.phase_complete_count++;
 #endif
         if (deferred_release_count < PTO2_DEFERRED_RELEASE_CAP) {
@@ -167,7 +167,7 @@ void SchedulerContext::complete_slot_task(
         } else {
             LOG_INFO_V9("Thread %d: release", thread_idx);
             while (deferred_release_count > 0) {
-#if PTO2_SCHED_PROFILING
+#if SIMPLER_SCHED_PROFILING
                 // SCHED_PROFILING variant takes thread_idx for the per-thread
                 // atomic counter side-effects. The return value is unused.
                 (void)sched_->on_task_release(*deferred_release_slot_states[--deferred_release_count], thread_idx);
@@ -180,14 +180,14 @@ void SchedulerContext::complete_slot_task(
         completed_this_turn++;
     }
 
-#if PTO2_PROFILING
+#if SIMPLER_DFX
     // Level gate: at AICORE_TIMING (level=1) the AICore record alone carries
     // {start, end, task_token_raw}, host resolves func_id/core_type from
     // dep_gen / per-core mapping, and AICPU has nothing to write. Only at
     // AICPU_TIMING (level=2) and above does AICPU contribute dispatch/finish
     // timestamps via complete_task.
     if (l2_swimlane.l2_swimlane_enabled && l2_swimlane_level_ >= L2SwimlaneLevel::AICPU_TIMING) {
-#if PTO2_SCHED_PROFILING
+#if SIMPLER_SCHED_PROFILING
         uint64_t t_perf_start = get_sys_cnt_aicpu();
 #endif
 
@@ -199,13 +199,13 @@ void SchedulerContext::complete_slot_task(
                 static_cast<uint64_t>(slot_state.task->task_id.raw)
             );
         }
-#if PTO2_SCHED_PROFILING
+#if SIMPLER_SCHED_PROFILING
         l2_swimlane.sched_complete_perf_cycle += (get_sys_cnt_aicpu() - t_perf_start);
 #endif
     }
 #endif
 
-#if PTO2_PROFILING
+#if SIMPLER_DFX
     if (is_pmu_enabled()) {
         // Slot key must be the 32-bit register token AICore wrote into
         // dual_issue_slots[task_id & 1].task_id (= DATA_MAIN_BASE value).
@@ -225,7 +225,7 @@ void SchedulerContext::promote_pending_to_running(CoreExecState &core) {
     core.running_slot_state = core.pending_slot_state;
     core.running_reg_task_id = core.pending_reg_task_id;
     core.running_subslot = core.pending_subslot;
-#if PTO2_PROFILING
+#if SIMPLER_DFX
     core.running_dispatch_timestamp = core.pending_dispatch_timestamp;
 #endif
     core.pending_slot_state = nullptr;
@@ -242,7 +242,7 @@ void SchedulerContext::check_running_cores_for_completion(
     int32_t thread_idx, Handshake *hank, int32_t &completed_this_turn, int32_t &cur_thread_completed,
     bool &made_progress, PTO2TaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
 ) {
-#if PTO2_SCHED_PROFILING
+#if SIMPLER_SCHED_PROFILING
     auto &l2_swimlane = sched_l2_swimlane_[thread_idx];
 #endif
     CoreTracker &tracker = core_trackers_[thread_idx];
@@ -255,7 +255,11 @@ void SchedulerContext::check_running_cores_for_completion(
         // --- Judgment phase: read register, derive transition ---
         // Use the precomputed cond_ptr (resolved once in handshake) to skip
         // the reg_offset switch and reg_addr addition on every poll.
-        uint64_t reg_val = static_cast<uint64_t>(*core.cond_ptr);
+        // reg_load_acquire makes this an atomic acquire under __CPU_SIM so it
+        // pairs with the AICore's release store of the FIN (without it the sim
+        // poll races the FIN publish and can miss it); on hardware it is the
+        // same plain volatile load the bare deref used to be.
+        uint64_t reg_val = static_cast<uint64_t>(reg_load_acquire(core.cond_ptr));
         // ARM64 allows Device-nGnRnE -> Normal-cacheable load reorder; the
         // rmb() pins any AICore-published cacheable reads downstream of the
         // FIN observation. Replaces the post-`__sync_synchronize` that the
@@ -264,7 +268,7 @@ void SchedulerContext::check_running_cores_for_completion(
         int32_t reg_task_id = EXTRACT_TASK_ID(reg_val);
         int32_t reg_state = EXTRACT_TASK_STATE(reg_val);
 
-#if PTO2_SCHED_PROFILING
+#if SIMPLER_SCHED_PROFILING
         if (l2_swimlane.l2_swimlane_enabled) {
             l2_swimlane.complete_probe_count++;
         }
@@ -274,13 +278,13 @@ void SchedulerContext::check_running_cores_for_completion(
             decide_slot_transition(reg_task_id, reg_state, core.running_reg_task_id, core.pending_reg_task_id);
         if (!t.matched) continue;
 
-#if PTO2_SCHED_PROFILING
+#if SIMPLER_SCHED_PROFILING
         if (l2_swimlane.l2_swimlane_enabled && (t.running_done || t.pending_done)) {
             l2_swimlane.complete_hit_count++;
         }
 #endif
 
-#if PTO2_PROFILING
+#if SIMPLER_DFX
         // Capture finish_ts at the FIN observation point — right after rmb()
         // pinned cacheable AICore reads downstream of the register load, and
         // BEFORE any fanin / deferred-release work. Anything later would
@@ -298,7 +302,7 @@ void SchedulerContext::check_running_cores_for_completion(
             complete_slot_task(
                 *core.pending_slot_state, core.pending_reg_task_id, core.pending_subslot, thread_idx, core_id, hank,
                 completed_this_turn, deferred_release_slot_states, deferred_release_count
-#if PTO2_PROFILING
+#if SIMPLER_DFX
                 ,
                 core.pending_dispatch_timestamp, finish_ts
 #endif
@@ -309,7 +313,7 @@ void SchedulerContext::check_running_cores_for_completion(
             complete_slot_task(
                 *core.running_slot_state, core.running_reg_task_id, core.running_subslot, thread_idx, core_id, hank,
                 completed_this_turn, deferred_release_slot_states, deferred_release_count
-#if PTO2_PROFILING
+#if SIMPLER_DFX
                 ,
                 core.running_dispatch_timestamp, finish_ts
 #endif
