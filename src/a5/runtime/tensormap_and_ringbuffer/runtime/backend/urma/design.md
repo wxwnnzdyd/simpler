@@ -103,7 +103,7 @@ The current real A5 deferred demo has validated:
 
 One earlier direct run produced a single `count=16` TGET mismatch and later
 retries did not reproduce it. Treat that as a low-frequency observation unless
-it recurs during `--repeat` stress.
+it recurs during repeated hardware stress.
 
 ## Known Limits And Next Entry Points
 
@@ -111,10 +111,12 @@ The current backend is a first runnable real-hardware path. Phase 5 work should
 start from these entry points:
 
 - **Transfer splitting**: `send_request_entry` now chunks flat contiguous
-  transfers larger than `kUrmaMaxTransferBytes` before submission. The next
-  step is to validate the split path on hardware with
-  `urma_real_deferred_big_demo` and extend it beyond the flat 1-D case if
-  needed.
+  transfers larger than `kUrmaMaxTransferBytes` before submission. The current
+  hardware acceptance does not require the `>256 MiB` smoke: large-window runs
+  on the available A5 environment repeatedly left later HCCL base communicator
+  initialization failing with `HcclCommInitRootInfo failed: 4`. Treat
+  `urma_real_deferred_big_demo` as experimental until a safer locked stress
+  workflow is available.
 - **Event coalescing**: coalesce per-task/per-peer URMA events before writing
   deferred completion entries. URMA quiet semantics allow the largest target
   SQ head for a peer to cover earlier events on the same QP.

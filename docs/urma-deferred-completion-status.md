@@ -209,16 +209,14 @@ Backend design note:
 - `send_request_entry` now auto-splits flat contiguous URMA transfers larger
   than the PTO-ISA single-WQE limit before submission.
 
-Large-transfer chunking smoke:
-
-```bash
-python examples/a5/tensormap_and_ringbuffer/urma_real_deferred_big_demo/run_urma_real_deferred_big_demo.py \
-  -p a5 -d 0,1 --build
-```
-
-This manual A5 smoke submits one flat contiguous TGET of
-`256 MiB + 4 bytes`, forcing the backend `send_request_entry` chunking path
-instead of the deferred demo's manual two-request split.
+Large-transfer chunking smoke is not part of the current hardware acceptance
+gate. The backend code can split one flat contiguous request larger than the
+PTO-ISA single-WQE limit, and
+`examples/a5/tensormap_and_ringbuffer/urma_real_deferred_big_demo/` remains as
+an experimental manual smoke for that path. On the current A5 environment,
+large-window / large-transfer runs repeatedly left HCCL base communicator
+initialization failing with `HcclCommInitRootInfo failed: 4` on later runs, so
+the big smoke is deferred until a safer locked stress workflow is available.
 
 Required A5 hardware acceptance command:
 
@@ -242,6 +240,10 @@ Hardware acceptance criteria:
 - TPUT data lands in the peer registered symmetric window;
 - status tensors report `status[0] == 0` on both ranks for all cases.
 
+The acceptance criteria intentionally exclude the `>256 MiB` chunking smoke.
+Chunking is a Phase 5 hardening target, not a blocker for the real A5 deferred
+completion path accepted here.
+
 Observed accepted statuses:
 
 ```text
@@ -259,10 +261,12 @@ Observed accepted statuses:
 [urma_real_deferred_demo] count=16384 rank=1 status=[0, 16384, 0, 4, 4, 4, 0, 0]
 ```
 
-Remaining Phase 4 coverage:
+Remaining non-blocking coverage:
 
 - Re-run under the shared hardware locking workflow with per-run device-log
   redirection when available.
+- Revisit the large-transfer chunking smoke after the A5 HCCL initialization
+  recovery issue is isolated.
 
 Resolved Phase 4 hardware risk for the basic path:
 

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Real A5 URMA deferred large-transfer smoke test."""
+"""Experimental real A5 URMA deferred large-transfer smoke test.
+
+This is not part of the current acceptance gate. It allocates a very large
+communication window and may leave the local A5/HCCL environment unable to
+initialize new communicators until the device/runtime state is recovered.
+"""
 
 from __future__ import annotations
 
