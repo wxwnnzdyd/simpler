@@ -1,0 +1,378 @@
+#!/usr/bin/env python3
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+"""Standalone real URMA TGET/TPUT correctness smoke for A5 hardware."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+for path in (str(REPO_ROOT), str(REPO_ROOT / "python")):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+sys.meta_path = [finder for finder in sys.meta_path if type(finder).__module__ != "_simpler_editable"]
+
+import pytest
+import torch
+from simpler.task_interface import (
+    ArgDirection,
+    CallConfig,
+    ChipCallable,
+    CommBufferSpec,
+    CoreCallable,
+    DataType,
+    TaskArgs,
+    Tensor,
+    TensorArgType,
+)
+from simpler.worker import Worker
+
+from simpler_setup.elf_parser import extract_text_section
+from simpler_setup.kernel_compiler import KernelCompiler
+from simpler_setup.pto_isa import ensure_pto_isa_root
+from simpler_setup.torch_interop import make_tensor_arg
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+DTYPE_NBYTES = 4
+SIGNAL_NBYTES = 16 * 4
+STATUS_WORDS = 8
+URMA_DATA_OFFSET_NBYTES = 64 * 4
+CASES = (16, 4096)
+K_UNSAFE_WQE_ACCESS = 60  # mirrors UrmaRealStatus::kUnsafeWqeAccess
+PROBE_STAGES = {
+    "full": 0,
+    "workspace": 1,
+    "build_session": 2,
+    "workspace_info": 3,
+    "wq_ctx": 4,
+    "queue_index_read": 5,
+    "wqe_read": 6,
+    "wqe_write_restore": 7,
+    "remote_mem": 8,
+    "eid_read": 9,
+    "tget_post": 10,
+    "tget_test_once": 11,
+    "tput_post": 12,
+    "tput_test_once": 13,
+    "queue_index_ld_dev": 14,
+    "wqe_addr": 15,
+    "wqe_first_store": 16,
+    "wqe_first_st_dev": 17,
+    "wqe_mte_store": 18,
+    "tget_root_post": 19,
+    "tput_root_post": 20,
+}
+SAFE_PROBE_STAGES = (
+    "workspace",
+    "build_session",
+    "remote_mem",
+    "eid_read",
+    "wqe_addr",
+)
+UNSAFE_PROBE_STAGES = (
+    "wqe_first_store",
+)
+REAL_SUBMIT_PROBE_STAGES = ("tget_root_post", "tput_root_post")
+
+
+def parse_device_range(spec: str) -> list[int]:
+    if "," in spec:
+        return [int(x) for x in spec.split(",") if x]
+    if "-" in spec:
+        lo, hi = (int(x) for x in spec.split("-"))
+        return list(range(lo, hi + 1))
+    return [int(spec)]
+
+
+def build_chip_callable(platform: str) -> ChipCallable:
+    kc = KernelCompiler(platform=platform)
+    runtime = "tensormap_and_ringbuffer"
+    pto_isa_root = ensure_pto_isa_root()
+    include_dirs = kc.get_orchestration_include_dirs(runtime)
+    extra_includes = list(include_dirs) + [str(kc.project_root / "src" / "common")]
+
+    kernel = kc.compile_incore(
+        source_path=os.path.join(HERE, "kernels/aiv/kernel_urma_real_async.cpp"),
+        core_type="aiv",
+        pto_isa_root=pto_isa_root,
+        extra_include_dirs=extra_includes,
+    )
+    if not platform.endswith("sim"):
+        kernel = extract_text_section(kernel)
+
+    orch = kc.compile_orchestration(
+        runtime_name=runtime,
+        source_path=os.path.join(HERE, "kernels/orchestration/urma_real_async_orch.cpp"),
+        extra_include_dirs=[str(kc.project_root / "src" / "common")],
+    )
+
+    signature = [
+        ArgDirection.IN,
+        ArgDirection.INOUT,
+        ArgDirection.INOUT,
+        ArgDirection.INOUT,
+        ArgDirection.OUT,
+        ArgDirection.IN,
+        ArgDirection.IN,
+        ArgDirection.IN,
+    ]
+    return ChipCallable.build(
+        signature=signature,
+        func_name="urma_real_async_orchestration",
+        config_name="urma_real_async_orchestration_config",
+        binary=orch,
+        children=[(0, CoreCallable.build(signature=signature, binary=kernel))],
+    )
+
+
+def _send_pattern(rank: int, count: int) -> torch.Tensor:
+    return torch.tensor([float(rank * 100000 + i) for i in range(count)], dtype=torch.float32).share_memory_()
+
+
+def _zero_float(count: int) -> torch.Tensor:
+    return torch.zeros(count, dtype=torch.float32).share_memory_()
+
+
+def _zero_i32(count: int) -> torch.Tensor:
+    return torch.zeros(count, dtype=torch.int32).share_memory_()
+
+
+def _print_status(elem_count: int, status: list[torch.Tensor], *, expected_status: int = 0) -> bool:
+    ok = True
+    for rank, rank_status in enumerate(status):
+        words = [int(x) for x in rank_status.tolist()]
+        print(
+            f"[urma_real_async_demo] count={elem_count} rank={rank} "
+            f"expected={expected_status} status={words}"
+        )
+        ok = ok and words[0] == expected_status
+    return ok
+
+
+def run_case(
+    platform: str,
+    device_ids: list[int],
+    elem_count: int,
+    *,
+    build: bool = False,
+    probe_stage: int = PROBE_STAGES["full"],
+    expected_status: int = 0,
+) -> bool:
+    if platform != "a5":
+        raise ValueError("urma_real_async_demo requires platform 'a5'; a5sim cannot validate real URMA")
+    if len(device_ids) != 2:
+        raise ValueError(f"urma_real_async_demo needs exactly 2 devices, got {device_ids}")
+
+    nranks = len(device_ids)
+    send_nbytes = elem_count * DTYPE_NBYTES
+    tget_nbytes = elem_count * DTYPE_NBYTES
+    tput_nbytes = nranks * elem_count * DTYPE_NBYTES
+    window_size = max(
+        URMA_DATA_OFFSET_NBYTES + send_nbytes + tget_nbytes + tput_nbytes + SIGNAL_NBYTES,
+        4 * 1024 * 1024,
+    )
+
+    send_host = [_send_pattern(rank, elem_count) for rank in range(nranks)]
+    tget_zero = [_zero_float(elem_count) for _ in range(nranks)]
+    tput_zero = [_zero_float(nranks * elem_count) for _ in range(nranks)]
+    signal_zero = [_zero_i32(16) for _ in range(nranks)]
+    status = [_zero_i32(STATUS_WORDS) for _ in range(nranks)]
+
+    chip_callable = build_chip_callable(platform)
+    worker = Worker(
+        level=3,
+        platform=platform,
+        runtime="tensormap_and_ringbuffer",
+        device_ids=device_ids,
+        num_sub_workers=0,
+        build=build,
+    )
+    chip_handle = worker.register(chip_callable)
+    try:
+        worker.init()
+
+        def orch_fn(orch, _args, cfg):
+            with orch.allocate_domain(
+                name=f"urma_real_{elem_count}",
+                workers=list(range(nranks)),
+                window_size=window_size,
+                buffers=[
+                    CommBufferSpec(
+                        name="urma_reserved",
+                        dtype="int32",
+                        count=URMA_DATA_OFFSET_NBYTES // 4,
+                        nbytes=URMA_DATA_OFFSET_NBYTES,
+                    ),
+                    CommBufferSpec(name="send", dtype="float32", count=elem_count, nbytes=send_nbytes),
+                    CommBufferSpec(name="tget_recv", dtype="float32", count=elem_count, nbytes=tget_nbytes),
+                    CommBufferSpec(
+                        name="tput_recv",
+                        dtype="float32",
+                        count=nranks * elem_count,
+                        nbytes=tput_nbytes,
+                    ),
+                    CommBufferSpec(name="signal", dtype="int32", count=16, nbytes=SIGNAL_NBYTES),
+                ],
+            ) as handle:
+                for rank in range(nranks):
+                    domain = handle[rank]
+                    orch.copy_to(rank, domain.buffer_ptrs["send"], send_host[rank].data_ptr(), send_nbytes)
+                    orch.copy_to(rank, domain.buffer_ptrs["tget_recv"], tget_zero[rank].data_ptr(), tget_nbytes)
+                    orch.copy_to(rank, domain.buffer_ptrs["tput_recv"], tput_zero[rank].data_ptr(), tput_nbytes)
+                    orch.copy_to(rank, domain.buffer_ptrs["signal"], signal_zero[rank].data_ptr(), SIGNAL_NBYTES)
+
+                for rank in range(nranks):
+                    domain = handle[rank]
+                    args = TaskArgs()
+                    args.add_tensor(
+                        Tensor.make(
+                            data=domain.buffer_ptrs["send"],
+                            shapes=(elem_count,),
+                            dtype=DataType.FLOAT32,
+                            child_memory=True,
+                        ),
+                        TensorArgType.INPUT,
+                    )
+                    args.add_tensor(
+                        Tensor.make(
+                            data=domain.buffer_ptrs["tget_recv"],
+                            shapes=(elem_count,),
+                            dtype=DataType.FLOAT32,
+                            child_memory=True,
+                        ),
+                        TensorArgType.INOUT,
+                    )
+                    args.add_tensor(
+                        Tensor.make(
+                            data=domain.buffer_ptrs["tput_recv"],
+                            shapes=(nranks * elem_count,),
+                            dtype=DataType.FLOAT32,
+                            child_memory=True,
+                        ),
+                        TensorArgType.INOUT,
+                    )
+                    args.add_tensor(
+                        Tensor.make(
+                            data=domain.buffer_ptrs["signal"],
+                            shapes=(16,),
+                            dtype=DataType.INT32,
+                            child_memory=True,
+                        ),
+                        TensorArgType.INOUT,
+                    )
+                    args.add_tensor(make_tensor_arg(status[rank]), TensorArgType.OUTPUT_EXISTING)
+                    args.add_scalar(domain.device_ctx)
+                    args.add_scalar(elem_count)
+                    args.add_scalar(probe_stage)
+                    orch.submit_next_level(chip_handle, args, cfg, worker=rank)
+
+        try:
+            worker.run(orch_fn, args=None, config=CallConfig())
+        except RuntimeError:
+            _print_status(elem_count, status, expected_status=expected_status)
+            raise
+    finally:
+        worker.close()
+
+    return _print_status(elem_count, status, expected_status=expected_status)
+
+
+def run_probe_suite(platform: str, device_ids: list[int], *, build: bool = False) -> bool:
+    ok = True
+    for stage_name in SAFE_PROBE_STAGES:
+        ok = run_case(
+            platform,
+            device_ids,
+            CASES[0],
+            build=build,
+            probe_stage=PROBE_STAGES[stage_name],
+            expected_status=0,
+        ) and ok
+    for stage_name in UNSAFE_PROBE_STAGES:
+        ok = run_case(
+            platform,
+            device_ids,
+            CASES[0],
+            build=build,
+            probe_stage=PROBE_STAGES[stage_name],
+            expected_status=K_UNSAFE_WQE_ACCESS,
+        ) and ok
+    for stage_name in REAL_SUBMIT_PROBE_STAGES:
+        ok = run_case(
+            platform,
+            device_ids,
+            CASES[0],
+            build=build,
+            probe_stage=PROBE_STAGES[stage_name],
+            expected_status=0,
+        ) and ok
+    return ok
+
+
+def run(
+    platform: str = "a5",
+    device_ids: list[int] | None = None,
+    *,
+    build: bool = False,
+    probe_stage: int | None = None,
+    expected_status: int | None = None,
+) -> int:
+    if device_ids is None:
+        device_ids = [0, 1]
+    if probe_stage is None:
+        probe_stage = PROBE_STAGES["full"]
+
+    ok = True
+    cases = CASES if probe_stage == PROBE_STAGES["full"] else (CASES[0],)
+    expected = 0 if expected_status is None else expected_status
+    for elem_count in cases:
+        ok = run_case(
+            platform,
+            device_ids,
+            elem_count,
+            build=build,
+            probe_stage=probe_stage,
+            expected_status=expected,
+        ) and ok
+    return 0 if ok else 1
+
+
+@pytest.mark.requires_hardware
+@pytest.mark.platforms(["a5"])
+@pytest.mark.device_count(2)
+def test_urma_real_async_demo(st_platform, st_device_ids) -> None:
+    assert run(st_platform, [int(st_device_ids[0]), int(st_device_ids[1])]) == 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-p", "--platform", default="a5")
+    parser.add_argument("-d", "--device", default="0-1")
+    parser.add_argument("--build", action="store_true")
+    parser.add_argument("--probe-stage", choices=("suite", *PROBE_STAGES), default="full")
+    parser.add_argument("--expect-status", type=int, default=None)
+    args = parser.parse_args()
+    if args.probe_stage == "suite":
+        return 0 if run_probe_suite(args.platform, parse_device_range(args.device), build=args.build) else 1
+    probe_stage = PROBE_STAGES[args.probe_stage]
+    return run(
+        args.platform,
+        parse_device_range(args.device),
+        build=args.build,
+        probe_stage=probe_stage,
+        expected_status=args.expect_status,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
