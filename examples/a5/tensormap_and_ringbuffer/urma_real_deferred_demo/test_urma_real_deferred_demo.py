@@ -39,6 +39,21 @@ DTYPE_NBYTES = 4
 STATUS_WORDS = 8
 URMA_DATA_OFFSET_NBYTES = 64 * 4
 CASES = (1, 16, 64, 256, 4096, 16384)
+_URMA_WORKSPACE_ENV = "SIMPLER_ENABLE_PTO_URMA_WORKSPACE"
+_WORKSPACE_TRUTHY = {"1", "ON", "TRUE", "YES"}
+
+
+def _urma_workspace_enabled() -> bool:
+    return os.environ.get(_URMA_WORKSPACE_ENV, "").upper() in _WORKSPACE_TRUTHY
+
+
+def _require_urma_workspace_enabled() -> None:
+    if _urma_workspace_enabled():
+        return
+    raise RuntimeError(
+        "urma_real_deferred_demo requires host runtime built with "
+        f"{_URMA_WORKSPACE_ENV}=ON; set it before rebuilding simpler."
+    )
 
 
 def parse_device_range(spec: str) -> list[int]:
@@ -201,6 +216,7 @@ def _run_case_on_worker(worker: Worker, chip_handle, elem_count: int, nranks: in
 
 
 def run_case(platform: str, device_ids: list[int], elem_count: int, *, build: bool = False) -> bool:
+    _require_urma_workspace_enabled()
     if platform != "a5":
         raise ValueError("urma_real_deferred_demo requires platform 'a5'; a5sim cannot validate real URMA")
     if len(device_ids) != 2:
@@ -248,6 +264,10 @@ def run(platform: str = "a5", device_ids: list[int] | None = None, *, build: boo
 @pytest.mark.requires_hardware
 @pytest.mark.platforms(["a5"])
 @pytest.mark.device_count(2)
+@pytest.mark.skipif(
+    not _urma_workspace_enabled(),
+    reason="URMA workspace overlay not enabled (set SIMPLER_ENABLE_PTO_URMA_WORKSPACE=ON before rebuilding).",
+)
 def test_urma_real_deferred_demo(st_platform, st_device_ids) -> None:
     assert run(st_platform, [int(st_device_ids[0]), int(st_device_ids[1])]) == 0
 
