@@ -1,3 +1,14 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
 #include <cstdint>
 
 #ifndef __gm__
@@ -31,15 +42,6 @@ static inline __aicore__ __gm__ T *tensor_data(__gm__ Tensor *tensor) {
     return reinterpret_cast<__gm__ T *>(tensor->buffer.addr) + tensor->start_offset;
 }
 
-template <typename T>
-static inline __aicore__ __gm__ T *comm_remote_ptr(__gm__ CommContext *ctx, __gm__ T *local_ptr, uint32_t peer_rank) {
-    uint64_t local_base = ctx->windowsIn[ctx->rankId];
-    uint64_t offset = reinterpret_cast<uint64_t>(local_ptr) - local_base;
-    uint64_t peer_base =
-        pto2::urma_backend::peer_mr_base_addr(reinterpret_cast<__gm__ uint8_t *>(ctx->workSpace), peer_rank);
-    return reinterpret_cast<__gm__ T *>(peer_base + offset);
-}
-
 }  // namespace
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
@@ -47,6 +49,9 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[2]);
 
+    // workSpace == 0 means the URMA overlay is not built in
+    // (SIMPLER_ENABLE_PTO_URMA_WORKSPACE=OFF, see docs/a5-sdma-overlay.md
+    // #1315): self-skip rather than dereferencing a null workspace.
     if (comm_ctx == nullptr || comm_ctx->rankNum != 2 || comm_ctx->rankId >= comm_ctx->rankNum ||
         comm_ctx->workSpace == 0 || comm_ctx->windowsIn[comm_ctx->rankId] == 0) {
         pipe_barrier(PIPE_ALL);
@@ -56,7 +61,10 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     __gm__ float *local_input = tensor_data<float>(input_tensor);
     __gm__ float *local_out = tensor_data<float>(out_tensor);
     uint32_t peer_rank = 1u - comm_ctx->rankId;
-    __gm__ float *remote_input = comm_remote_ptr(comm_ctx, local_input, peer_rank);
+    uint64_t input_offset = reinterpret_cast<uint64_t>(local_input) - comm_ctx->windowsIn[comm_ctx->rankId];
+    __gm__ float *remote_input = pto2::urma_backend::peer_mr_ptr<float>(
+        reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace), peer_rank, input_offset
+    );
 
     using FlatShape = Shape<1, 1, 1, 1, kElems>;
     using FlatStride = pto::Stride<kElems, kElems, kElems, kElems, 1>;

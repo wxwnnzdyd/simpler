@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
 """URMA deferred completion smoke test for onboard a5.
 
 Each rank stages its input inside the HCCL/URMA communication window. The
@@ -13,16 +21,26 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
-from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parents[4]
-for path in (str(REPO_ROOT), str(REPO_ROOT / "python")):
-    if path not in sys.path:
-        sys.path.insert(0, path)
-sys.meta_path = [finder for finder in sys.meta_path if type(finder).__module__ != "_simpler_editable"]
 
 import pytest
+import torch
+from simpler.task_interface import (
+    ArgDirection,
+    CallConfig,
+    ChipCallable,
+    CommBufferSpec,
+    CoreCallable,
+    DataType,
+    TaskArgs,
+    Tensor,
+    TensorArgType,
+)
+from simpler.worker import Worker
+
+from simpler_setup.elf_parser import extract_text_section
+from simpler_setup.kernel_compiler import KernelCompiler
+from simpler_setup.pto_isa import ensure_pto_isa_root
+from simpler_setup.torch_interop import make_tensor_arg
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 N = 128 * 128
@@ -54,12 +72,7 @@ def parse_device_range(spec: str) -> list[int]:
     return [int(spec)]
 
 
-def build_chip_callable(platform: str):
-    from simpler.task_interface import ArgDirection, ChipCallable, CoreCallable
-    from simpler_setup.elf_parser import extract_text_section
-    from simpler_setup.kernel_compiler import KernelCompiler
-    from simpler_setup.pto_isa import ensure_pto_isa_root
-
+def build_chip_callable(platform: str) -> ChipCallable:
     kc = KernelCompiler(platform=platform)
     runtime = "tensormap_and_ringbuffer"
     pto_isa_root = ensure_pto_isa_root()
@@ -105,11 +118,6 @@ def build_chip_callable(platform: str):
 
 def run(platform: str = "a5", device_ids: list[int] | None = None) -> int:
     _require_urma_workspace_enabled()
-    import torch
-    from simpler.task_interface import CallConfig, CommBufferSpec, DataType, TaskArgs, Tensor, TensorArgType
-    from simpler.worker import Worker
-    from simpler_setup.torch_interop import make_tensor_arg
-
     if device_ids is None:
         device_ids = [0, 1]
     nranks = len(device_ids)
@@ -121,6 +129,9 @@ def run(platform: str = "a5", device_ids: list[int] | None = None) -> int:
     input_nbytes = N * DTYPE_NBYTES
     window_size = max(URMA_DATA_OFFSET_NBYTES + input_nbytes, 4 * 1024 * 1024)
 
+    # `inputs` must live in shared memory: `orch.copy_to` stages each rank's
+    # data into its HCCL window from the forked chip child, which reads `src`
+    # out of its own address space.
     inputs = [
         torch.tensor([float(rank * 1000 + (i % 251)) / 10.0 for i in range(N)], dtype=torch.float32).share_memory_()
         for rank in range(nranks)
@@ -155,6 +166,9 @@ def run(platform: str = "a5", device_ids: list[int] | None = None) -> int:
                     CommBufferSpec(name="input_window", dtype="float32", count=N, nbytes=input_nbytes),
                 ],
             ) as handle:
+                # Stage every rank's input window before submitting any kernel:
+                # each producer TGET_ASYNCs the *peer* rank's window, so all
+                # windows must hold real data before execution begins.
                 for rank in range(nranks):
                     orch.copy_to(
                         rank,
@@ -200,7 +214,8 @@ def run(platform: str = "a5", device_ids: list[int] | None = None) -> int:
 @pytest.mark.device_count(2)
 @pytest.mark.skipif(
     not _urma_workspace_enabled(),
-    reason="URMA workspace overlay not enabled (set SIMPLER_ENABLE_PTO_URMA_WORKSPACE=ON before rebuilding).",
+    reason="URMA workspace overlay not enabled (set SIMPLER_ENABLE_PTO_URMA_WORKSPACE=ON to run). "
+    "See docs/a5-sdma-overlay.md (#1315).",
 )
 def test_urma_deferred_completion_demo(st_device_ids, st_platform) -> None:
     assert run(st_platform, [int(d) for d in st_device_ids]) == 0
