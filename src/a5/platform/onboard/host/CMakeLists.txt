@@ -32,13 +32,6 @@ if(DEFINED CUSTOM_INCLUDE_DIRS)
 else()
     message(FATAL_ERROR "MUST set CUSTOM_INCLUDE_DIRS to build Host runtime")
 endif()
-if(NOT DEFINED ENV{PTO_ISA_ROOT})
-    message(FATAL_ERROR
-        "a5 onboard host_runtime requires PTO_ISA_ROOT "
-        "(URMA workspace setup uses pto-isa host headers)")
-endif()
-list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "$ENV{PTO_ISA_ROOT}/include")
-
 set(ASCEND_ARCH_HOME "${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux")
 
 # SIMPLER_ENABLE_PTO_SDMA_WORKSPACE: opt-in overlay that wires the PTO-ISA
@@ -52,13 +45,51 @@ set(ASCEND_ARCH_HOME "${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux")
 # Flip ON via -DSIMPLER_ENABLE_PTO_SDMA_WORKSPACE=ON (or the env var of the
 # same name, forwarded by simpler_setup/runtime_builder.py).
 option(SIMPLER_ENABLE_PTO_SDMA_WORKSPACE "Enable a5 PTO SDMA workspace overlay" OFF)
-if(SIMPLER_ENABLE_PTO_SDMA_WORKSPACE)
+
+option(SIMPLER_ENABLE_PTO_RDMA_WORKSPACE "Enable a5 PTO RDMA workspace overlay" OFF)
+if(SIMPLER_ENABLE_PTO_SDMA_WORKSPACE OR SIMPLER_ENABLE_PTO_RDMA_WORKSPACE)
+    set(SIMPLER_ENABLE_PTO_URMA_WORKSPACE_DEFAULT OFF)
+else()
+    set(SIMPLER_ENABLE_PTO_URMA_WORKSPACE_DEFAULT ON)
+endif()
+option(
+    SIMPLER_ENABLE_PTO_URMA_WORKSPACE
+    "Enable a5 PTO URMA workspace overlay"
+    ${SIMPLER_ENABLE_PTO_URMA_WORKSPACE_DEFAULT}
+)
+
+set(SIMPLER_PTO_ASYNC_WORKSPACE_OVERLAY_COUNT 0)
+foreach(OVERLAY
+        SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
+        SIMPLER_ENABLE_PTO_URMA_WORKSPACE
+        SIMPLER_ENABLE_PTO_RDMA_WORKSPACE)
+    if(${OVERLAY})
+        math(EXPR SIMPLER_PTO_ASYNC_WORKSPACE_OVERLAY_COUNT "${SIMPLER_PTO_ASYNC_WORKSPACE_OVERLAY_COUNT} + 1")
+    endif()
+endforeach()
+if(SIMPLER_PTO_ASYNC_WORKSPACE_OVERLAY_COUNT GREATER 1)
+    message(FATAL_ERROR
+        "Only one PTO async workspace overlay may be enabled at a time "
+        "(SDMA=${SIMPLER_ENABLE_PTO_SDMA_WORKSPACE}, "
+        "URMA=${SIMPLER_ENABLE_PTO_URMA_WORKSPACE}, "
+        "RDMA=${SIMPLER_ENABLE_PTO_RDMA_WORKSPACE})")
+endif()
+
+if(SIMPLER_PTO_ASYNC_WORKSPACE_OVERLAY_COUNT GREATER 0)
     if(NOT DEFINED ENV{PTO_ISA_ROOT})
         message(FATAL_ERROR
-            "a5 onboard host_runtime with SIMPLER_ENABLE_PTO_SDMA_WORKSPACE=ON requires PTO_ISA_ROOT "
-            "(needs pto-isa headers + CANN 9.0+ with a5 SDMA primitives)")
+            "a5 onboard host_runtime with a PTO async workspace overlay requires PTO_ISA_ROOT "
+            "(needs pto-isa host headers)")
     endif()
     list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "$ENV{PTO_ISA_ROOT}/include")
+endif()
+
+if(SIMPLER_ENABLE_PTO_RDMA_WORKSPACE)
+    if(NOT EXISTS "$ENV{PTO_ISA_ROOT}/include/pto/comm/async/rdma/rdma_workspace_manager.hpp")
+        message(FATAL_ERROR
+            "PTO RDMA workspace overlay requires pto-isa RDMA headers "
+            "($ENV{PTO_ISA_ROOT}/include/pto/comm/async/rdma/rdma_workspace_manager.hpp not found)")
+    endif()
 endif()
 
 # Build complete source list: core host sources + sources from CUSTOM_SOURCE_DIRS
@@ -75,7 +106,7 @@ list(APPEND HOST_RUNTIME_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/host/pmu_collector.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/dep_gen_collector.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/scope_stats_collector.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/args_dump_collector.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/tensor_dump_collector.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/comm_hccl.cpp"
 )
 # Add common/aicpu_loader/host sources (LoadAicpuOp)
@@ -128,6 +159,19 @@ target_compile_definitions(host_runtime PRIVATE SIMPLER_PLATFORM_NAME="a5")
 if(SIMPLER_ENABLE_PTO_SDMA_WORKSPACE)
     target_compile_definitions(host_runtime PRIVATE SIMPLER_ENABLE_PTO_SDMA_WORKSPACE=1)
 endif()
+if(SIMPLER_ENABLE_PTO_URMA_WORKSPACE)
+    target_compile_definitions(host_runtime PRIVATE
+        SIMPLER_ENABLE_PTO_URMA_WORKSPACE=1
+        PTO_URMA_SUPPORTED
+    )
+endif()
+if(SIMPLER_ENABLE_PTO_RDMA_WORKSPACE)
+    target_compile_definitions(host_runtime PRIVATE
+        SIMPLER_ENABLE_PTO_RDMA_WORKSPACE=1
+        PTO_RDMA_SUPPORTED
+        PTO_RDMA_BACKEND_HNS_1825_SUPPORTED
+    )
+endif()
 
 set(SIMPLER_PTO_ISA_BUILD_COMMIT "" CACHE STRING
     "PTO-ISA commit used for host_runtime cache key")
@@ -155,6 +199,8 @@ target_include_directories(host_runtime
         ${ASCEND_HOME_PATH}/pkg_inc/runtime/runtime
         ${ASCEND_HOME_PATH}/pkg_inc/profiling
         ${ASCEND_ARCH_HOME}/include
+        ${ASCEND_ARCH_HOME}/include/experiment/msprof
+        ${ASCEND_ARCH_HOME}/include/experiment/runtime
         ${ASCEND_ARCH_HOME}/pkg_inc
         ${ASCEND_ARCH_HOME}/pkg_inc/runtime
         ${ASCEND_ARCH_HOME}/pkg_inc/runtime/runtime

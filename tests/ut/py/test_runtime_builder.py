@@ -217,6 +217,8 @@ class TestRuntimeBuilderGetBinaries:
         import simpler_setup.runtime_builder as rb_module  # noqa: PLC0415
 
         monkeypatch.setattr(rb_module, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(rb_module.RuntimeBuilder, "_CACHE_DIR", tmp_path / "build" / "cache")
+        monkeypatch.setattr(rb_module.RuntimeBuilder, "_LIB_DIR", tmp_path / "build" / "lib")
 
     def _make_runtime(self, tmp_path, test_arch):
         """Create a fake runtime with a valid build_config.py."""
@@ -361,6 +363,87 @@ class TestRuntimeBuilderGetBinaries:
         non_host_calls = [call for call in mock_instance.compile.call_args_list if call.args[0] != "host"]
         assert host_call.kwargs["cmake_defines"] == {"SIMPLER_PTO_ISA_BUILD_COMMIT": pin}
         assert all(call.kwargs["cmake_defines"] is None for call in non_host_calls)
+
+    @patch("simpler_setup.runtime_builder.RuntimeCompiler")
+    def test_a5_rdma_overlay_host_build_passes_cmake_defines(self, MockCompiler, tmp_path, monkeypatch):
+        """RDMA overlay is forwarded to host CMake and disables implicit URMA."""
+        from simpler_setup import pto_isa  # noqa: PLC0415
+        from simpler_setup.runtime_builder import RuntimeBuilder  # noqa: PLC0415
+
+        pin = "b" * 40
+        self._make_runtime(tmp_path, "a5")
+
+        mock_instance = MockCompiler.get_instance.return_value
+        mock_instance.compile.side_effect = lambda target, *a, **kw: (Path(kw["output_dir"]) / f"lib{target}.so")
+        mock_instance.compile_simpler_log.return_value = tmp_path / "build" / "lib" / "libsimpler_log.so"
+        monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: pin)
+        monkeypatch.setattr(pto_isa, "ensure_pto_isa_root", lambda verbose=False: "/tmp/pto-isa")
+        monkeypatch.setattr(pto_isa, "write_pto_isa_build_metadata", lambda *args: None)
+        monkeypatch.setenv("SIMPLER_ENABLE_PTO_RDMA_WORKSPACE", "ON")
+
+        builder = RuntimeBuilder(platform="a5")
+        builder.get_binaries("test_rt", build=True)
+
+        host_call = next(call for call in mock_instance.compile.call_args_list if call.args[0] == "host")
+        assert host_call.kwargs["cmake_defines"] == {
+            "SIMPLER_ENABLE_PTO_RDMA_WORKSPACE": "ON",
+            "SIMPLER_ENABLE_PTO_URMA_WORKSPACE": "OFF",
+            "SIMPLER_PTO_ISA_BUILD_COMMIT": pin,
+        }
+
+    @patch("simpler_setup.runtime_builder.RuntimeCompiler")
+    def test_a5_sdma_overlay_disables_implicit_urma(self, MockCompiler, tmp_path, monkeypatch):
+        """SDMA overlay is also exclusive with the default URMA overlay."""
+        from simpler_setup import pto_isa  # noqa: PLC0415
+        from simpler_setup.runtime_builder import RuntimeBuilder  # noqa: PLC0415
+
+        pin = "d" * 40
+        self._make_runtime(tmp_path, "a5")
+
+        mock_instance = MockCompiler.get_instance.return_value
+        mock_instance.compile.side_effect = lambda target, *a, **kw: (Path(kw["output_dir"]) / f"lib{target}.so")
+        mock_instance.compile_simpler_log.return_value = tmp_path / "build" / "lib" / "libsimpler_log.so"
+        monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: pin)
+        monkeypatch.setattr(pto_isa, "ensure_pto_isa_root", lambda verbose=False: "/tmp/pto-isa")
+        monkeypatch.setattr(pto_isa, "write_pto_isa_build_metadata", lambda *args: None)
+        monkeypatch.setenv("SIMPLER_ENABLE_PTO_SDMA_WORKSPACE", "ON")
+
+        builder = RuntimeBuilder(platform="a5")
+        builder.get_binaries("test_rt", build=True)
+
+        host_call = next(call for call in mock_instance.compile.call_args_list if call.args[0] == "host")
+        assert host_call.kwargs["cmake_defines"] == {
+            "SIMPLER_ENABLE_PTO_SDMA_WORKSPACE": "ON",
+            "SIMPLER_ENABLE_PTO_URMA_WORKSPACE": "OFF",
+            "SIMPLER_PTO_ISA_BUILD_COMMIT": pin,
+        }
+
+    @patch("simpler_setup.runtime_builder.RuntimeCompiler")
+    def test_a5_explicit_urma_and_rdma_overlay_defines_are_both_forwarded(
+        self, MockCompiler, tmp_path, monkeypatch
+    ):
+        """Explicit overlay conflicts are preserved for CMake's mutual-exclusion check."""
+        from simpler_setup import pto_isa  # noqa: PLC0415
+        from simpler_setup.runtime_builder import RuntimeBuilder  # noqa: PLC0415
+
+        pin = "c" * 40
+        self._make_runtime(tmp_path, "a5")
+
+        mock_instance = MockCompiler.get_instance.return_value
+        mock_instance.compile.side_effect = lambda target, *a, **kw: (Path(kw["output_dir"]) / f"lib{target}.so")
+        mock_instance.compile_simpler_log.return_value = tmp_path / "build" / "lib" / "libsimpler_log.so"
+        monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: pin)
+        monkeypatch.setattr(pto_isa, "ensure_pto_isa_root", lambda verbose=False: "/tmp/pto-isa")
+        monkeypatch.setattr(pto_isa, "write_pto_isa_build_metadata", lambda *args: None)
+        monkeypatch.setenv("SIMPLER_ENABLE_PTO_RDMA_WORKSPACE", "ON")
+        monkeypatch.setenv("SIMPLER_ENABLE_PTO_URMA_WORKSPACE", "ON")
+
+        builder = RuntimeBuilder(platform="a5")
+        builder.get_binaries("test_rt", build=True)
+
+        host_call = next(call for call in mock_instance.compile.call_args_list if call.args[0] == "host")
+        assert host_call.kwargs["cmake_defines"]["SIMPLER_ENABLE_PTO_RDMA_WORKSPACE"] == "ON"
+        assert host_call.kwargs["cmake_defines"]["SIMPLER_ENABLE_PTO_URMA_WORKSPACE"] == "ON"
 
     @patch("simpler_setup.runtime_builder.RuntimeCompiler")
     def test_sim_direct_build_does_not_write_pto_isa_metadata(self, MockCompiler, tmp_path, monkeypatch):
@@ -534,6 +617,41 @@ class TestResolveBuildPtoIsaCommit:
         builder = self._make_builder("a2a3")
         with pytest.raises(RuntimeError, match="bad pin"):
             builder._resolve_build_pto_isa_commit()
+
+
+class TestRuntimeCompilerA5OverlayEnv:
+    def test_rdma_workspace_enabled_reads_cmake_bool_env(self, monkeypatch):
+        import simpler_setup.runtime_compiler as rc_module  # noqa: PLC0415
+
+        monkeypatch.delenv("SIMPLER_ENABLE_PTO_RDMA_WORKSPACE", raising=False)
+        assert rc_module._rdma_workspace_enabled() is False
+
+        monkeypatch.setenv("SIMPLER_ENABLE_PTO_RDMA_WORKSPACE", "ON")
+        assert rc_module._rdma_workspace_enabled() is True
+
+        monkeypatch.setenv("SIMPLER_ENABLE_PTO_RDMA_WORKSPACE", "0")
+        assert rc_module._rdma_workspace_enabled() is False
+
+    def test_rdma_disables_default_urma_workspace(self, monkeypatch):
+        import simpler_setup.runtime_compiler as rc_module  # noqa: PLC0415
+
+        monkeypatch.setenv("SIMPLER_ENABLE_PTO_RDMA_WORKSPACE", "ON")
+        monkeypatch.delenv("SIMPLER_ENABLE_PTO_URMA_WORKSPACE", raising=False)
+        assert rc_module._urma_workspace_enabled() is False
+
+        monkeypatch.setenv("SIMPLER_ENABLE_PTO_URMA_WORKSPACE", "ON")
+        assert rc_module._urma_workspace_enabled() is True
+
+    def test_sdma_disables_default_urma_workspace(self, monkeypatch):
+        import simpler_setup.runtime_compiler as rc_module  # noqa: PLC0415
+
+        monkeypatch.setenv("SIMPLER_ENABLE_PTO_SDMA_WORKSPACE", "ON")
+        monkeypatch.delenv("SIMPLER_ENABLE_PTO_RDMA_WORKSPACE", raising=False)
+        monkeypatch.delenv("SIMPLER_ENABLE_PTO_URMA_WORKSPACE", raising=False)
+        assert rc_module._urma_workspace_enabled() is False
+
+        monkeypatch.setenv("SIMPLER_ENABLE_PTO_URMA_WORKSPACE", "ON")
+        assert rc_module._urma_workspace_enabled() is True
 
 
 # --- Full integration tests (real compilation) ---

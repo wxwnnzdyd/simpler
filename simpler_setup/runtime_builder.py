@@ -9,6 +9,7 @@
 import fcntl
 import json
 import logging
+import os
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -23,6 +24,37 @@ from .runtime_compiler import RuntimeCompiler
 logger = logging.getLogger(__name__)
 
 _GIT_COMMIT_FILE = ".git_commit"
+
+_TRUE_CMAKE_BOOLS = {"1", "ON", "TRUE", "YES", "Y"}
+_FALSE_CMAKE_BOOLS = {"0", "OFF", "FALSE", "NO", "N"}
+
+
+def _normalize_cmake_bool_env(name: str) -> Optional[str]:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    normalized = value.strip().upper()
+    if normalized in _TRUE_CMAKE_BOOLS:
+        return "ON"
+    if normalized in _FALSE_CMAKE_BOOLS:
+        return "OFF"
+    return value
+
+
+def _a5_async_workspace_cmake_defines() -> dict[str, str]:
+    names = (
+        "SIMPLER_ENABLE_PTO_SDMA_WORKSPACE",
+        "SIMPLER_ENABLE_PTO_URMA_WORKSPACE",
+        "SIMPLER_ENABLE_PTO_RDMA_WORKSPACE",
+    )
+    defines = {name: value for name in names if (value := _normalize_cmake_bool_env(name)) is not None}
+    explicit_non_urma_overlay = (
+        defines.get("SIMPLER_ENABLE_PTO_SDMA_WORKSPACE") == "ON"
+        or defines.get("SIMPLER_ENABLE_PTO_RDMA_WORKSPACE") == "ON"
+    )
+    if explicit_non_urma_overlay and "SIMPLER_ENABLE_PTO_URMA_WORKSPACE" not in defines:
+        defines["SIMPLER_ENABLE_PTO_URMA_WORKSPACE"] = "OFF"
+    return defines
 
 
 def _get_git_head(repo_root: Path) -> str:
@@ -337,8 +369,14 @@ class RuntimeBuilder:
         def _compile_target(target: str) -> Path:
             include_dirs, source_dirs = self._resolve_target_dirs(config_dir, build_config, target)
             cmake_defines = None
-            if target == "host" and build_pto_isa_commit:
-                cmake_defines = {"SIMPLER_PTO_ISA_BUILD_COMMIT": build_pto_isa_commit}
+            if target == "host":
+                host_defines = {}
+                if self._arch == "a5" and self._variant == "onboard":
+                    host_defines.update(_a5_async_workspace_cmake_defines())
+                if build_pto_isa_commit:
+                    host_defines["SIMPLER_PTO_ISA_BUILD_COMMIT"] = build_pto_isa_commit
+                if host_defines:
+                    cmake_defines = host_defines
             # compile() adds a {target}/ subdirectory inside build_dir
             cache_dir = self._CACHE_DIR / arch / variant / name
             cache_dir.mkdir(parents=True, exist_ok=True)

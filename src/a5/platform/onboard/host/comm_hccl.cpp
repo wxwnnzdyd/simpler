@@ -50,7 +50,13 @@
 #ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
 #include "pto/comm/async/sdma/sdma_workspace_manager.hpp"
 #endif
+#ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
 #include "pto/comm/async/urma/urma_workspace_manager.hpp"
+#endif
+#ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
+#include "pto/comm/async/rdma/rdma_workspace_manager.hpp"
+#include "pto/comm/async/rdma/backends/hns_1825/hns_1825_bootstrap.hpp"
+#endif
 
 // Thin wrappers around the HCCL public APIs we use. Kept as a translation
 // layer in case we need to swap (e.g., InitConfig variant) later.
@@ -83,7 +89,12 @@ struct DomainAllocation {
     // can cycle repeatedly within one comm handle before any device reset, so
     // these are released explicitly at domain teardown rather than left to reset.
     std::vector<std::pair<void *, aclrtDrvMemHandle>> peer_windows;
+#ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
     std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> urma_workspace;
+#endif
+#ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
+    std::unique_ptr<pto::comm::rdma::RdmaWorkspaceManager> rdma_workspace;
+#endif
     CommContext *device_ctx = nullptr;  // aclrtMalloc'd CommContext mirror
 };
 
@@ -105,7 +116,12 @@ struct CommHandle_ {
 #ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
     std::unique_ptr<pto::comm::sdma::SdmaWorkspaceManager> sdma_workspace;
 #endif
+#ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
     std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> urma_workspace;
+#endif
+#ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
+    std::unique_ptr<pto::comm::rdma::RdmaWorkspaceManager> rdma_workspace;
+#endif
 };
 
 // ============================================================================
@@ -260,6 +276,26 @@ static void release_domain_peer_windows(DomainAllocation &alloc) {
     alloc.peer_windows.clear();
 }
 
+static void reset_domain_async_workspace(DomainAllocation &alloc) {
+    (void)alloc;
+#ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
+    alloc.urma_workspace.reset();
+#endif
+#ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
+    alloc.rdma_workspace.reset();
+#endif
+}
+
+static void reset_handle_async_workspace(CommHandle h) {
+    if (h == nullptr) return;
+#ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
+    h->urma_workspace.reset();
+#endif
+#ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
+    h->rdma_workspace.reset();
+#endif
+}
+
 }  // namespace
 
 // ============================================================================
@@ -371,10 +407,14 @@ constexpr uint64_t kIpcAnnounceMagic = 0x49504344334d4549ULL;  // "IPCD3MEI"
 
 struct IpcAnnounceFile {
     uint64_t magic;
-    int32_t pid;
-    uint32_t rank;
-    int32_t device_id;          // ACL logic device id this rank is bound to.
     uint64_t shareable_handle;  // aclrtMemExportToShareableHandle output
+    uint64_t symmetric_addr;
+    int32_t pid;
+    int32_t device_id;  // ACL logic device id this rank is bound to.
+    uint32_t rank;
+    uint32_t phy_id;
+    uint16_t roce_base_port;
+    char roce_ip[64];
 };
 
 // Announce file path shares the `barrier_<prefix>_..._<rank>.ready` shape so
@@ -390,10 +430,10 @@ static bool ipc_write_announce(
 ) {
     IpcAnnounceFile a{};
     a.magic = kIpcAnnounceMagic;
+    a.shareable_handle = shareable_handle;
     a.pid = pid;
     a.rank = static_cast<uint32_t>(rank);
     a.device_id = device_id;
-    a.shareable_handle = shareable_handle;
     std::string p = ipc_announce_path(rootinfo, rank, run_token);
     std::string tmp = p + ".tmp." + std::to_string(getpid());
     {
@@ -683,14 +723,21 @@ domain_announce_path(const std::string &rootinfo, uint64_t allocation_id, uint32
 
 static bool domain_write_announce(
     const std::string &rootinfo, uint64_t allocation_id, uint32_t domain_rank, uint64_t run_token, int32_t pid,
-    int32_t device_id, uint64_t shareable_handle
+    int32_t device_id, uint64_t shareable_handle, uint64_t symmetric_addr = 0, uint32_t phy_id = 0,
+    uint16_t roce_base_port = 0, const char *roce_ip = nullptr
 ) {
     IpcAnnounceFile a{};
     a.magic = kIpcAnnounceMagic;
+    a.shareable_handle = shareable_handle;
+    a.symmetric_addr = symmetric_addr;
     a.pid = pid;
     a.rank = domain_rank;
     a.device_id = device_id;
-    a.shareable_handle = shareable_handle;
+    a.phy_id = phy_id;
+    a.roce_base_port = roce_base_port;
+    if (roce_ip != nullptr) {
+        std::snprintf(a.roce_ip, sizeof(a.roce_ip), "%s", roce_ip);
+    }
     std::string p = domain_announce_path(rootinfo, allocation_id, domain_rank, run_token);
     std::string tmp = p + ".tmp." + std::to_string(getpid());
     {
@@ -759,15 +806,17 @@ static void ensure_sdma_workspace(CommHandle h) {
 #endif
 }
 
+#ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
 static uint64_t urma_workspace_bytes(uint32_t rank_count) {
     using namespace pto::comm::urma;
     constexpr uint32_t qp_num = 1;
     return sizeof(UrmaInfo) +
            static_cast<uint64_t>(rank_count) *
-               (2ULL * sizeof(UrmaWQCtx) * qp_num + 2ULL * sizeof(UrmaCqCtx) * qp_num +
-                sizeof(UrmaMemInfo) * qp_num);
+               (2ULL * sizeof(UrmaWQCtx) * qp_num + 2ULL * sizeof(UrmaCqCtx) * qp_num + sizeof(UrmaMemInfo) * qp_num);
 }
+#endif
 
+#ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
 static bool rank_ids_are_dense_prefix(const uint32_t *rank_ids, size_t rank_count) {
     if (rank_ids == nullptr) return false;
     for (size_t i = 0; i < rank_count; ++i) {
@@ -812,6 +861,94 @@ static bool ensure_base_urma_workspace(CommHandle h) {
     h->host_ctx.workSpaceSize = urma_workspace_bytes(static_cast<uint32_t>(h->nranks));
     return h->host_ctx.workSpace != 0 && h->host_ctx.workSpaceSize != 0;
 }
+#endif
+
+#ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
+struct RdmaBootstrapInfo {
+    uint32_t phy_id = 0;
+    std::string local_ip;
+    uint16_t base_port = 60032;
+};
+
+static bool parse_u16_env(const char *name, uint16_t &out) {
+    const char *value = std::getenv(name);
+    if (value == nullptr || *value == '\0') return true;
+    char *end = nullptr;
+    unsigned long parsed = std::strtoul(value, &end, 10);
+    if (end == value || *end != '\0' || parsed > 65535UL) return false;
+    out = static_cast<uint16_t>(parsed);
+    return true;
+}
+
+static bool resolve_rdma_bootstrap(CommHandle h, uint32_t base_rank, int device_id, RdmaBootstrapInfo &out) {
+    (void)base_rank;
+    (void)device_id;
+    out.phy_id = pto::comm::rdma::hns_1825::bootstrap::ResolvePhyId();
+    if (!pto::comm::rdma::hns_1825::bootstrap::ResolveLocalRdmaIp(out.phy_id, out.local_ip, h->rootinfo_path)) {
+        LOG_ERROR("[comm rank %d] RDMA bootstrap failed to resolve local RoCE IP", h->rank);
+        return false;
+    }
+    if (!parse_u16_env("PTO_ROCE_BASE_PORT", out.base_port)) {
+        LOG_ERROR("[comm rank %d] invalid PTO_ROCE_BASE_PORT", h->rank);
+        return false;
+    }
+    return !out.local_ip.empty();
+}
+
+static uint64_t rdma_workspace_bytes(uint32_t rank_count) {
+    using namespace pto::comm::rdma;
+    using namespace pto::comm::rdma::hns_1825;
+    constexpr uint32_t qp_num = 1;
+    return sizeof(RdmaInfo) +
+           static_cast<uint64_t>(rank_count) *
+               (2ULL * sizeof(RoceSqCtx) * qp_num + 2ULL * sizeof(RoceCqCtx) * qp_num + sizeof(RdmaMemInfo));
+}
+
+static bool init_rdma_workspace(
+    CommHandle h, uint32_t domain_rank, uint32_t rank_count, const RdmaBootstrapInfo &bootstrap,
+    const std::vector<IpcAnnounceFile> &peers, void *symmetric_addr, uint64_t symmetric_size,
+    std::unique_ptr<pto::comm::rdma::RdmaWorkspaceManager> &workspace
+) {
+    if (workspace) return workspace->GetWorkspaceAddr() != nullptr;
+    if (h == nullptr || symmetric_addr == nullptr || symmetric_size == 0 || domain_rank >= rank_count ||
+        peers.size() != rank_count) {
+        return false;
+    }
+
+    pto::comm::rdma::WorkspaceConfig config{};
+    config.rankId = domain_rank;
+    config.rankCount = rank_count;
+    config.phyId = bootstrap.phy_id;
+    config.localIp = bootstrap.local_ip;
+    config.basePort = bootstrap.base_port;
+    config.symmetricAddr = symmetric_addr;
+    config.symmetricSize = symmetric_size;
+    config.peerIps.resize(rank_count);
+    config.peerPhyIds.resize(rank_count);
+    config.peerSymAddrs.resize(rank_count);
+    for (uint32_t p = 0; p < rank_count; ++p) {
+        if (peers[p].roce_base_port != bootstrap.base_port || peers[p].roce_ip[0] == '\0' ||
+            peers[p].symmetric_addr == 0) {
+            LOG_ERROR("[comm rank %d] RDMA peer metadata invalid for domain rank %u", h->rank, p);
+            return false;
+        }
+        config.peerIps[p] = peers[p].roce_ip;
+        config.peerPhyIds[p] = peers[p].phy_id;
+        config.peerSymAddrs[p] = peers[p].symmetric_addr;
+    }
+
+    auto manager = std::make_unique<pto::comm::rdma::RdmaWorkspaceManager>();
+    if (!manager->Init(config, pto::comm::RdmaBackend::HNS_1825)) {
+        LOG_ERROR(
+            "[comm rank %d] RDMA workspace init failed (rank_id=%u rank_count=%u size=%llu)", h->rank, domain_rank,
+            rank_count, static_cast<unsigned long long>(symmetric_size)
+        );
+        return false;
+    }
+    workspace = std::move(manager);
+    return true;
+}
+#endif
 
 // Performs the per-allocation Path-D dance for one subset rank.  rank_ids
 // must list participating BASE-COMM rank ids in domain rank order; this
@@ -825,6 +962,7 @@ static int domain_alloc_via_ipc(
     CommHandle h, uint64_t allocation_id, const uint32_t *rank_ids, size_t rank_count, uint32_t domain_rank,
     uint64_t win_size, DomainAllocation *out
 ) {
+    (void)rank_ids;
     const std::string &rootinfo = h->rootinfo_path;
     const uint64_t run_token = h->run_token;
     const int subset_n = static_cast<int>(rank_count);
@@ -895,7 +1033,20 @@ static int domain_alloc_via_ipc(
     }
 
     const int32_t myPid = static_cast<int32_t>(getpid());
+#ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
+    RdmaBootstrapInfo rdma_bootstrap{};
+    if (!resolve_rdma_bootstrap(h, static_cast<uint32_t>(h->rank), myDevice, rdma_bootstrap)) {
+        release_own_vmm_window(localBuf, handle);
+        return -1;
+    }
+    if (!domain_write_announce(
+            rootinfo, allocation_id, domain_rank, run_token, myPid, myDevice, shareableHandle,
+            reinterpret_cast<uint64_t>(localBuf), rdma_bootstrap.phy_id, rdma_bootstrap.base_port,
+            rdma_bootstrap.local_ip.c_str()
+        )) {
+#else
     if (!domain_write_announce(rootinfo, allocation_id, domain_rank, run_token, myPid, myDevice, shareableHandle)) {
+#endif
         LOG_ERROR("[comm rank %d] alloc_domain: write_announce failed", h->rank);
         release_own_vmm_window(localBuf, handle);
         return -1;
@@ -908,6 +1059,12 @@ static int domain_alloc_via_ipc(
             peers[p].rank = domain_rank;
             peers[p].device_id = myDevice;
             peers[p].shareable_handle = shareableHandle;
+#ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
+            peers[p].symmetric_addr = reinterpret_cast<uint64_t>(localBuf);
+            peers[p].phy_id = rdma_bootstrap.phy_id;
+            peers[p].roce_base_port = rdma_bootstrap.base_port;
+            std::snprintf(peers[p].roce_ip, sizeof(peers[p].roce_ip), "%s", rdma_bootstrap.local_ip.c_str());
+#endif
             continue;
         }
         if (!domain_read_announce(rootinfo, allocation_id, static_cast<uint32_t>(p), run_token, &peers[p])) {
@@ -995,11 +1152,12 @@ static int domain_alloc_via_ipc(
         domain_workspace_size = 16 * 1024;
     }
 #endif
+#ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
     if (rank_ids_are_dense_prefix(rank_ids, rank_count)) {
         if (!init_urma_workspace(
                 h, domain_rank, static_cast<uint32_t>(rank_count), localBuf, aligned_size, out->urma_workspace
             )) {
-            out->urma_workspace.reset();
+            reset_domain_async_workspace(*out);
             release_domain_peer_windows(*out);
             release_own_vmm_window(localBuf, handle);
             return -1;
@@ -1007,10 +1165,22 @@ static int domain_alloc_via_ipc(
         domain_workspace_addr = reinterpret_cast<uint64_t>(out->urma_workspace->GetWorkspaceAddr());
         domain_workspace_size = urma_workspace_bytes(static_cast<uint32_t>(rank_count));
     } else {
-        LOG_WARN(
-            "[comm rank %d] alloc_domain: URMA workspace disabled for non-dense rank mapping", h->rank
-        );
+        LOG_WARN("[comm rank %d] alloc_domain: URMA workspace disabled for non-dense rank mapping", h->rank);
     }
+#endif
+#ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
+    if (!init_rdma_workspace(
+            h, domain_rank, static_cast<uint32_t>(rank_count), rdma_bootstrap, peers, localBuf, aligned_size,
+            out->rdma_workspace
+        )) {
+        reset_domain_async_workspace(*out);
+        release_domain_peer_windows(*out);
+        release_own_vmm_window(localBuf, handle);
+        return -1;
+    }
+    domain_workspace_addr = reinterpret_cast<uint64_t>(out->rdma_workspace->GetWorkspaceAddr());
+    domain_workspace_size = rdma_workspace_bytes(static_cast<uint32_t>(rank_count));
+#endif
 
     CommContext ctx{};
     ctx.rankId = domain_rank;
@@ -1030,7 +1200,7 @@ static int domain_alloc_via_ipc(
                 "[comm rank %d] alloc_domain: ImportFromShareableHandle(peer_dr=%d) -> %d", h->rank, p,
                 static_cast<int>(aret)
             );
-            out->urma_workspace.reset();
+            reset_domain_async_workspace(*out);
             release_domain_peer_windows(*out);
             release_own_vmm_window(localBuf, handle);
             return -1;
@@ -1043,7 +1213,7 @@ static int domain_alloc_via_ipc(
                 static_cast<int>(aret)
             );
             aclrtFreePhysical(peerHandle);
-            out->urma_workspace.reset();
+            reset_domain_async_workspace(*out);
             release_domain_peer_windows(*out);
             release_own_vmm_window(localBuf, handle);
             return -1;
@@ -1053,7 +1223,7 @@ static int domain_alloc_via_ipc(
             LOG_ERROR("[comm rank %d] alloc_domain: peer MapMem(peer_dr=%d) -> %d", h->rank, p, static_cast<int>(aret));
             aclrtReleaseMemAddress(peerVa);
             aclrtFreePhysical(peerHandle);
-            out->urma_workspace.reset();
+            reset_domain_async_workspace(*out);
             release_domain_peer_windows(*out);
             release_own_vmm_window(localBuf, handle);
             return -1;
@@ -1066,7 +1236,7 @@ static int domain_alloc_via_ipc(
             aclrtUnmapMem(peerVa);
             aclrtReleaseMemAddress(peerVa);
             aclrtFreePhysical(peerHandle);
-            out->urma_workspace.reset();
+            reset_domain_async_workspace(*out);
             release_domain_peer_windows(*out);
             release_own_vmm_window(localBuf, handle);
             return -1;
@@ -1079,7 +1249,7 @@ static int domain_alloc_via_ipc(
     aret = aclrtMalloc(&newDevMem, sizeof(CommContext), ACL_MEM_MALLOC_HUGE_FIRST);
     if (aret != ACL_SUCCESS) {
         LOG_ERROR("[comm rank %d] alloc_domain: ctx aclrtMalloc -> %d", h->rank, static_cast<int>(aret));
-        out->urma_workspace.reset();
+        reset_domain_async_workspace(*out);
         release_domain_peer_windows(*out);
         release_own_vmm_window(localBuf, handle);
         return -1;
@@ -1088,7 +1258,7 @@ static int domain_alloc_via_ipc(
     if (aret != ACL_SUCCESS) {
         LOG_ERROR("[comm rank %d] alloc_domain: ctx Memcpy H2D -> %d", h->rank, static_cast<int>(aret));
         aclrtFree(newDevMem);
-        out->urma_workspace.reset();
+        reset_domain_async_workspace(*out);
         release_domain_peer_windows(*out);
         release_own_vmm_window(localBuf, handle);
         return -1;
@@ -1122,8 +1292,10 @@ extern "C" int comm_alloc_windows(CommHandle h, size_t win_size, uint64_t *devic
     // Optional PTO-ISA async SDMA workspace pre-allocation (overlays the comm
     // backend's output; comm-side flow does not care about workSpace).
     ensure_sdma_workspace(h);
+#ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
     if (!ensure_base_urma_workspace(h)) return -1;
     if (!file_barrier(h->rootinfo_path, h->rank, h->nranks, "base_urma_ready", h->run_token)) return -1;
+#endif
 
     void *newDevMem = nullptr;
     aclError aRet = aclrtMalloc(&newDevMem, sizeof(CommContext), ACL_MEM_MALLOC_HUGE_FIRST);
@@ -1285,7 +1457,7 @@ extern "C" int comm_alloc_domain_windows(
     if (aret != ACL_SUCCESS) {
         LOG_ERROR("[comm rank %d] alloc_domain: aclrtMemset -> %d", h->rank, static_cast<int>(aret));
         aclrtFree(alloc->device_ctx);
-        alloc->urma_workspace.reset();
+        reset_domain_async_workspace(*alloc);
         release_domain_peer_windows(*alloc);
         release_own_vmm_window(alloc->local_buf, alloc->own_handle);
         return -1;
@@ -1339,7 +1511,7 @@ comm_release_domain_windows(CommHandle h, uint64_t allocation_id, size_t rank_co
         aclError aret = aclrtFree(alloc->device_ctx);
         if (aret != ACL_SUCCESS && rc == 0) rc = -1;
     }
-    alloc->urma_workspace.reset();
+    reset_domain_async_workspace(*alloc);
     // local_buf and every peer import are VMM-mapped VAs, not aclrtMalloc
     // pointers: unmap + release the VA reservation, then free the physical
     // handle.
@@ -1385,12 +1557,12 @@ extern "C" int comm_destroy(CommHandle h) try {
     for (auto &kv : h->domain_allocations) {
         auto &alloc = kv.second;
         if (alloc->device_ctx) aclrtFree(alloc->device_ctx);
-        alloc->urma_workspace.reset();
+        reset_domain_async_workspace(*alloc);
         release_domain_peer_windows(*alloc);
         if (alloc->local_buf) release_own_vmm_window(alloc->local_buf, alloc->own_handle);
     }
     h->domain_allocations.clear();
-    h->urma_workspace.reset();
+    reset_handle_async_workspace(h);
     if (h->hccl_comm) {
         HcclResult hret = hccl_comm_destroy(h->hccl_comm);
         if (hret != HCCL_SUCCESS) {

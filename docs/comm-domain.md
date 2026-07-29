@@ -111,7 +111,7 @@ symmetric window is realized:
 | Window memory | POSIX shm + `ftruncate`, mmap'd per rank | a2a3 allocates a fresh `aclrtMalloc` + `aclrtIpcMem*` pool; a5 derives slices from the base `comm_alloc_windows` pool |
 | Subset barrier | shm-header atomic, `allocation_id`-scoped | file barriers, `allocation_id`-scoped |
 | Window init | window zeroed after handshake (`memset`) | window zeroed after handshake (`aclrtMemset`) |
-| PTO async workspace | n/a | a2a3 SDMA once per handle; a5 URMA in `CommContext::workSpace` |
+| PTO async workspace | n/a | a2a3 SDMA once per handle; a5 exposes one async workspace overlay in `CommContext::workSpace` |
 
 The window is zero-initialized on both backends so scratch/signal protocols see
 a known starting state (matching the historical static-path contract).
@@ -127,6 +127,15 @@ PTO-ISA's URMA documentation recommends `ACL_MEM_MALLOC_HUGE_ONLY` for the
 strictest memory-registration contract; switch the a5 URMA window path to
 `HUGE_ONLY` only after hardware validation shows `HUGE_FIRST` can fall back to
 small pages and break MR registration in this backend.
+
+For a5 RDMA, `SIMPLER_ENABLE_PTO_RDMA_WORKSPACE=ON` selects the HNS1825
+workspace overlay. RDMA is mutually exclusive with the SDMA and URMA overlays
+because `CommContext` has a single `workSpace/workSpaceSize` pair. The first
+RDMA integration only supports `orch.allocate_domain()` dynamic domains; it
+does not support `comm_derive_context()`, sim platforms, a2a3, or
+`host_build_graph`. RDMA kernels must derive remote WQE addresses from the
+RDMA workspace peer MR base plus a local-window offset, not from
+`CommContext::windowsIn[peer]`.
 
 ---
 

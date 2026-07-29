@@ -22,6 +22,37 @@ from .toolchain import Aarch64GxxToolchain, CCECToolchain, GxxToolchain, Toolcha
 
 logger = logging.getLogger(__name__)
 
+_TRUE_CMAKE_BOOLS = {"1", "ON", "TRUE", "YES", "Y"}
+_FALSE_CMAKE_BOOLS = {"0", "OFF", "FALSE", "NO", "N"}
+
+
+def _cmake_bool_env_enabled(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().upper()
+    if normalized in _TRUE_CMAKE_BOOLS:
+        return True
+    if normalized in _FALSE_CMAKE_BOOLS:
+        return False
+    return default
+
+
+def _sdma_workspace_enabled() -> bool:
+    return _cmake_bool_env_enabled("SIMPLER_ENABLE_PTO_SDMA_WORKSPACE", default=False)
+
+
+def _rdma_workspace_enabled() -> bool:
+    return _cmake_bool_env_enabled("SIMPLER_ENABLE_PTO_RDMA_WORKSPACE", default=False)
+
+
+def _urma_workspace_enabled() -> bool:
+    if "SIMPLER_ENABLE_PTO_URMA_WORKSPACE" not in os.environ and (
+        _sdma_workspace_enabled() or _rdma_workspace_enabled()
+    ):
+        return False
+    return _cmake_bool_env_enabled("SIMPLER_ENABLE_PTO_URMA_WORKSPACE", default=True)
+
 
 class BuildTarget:
     """CMake build target: composes a Toolchain with a source directory and output name.
@@ -171,13 +202,11 @@ class RuntimeCompiler:
     def _init_a5(self):
         """Initialize toolchains for real a5 hardware."""
         env_manager.ensure("ASCEND_HOME_PATH")
-        # a5 onboard host_runtime builds URMA workspace setup against pto-isa
-        # host headers. Use the same pinned managed checkout as kernel
-        # compilation and expose it through PTO_ISA_ROOT for CMake.
-        from simpler_setup.pto_isa import ensure_pto_isa_root  # noqa: PLC0415
+        if _sdma_workspace_enabled() or _urma_workspace_enabled() or _rdma_workspace_enabled():
+            from simpler_setup.pto_isa import ensure_pto_isa_root  # noqa: PLC0415
 
-        os.environ["PTO_ISA_ROOT"] = ensure_pto_isa_root(verbose=True)
-        env_manager.ensure("PTO_ISA_ROOT")
+            os.environ["PTO_ISA_ROOT"] = ensure_pto_isa_root(verbose=True)
+            env_manager.ensure("PTO_ISA_ROOT")
 
         # AICore: Bisheng CCE compiler with A5 platform
         ccec = CCECToolchain(platform="a5")

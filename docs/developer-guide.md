@@ -185,7 +185,7 @@ This builds the nanobind `_task_interface` extension **and** pre-builds all runt
 | Nanobind bindings (`python/bindings/`) | Re-run `pip install --no-build-isolation -e .` (no rebuild-on-import; `editable.rebuild = false`) |
 | Python-only code (`python/*.py`, `simpler_setup/*.py`) | No rebuild needed (editable install) |
 | Examples / kernels (`examples/{arch}/`, `tests/st/`) | No rebuild needed, just re-run |
-| `pto_isa.pin` changed | Re-run `pip install`; onboard PTO-ISA host headers invalidate a2a3/a5 `host_runtime` caches. |
+| `pto_isa.pin` changed | Re-run `pip install`; onboard PTO-ISA host headers invalidate affected a2a3/a5 `host_runtime` caches. |
 
 A `pto_isa.pin` bump changes PTO async workspace headers embedded by
 `host_runtime.so`. Install-time runtime builds and run-time kernel compilation
@@ -197,6 +197,10 @@ The a5 URMA workspace currently uses the HCCL comm-window allocation policy
 (`ACL_MEM_MALLOC_HUGE_FIRST`); see
 [Communication Domains](comm-domain.md#4-backends) for the memory-registration
 trade-off and when to tighten it to `HUGE_ONLY`.
+The a5 RDMA workspace is an explicit opt-in overlay enabled with
+`SIMPLER_ENABLE_PTO_RDMA_WORKSPACE=ON`. It requires a `pto_isa.pin` revision
+that provides the PTO-ISA RDMA/HNS1825 headers and is mutually exclusive with
+the SDMA and URMA workspace overlays.
 
 ### Runtime binary lookup
 
