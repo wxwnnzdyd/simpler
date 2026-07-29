@@ -71,12 +71,12 @@ void SchedulerContext::complete_slot_task(
     PTO2TaskSlotState &slot_state, int32_t expected_reg_task_id, [[maybe_unused]] PTO2SubtaskSlot subslot,
     int32_t thread_idx, int32_t core_id, Handshake *hank, int32_t &completed_this_turn,
     PTO2TaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
-#if SIMPLER_DFX
+#if PTO2_PROFILING
     ,
     uint64_t dispatch_ts, uint64_t finish_ts
 #endif
 ) {
-#if SIMPLER_DFX
+#if PTO2_PROFILING
     auto &l2_swimlane = sched_l2_swimlane_[thread_idx];
 #else
     (void)hank;
@@ -138,7 +138,7 @@ void SchedulerContext::complete_slot_task(
     }
 
     if (task_complete && !defer_completion_to_consumer) {
-#if SIMPLER_DFX
+#if PTO2_PROFILING
         if (is_dump_args_enabled()) {
             dump_args_for_task<PTO2_SUBTASK_SLOT_COUNT>(
                 thread_idx, slot_state, TensorDumpStage::AFTER_COMPLETION,
@@ -159,7 +159,7 @@ void SchedulerContext::complete_slot_task(
 #else
         sched_->on_task_complete(slot_state);
 #endif
-#if SIMPLER_DFX
+#if PTO2_PROFILING
         l2_swimlane.phase_complete_count++;
 #endif
         if (deferred_release_count < PTO2_DEFERRED_RELEASE_CAP) {
@@ -180,7 +180,7 @@ void SchedulerContext::complete_slot_task(
         completed_this_turn++;
     }
 
-#if SIMPLER_DFX
+#if PTO2_PROFILING
     // Level gate: at AICORE_TIMING (level=1) the AICore record alone carries
     // {start, end, task_token_raw}, host resolves func_id/core_type from
     // dep_gen / per-core mapping, and AICPU has nothing to write. Only at
@@ -205,7 +205,7 @@ void SchedulerContext::complete_slot_task(
     }
 #endif
 
-#if SIMPLER_DFX
+#if PTO2_PROFILING
     if (is_pmu_enabled()) {
         // Slot key must be the 32-bit register token AICore wrote into
         // dual_issue_slots[task_id & 1].task_id (= DATA_MAIN_BASE value).
@@ -225,7 +225,7 @@ void SchedulerContext::promote_pending_to_running(CoreExecState &core) {
     core.running_slot_state = core.pending_slot_state;
     core.running_reg_task_id = core.pending_reg_task_id;
     core.running_subslot = core.pending_subslot;
-#if SIMPLER_DFX
+#if PTO2_PROFILING
     core.running_dispatch_timestamp = core.pending_dispatch_timestamp;
 #endif
     core.pending_slot_state = nullptr;
@@ -255,11 +255,7 @@ void SchedulerContext::check_running_cores_for_completion(
         // --- Judgment phase: read register, derive transition ---
         // Use the precomputed cond_ptr (resolved once in handshake) to skip
         // the reg_offset switch and reg_addr addition on every poll.
-        // reg_load_acquire makes this an atomic acquire under __CPU_SIM so it
-        // pairs with the AICore's release store of the FIN (without it the sim
-        // poll races the FIN publish and can miss it); on hardware it is the
-        // same plain volatile load the bare deref used to be.
-        uint64_t reg_val = static_cast<uint64_t>(reg_load_acquire(core.cond_ptr));
+        uint64_t reg_val = static_cast<uint64_t>(*core.cond_ptr);
         // ARM64 allows Device-nGnRnE -> Normal-cacheable load reorder; the
         // rmb() pins any AICore-published cacheable reads downstream of the
         // FIN observation. Replaces the post-`__sync_synchronize` that the
@@ -284,7 +280,7 @@ void SchedulerContext::check_running_cores_for_completion(
         }
 #endif
 
-#if SIMPLER_DFX
+#if PTO2_PROFILING
         // Capture finish_ts at the FIN observation point — right after rmb()
         // pinned cacheable AICore reads downstream of the register load, and
         // BEFORE any fanin / deferred-release work. Anything later would
@@ -302,7 +298,7 @@ void SchedulerContext::check_running_cores_for_completion(
             complete_slot_task(
                 *core.pending_slot_state, core.pending_reg_task_id, core.pending_subslot, thread_idx, core_id, hank,
                 completed_this_turn, deferred_release_slot_states, deferred_release_count
-#if SIMPLER_DFX
+#if PTO2_PROFILING
                 ,
                 core.pending_dispatch_timestamp, finish_ts
 #endif
@@ -313,7 +309,7 @@ void SchedulerContext::check_running_cores_for_completion(
             complete_slot_task(
                 *core.running_slot_state, core.running_reg_task_id, core.running_subslot, thread_idx, core_id, hank,
                 completed_this_turn, deferred_release_slot_states, deferred_release_count
-#if SIMPLER_DFX
+#if PTO2_PROFILING
                 ,
                 core.running_dispatch_timestamp, finish_ts
 #endif
