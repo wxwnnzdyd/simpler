@@ -69,3 +69,15 @@ def test_a5_comm_hccl_keeps_urma_and_rdma_workspace_paths_macro_gated() -> None:
     assert "#include \"pto/comm/async/rdma/rdma_workspace_manager.hpp\"" in source
     assert "#include \"pto/comm/async/rdma/backends/hns_1825/hns_1825_bootstrap.hpp\"" in source
     assert "std::unique_ptr<pto::comm::rdma::RdmaWorkspaceManager> rdma_workspace" in source
+
+
+def test_a5_comm_hccl_uses_mr1374_rdma_host_api_shape() -> None:
+    source = HOST_COMM.read_text()
+
+    assert "#define __gm__" in source
+    assert "ResolvePhyId(out.phy_id)" in source
+    assert "ResolveLocalRdmaIp(" in source
+    assert "h->rootinfo_path.c_str()" in source
+    assert "manager->Init(config)" in source
+    assert "WorkspaceInitResult::READY" in source
+    assert "RdmaBackend::HNS_1825" not in source

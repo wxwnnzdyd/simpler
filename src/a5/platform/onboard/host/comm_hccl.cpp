@@ -54,6 +54,9 @@
 #include "pto/comm/async/urma/urma_workspace_manager.hpp"
 #endif
 #ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
+#ifndef __gm__
+#define __gm__
+#endif
 #include "pto/comm/async/rdma/rdma_workspace_manager.hpp"
 #include "pto/comm/async/rdma/backends/hns_1825/hns_1825_bootstrap.hpp"
 #endif
@@ -883,8 +886,11 @@ static bool parse_u16_env(const char *name, uint16_t &out) {
 static bool resolve_rdma_bootstrap(CommHandle h, uint32_t base_rank, int device_id, RdmaBootstrapInfo &out) {
     (void)base_rank;
     (void)device_id;
-    out.phy_id = pto::comm::rdma::hns_1825::bootstrap::ResolvePhyId();
-    if (!pto::comm::rdma::hns_1825::bootstrap::ResolveLocalRdmaIp(out.phy_id, out.local_ip, h->rootinfo_path)) {
+    if (!pto::comm::rdma::hns_1825::bootstrap::ResolvePhyId(out.phy_id)) {
+        LOG_ERROR("[comm rank %d] RDMA bootstrap failed to resolve physical device id", h->rank);
+        return false;
+    }
+    if (!pto::comm::rdma::hns_1825::bootstrap::ResolveLocalRdmaIp(out.phy_id, out.local_ip, h->rootinfo_path.c_str())) {
         LOG_ERROR("[comm rank %d] RDMA bootstrap failed to resolve local RoCE IP", h->rank);
         return false;
     }
@@ -938,7 +944,7 @@ static bool init_rdma_workspace(
     }
 
     auto manager = std::make_unique<pto::comm::rdma::RdmaWorkspaceManager>();
-    if (!manager->Init(config, pto::comm::RdmaBackend::HNS_1825)) {
+    if (manager->Init(config) != pto::comm::rdma::WorkspaceInitResult::READY) {
         LOG_ERROR(
             "[comm rank %d] RDMA workspace init failed (rank_id=%u rank_count=%u size=%llu)", h->rank, domain_rank,
             rank_count, static_cast<unsigned long long>(symmetric_size)
