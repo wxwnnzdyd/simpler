@@ -28,6 +28,21 @@ from .toolchain import (
 
 logger = logging.getLogger(__name__)
 
+_TRUE_CMAKE_BOOLS = {"1", "ON", "TRUE", "YES", "Y"}
+_FALSE_CMAKE_BOOLS = {"0", "OFF", "FALSE", "NO", "N"}
+
+
+def _cmake_bool_env_enabled(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().upper()
+    if normalized in _TRUE_CMAKE_BOOLS:
+        return True
+    if normalized in _FALSE_CMAKE_BOOLS:
+        return False
+    return default
+
 
 class KernelCompiler:
     """
@@ -102,6 +117,11 @@ class KernelCompiler:
         if not self._sanitizers or not toolchain.is_host:
             return []
         return [f"-fsanitize={self._sanitizers}", "-fno-omit-frame-pointer", "-O1"]
+
+    def _incore_feature_defines(self) -> list[str]:
+        if self.platform == "a5" and _cmake_bool_env_enabled("SIMPLER_ENABLE_PTO_RDMA_WORKSPACE", default=False):
+            return ["-DPTO_RDMA_SUPPORTED", "-DPTO_RDMA_BACKEND_HNS_1825_SUPPORTED"]
+        return []
 
     def get_platform_include_dirs(self) -> list[str]:
         """
@@ -358,6 +378,7 @@ class KernelCompiler:
 
         # Build command from toolchain
         cmd = [self.ccec.cxx_path] + self.ccec.get_compile_flags(core_type=core_type)
+        cmd += self._incore_feature_defines()
         cmd.extend([f"-I{pto_include}", f"-I{pto_pto_include}"])
 
         for inc_dir in self.get_incore_include_dirs():
@@ -557,6 +578,7 @@ class KernelCompiler:
         # Build command from toolchain
         cmd = [self.gxx15.cxx_path] + self.gxx15.get_compile_flags(core_type=core_type)
         cmd += self._sanitizer_flags(self.gxx15)
+        cmd += self._incore_feature_defines()
 
         # Add PTO ISA header paths if provided
         if pto_isa_root:

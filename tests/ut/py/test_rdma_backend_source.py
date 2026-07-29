@@ -11,6 +11,17 @@ ASYNC_WAIT = REPO_ROOT / "src/a5/runtime/tensormap_and_ringbuffer/runtime/pto_as
 MAILBOX_TYPES = REPO_ROOT / "src/a5/runtime/tensormap_and_ringbuffer/runtime/aicore_completion_mailbox_types.h"
 HOST_CMAKE = REPO_ROOT / "src/a5/platform/onboard/host/CMakeLists.txt"
 HOST_COMM = REPO_ROOT / "src/a5/platform/onboard/host/comm_hccl.cpp"
+KERNEL_COMPILER = REPO_ROOT / "simpler_setup/kernel_compiler.py"
+RDMA_DEMO = REPO_ROOT / "examples/a5/tensormap_and_ringbuffer/rdma_deferred_completion_demo"
+RDMA_DEMO_COMMON = RDMA_DEMO / "kernels/aiv/rdma_deferred_completion_common.h"
+RDMA_DEMO_TGET = RDMA_DEMO / "kernels/aiv/kernel_rdma_deferred_completion_tget.cpp"
+RDMA_DEMO_TPUT = RDMA_DEMO / "kernels/aiv/kernel_rdma_deferred_completion_tput.cpp"
+RDMA_DEMO_CONSUMER = RDMA_DEMO / "kernels/aiv/kernel_rdma_deferred_completion_consumer.cpp"
+RDMA_DEMO_ORCH = RDMA_DEMO / "kernels/orchestration/rdma_deferred_completion_orch.cpp"
+RDMA_DEMO_TEST = RDMA_DEMO / "test_rdma_deferred_completion_demo.py"
+RDMA_SCHEDULER = (
+    REPO_ROOT / "src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/rdma/rdma_completion_scheduler.h"
+)
 
 
 def test_rdma_kernel_backend_exposes_deferred_adapter_contract() -> None:
@@ -81,3 +92,66 @@ def test_a5_comm_hccl_uses_mr1374_rdma_host_api_shape() -> None:
     assert "manager->Init(config)" in source
     assert "WorkspaceInitResult::READY" in source
     assert "RdmaBackend::HNS_1825" not in source
+
+
+def test_kernel_compiler_forwards_rdma_workspace_macros_to_incore_builds() -> None:
+    source = KERNEL_COMPILER.read_text()
+
+    assert '"SIMPLER_ENABLE_PTO_RDMA_WORKSPACE"' in source
+    assert '"-DPTO_RDMA_SUPPORTED"' in source
+    assert '"-DPTO_RDMA_BACKEND_HNS_1825_SUPPORTED"' in source
+    assert "cmd += self._incore_feature_defines()" in source
+
+
+def test_rdma_deferred_completion_demo_uses_rdma_adapter_and_remote_mr_base() -> None:
+    common = RDMA_DEMO_COMMON.read_text()
+    tget = RDMA_DEMO_TGET.read_text()
+    tput = RDMA_DEMO_TPUT.read_text()
+    consumer = RDMA_DEMO_CONSUMER.read_text()
+    orch = RDMA_DEMO_ORCH.read_text()
+    test_py = RDMA_DEMO_TEST.read_text()
+
+    assert "backend/rdma/rdma_completion_kernel.h" in common
+    assert "PTO_RDMA_SUPPORTED" in common
+    assert "pto2::rdma_backend::peer_mr_base_addr" in common
+    assert "comm_ctx->windowsIn[peer]" not in common
+    assert "RdmaScratchTile" in common
+    assert "pto::comm::sdma::UB_ALIGN_SIZE" in common
+    assert "rdma_scratch_tile" in common
+    assert "RdmaTget(" in tget
+    assert "RdmaTput(" in tput
+    assert "rdma_scratch" in tget
+    assert "rdma_scratch" in tput
+    assert "comm_ctx->rankId" in tget
+    assert "comm_ctx->rankId" in tput
+    assert tget.count("send_request_entry") >= 2
+    assert tput.count("send_request_entry") >= 2
+    assert "event.Wait" not in tget
+    assert "event.Wait" not in tput
+    assert "BuildAsyncSession<pto::comm::DmaEngine::RDMA>" in consumer
+    assert "rdma_scratch" in consumer
+    assert "readback_session, 2" in consumer
+    assert "rt_submit_aiv_task(0" in orch
+    assert "rt_submit_aiv_task(1" in orch
+    assert "rt_submit_aiv_task(2" in orch
+    assert "rdma_workspace_enabled" in test_py
+    assert "SIMPLER_ENABLE_PTO_RDMA_WORKSPACE" in test_py
+    assert "pytest.skip" in test_py
+
+
+def test_rdma_scheduler_abi_matches_mr1374_workspace_and_hns1825_contexts() -> None:
+    source = RDMA_SCHEDULER.read_text()
+
+    assert "uint32_t rank_count;" in source
+    assert "uint32_t reserved;" in source
+    assert "uint32_t local_token_id" not in source
+    assert "static_assert(sizeof(RdmaWqCtx) == 96" in source
+    assert "static_assert(sizeof(RdmaCqCtx) == 64" in source
+    assert "struct Hns1825Cqe" in source
+    assert "static_assert(sizeof(Hns1825Cqe) == 32" in source
+    assert "uint32_t cqe_size;" in source
+    assert "1u << cq_ctx.cqe" not in source
+    assert "db_sw_addr" in source
+    assert "kHns1825CqeMaxGenNum" in source
+    assert "owner_id_qpn" in source
+    assert "op_sr_wqebb" in source

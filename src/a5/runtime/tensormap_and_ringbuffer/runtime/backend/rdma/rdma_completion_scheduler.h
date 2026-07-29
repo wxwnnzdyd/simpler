@@ -24,7 +24,8 @@ namespace pto2::rdma_backend {
 
 inline constexpr uint32_t kHandleRankIdShift = 32;
 inline constexpr uint32_t kCqeBytes = 64;
-inline constexpr uint32_t kMaxCqeShift = 12;
+inline constexpr uint32_t kHns1825CqeMaxGenNum = 1024;
+inline constexpr uint32_t kCqUpdateCiMask = 0xffffffu;
 inline constexpr uint32_t kRdmaWorkspaceMagic = 0x52444d41u;
 inline constexpr uint32_t kRdmaWorkspaceVersion = 1u;
 inline constexpr uint32_t kRdmaBackendHns1825 = 1u;
@@ -41,8 +42,8 @@ struct RdmaInfo {
     uint32_t version;
     uint32_t backend;
     uint32_t qp_num;
-    uint32_t local_token_id;
     uint32_t rank_count;
+    uint32_t reserved;
     uint64_t sq_ptr;
     uint64_t rq_ptr;
     uint64_t scq_ptr;
@@ -53,32 +54,54 @@ struct RdmaInfo {
 struct RdmaWqCtx {
     uint32_t wqn;
     uint64_t buf_addr;
-    uint32_t wqe_shift_size;
+    uint32_t wqe_size;
     uint32_t depth;
     uint64_t head_addr;
     uint64_t tail_addr;
     RdmaDbMode db_mode;
     uint64_t db_addr;
     uint32_t sl;
+    uint64_t amo_addr;
+    uint32_t amo_lkey;
+    uint64_t db_sw_addr;
+    uint8_t mtu_shift;
+    uint8_t reserved[7];
 };
 
 struct RdmaCqCtx {
     uint32_t cqn;
     uint64_t buf_addr;
-    uint32_t cqe_shift_size;
+    uint32_t cqe_size;
     uint32_t depth;
     uint64_t head_addr;
     uint64_t tail_addr;
     RdmaDbMode db_mode;
     uint64_t db_addr;
+    uint64_t db_sw_addr;
+};
+
+struct Hns1825Cqe {
+    uint32_t owner_id_qpn;
+    uint32_t op_sr_wqebb;
+    uint32_t byte_cnt;
+    uint32_t imm_data;
+    uint32_t rsvd_dw5;
+    uint32_t wqe_num;
+    uint32_t vlan_queue_index;
+    uint8_t syndrome;
+    uint8_t rsvd;
+    uint16_t wqe_counter;
 };
 
 static_assert(sizeof(RdmaInfo) == 64, "RDMA info ABI drift");
 static_assert(offsetof(RdmaInfo, sq_ptr) == 24, "RDMA info ABI drift");
-static_assert(sizeof(RdmaWqCtx) == 64, "RDMA WQ context ABI drift");
+static_assert(sizeof(RdmaWqCtx) == 96, "RDMA WQ context ABI drift");
 static_assert(offsetof(RdmaWqCtx, db_addr) == 48, "RDMA WQ context ABI drift");
-static_assert(sizeof(RdmaCqCtx) == 56, "RDMA CQ context ABI drift");
+static_assert(offsetof(RdmaWqCtx, db_sw_addr) == 80, "RDMA WQ context ABI drift");
+static_assert(sizeof(RdmaCqCtx) == 64, "RDMA CQ context ABI drift");
 static_assert(offsetof(RdmaCqCtx, db_addr) == 48, "RDMA CQ context ABI drift");
+static_assert(offsetof(RdmaCqCtx, db_sw_addr) == 56, "RDMA CQ context ABI drift");
+static_assert(sizeof(Hns1825Cqe) == 32, "RDMA CQE ABI drift");
 
 inline uint64_t encode_rdma_event_handle(uint32_t dest_rank, uint32_t target_head) {
     return (static_cast<uint64_t>(dest_rank) << kHandleRankIdShift) | static_cast<uint64_t>(target_head);
@@ -108,6 +131,8 @@ inline bool has_reached(uint32_t current, uint32_t target) { return static_cast<
 
 inline bool is_power_of_two(uint32_t value) { return value != 0 && (value & (value - 1u)) == 0; }
 
+inline uint32_t htobe32(uint32_t value) { return __builtin_bswap32(value); }
+
 inline uint32_t load_device_u32(uint64_t addr) {
     auto *ptr = reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(addr));
     return __atomic_load_n(ptr, __ATOMIC_ACQUIRE);
@@ -123,18 +148,12 @@ inline void store_device_u32(uint64_t addr, uint32_t value) {
 #endif
 }
 
-inline uint32_t load_cqe_dw0(uint64_t cqe_addr) {
-    auto *ptr = reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(cqe_addr));
-    cache_invalidate_range(reinterpret_cast<const void *>(cache_line(ptr)), PTO2_ALIGN_SIZE);
-    return __atomic_load_n(ptr, __ATOMIC_ACQUIRE);
-}
-
 inline void update_tail_info(const RdmaCqCtx &cq_ctx, const RdmaWqCtx &wq_ctx, uint32_t cur_tail) {
     if (cq_ctx.tail_addr != 0) {
         store_device_u32(cq_ctx.tail_addr, cur_tail);
     }
-    if (cq_ctx.db_addr != 0) {
-        store_device_u32(cq_ctx.db_addr, cur_tail & 0xFFFFFFu);
+    if (cq_ctx.db_sw_addr != 0) {
+        store_device_u32(cq_ctx.db_sw_addr, htobe32(cur_tail & kCqUpdateCiMask));
     }
     if (wq_ctx.tail_addr != 0) {
         store_device_u32(wq_ctx.tail_addr, cur_tail);
@@ -182,19 +201,21 @@ inline CompletionPollResult poll_rdma_event_handle(uint64_t event_handle, uint64
 
     RdmaCqCtx cq_ctx{};
     cq_ctx.buf_addr = __atomic_load_n(&cq_entry->buf_addr, __ATOMIC_ACQUIRE);
-    cq_ctx.cqe_shift_size = __atomic_load_n(&cq_entry->cqe_shift_size, __ATOMIC_ACQUIRE);
+    cq_ctx.cqe_size = __atomic_load_n(&cq_entry->cqe_size, __ATOMIC_ACQUIRE);
     cq_ctx.depth = __atomic_load_n(&cq_entry->depth, __ATOMIC_ACQUIRE);
     cq_ctx.tail_addr = __atomic_load_n(&cq_entry->tail_addr, __ATOMIC_ACQUIRE);
     cq_ctx.db_addr = __atomic_load_n(&cq_entry->db_addr, __ATOMIC_ACQUIRE);
+    cq_ctx.db_sw_addr = __atomic_load_n(&cq_entry->db_sw_addr, __ATOMIC_ACQUIRE);
 
     RdmaWqCtx wq_ctx{};
     wq_ctx.tail_addr = __atomic_load_n(&wq_entry->tail_addr, __ATOMIC_ACQUIRE);
-    if (cq_ctx.buf_addr == 0 || cq_ctx.tail_addr == 0 || cq_ctx.cqe_shift_size > kMaxCqeShift ||
-        !is_power_of_two(cq_ctx.depth)) {
+    const uint32_t cqe_size = cq_ctx.cqe_size == 0 ? kCqeBytes : cq_ctx.cqe_size;
+    const uint32_t cq_ring = cq_ctx.depth + kHns1825CqeMaxGenNum;
+    if (cqe_size < sizeof(Hns1825Cqe) || cqe_size > kCqeBytes || cq_ctx.buf_addr == 0 || cq_ctx.tail_addr == 0 ||
+        cq_ctx.db_sw_addr == 0 || !is_power_of_two(cq_ring)) {
         return {CompletionPollState::FAILED, PTO2_ERROR_ASYNC_COMPLETION_INVALID};
     }
 
-    const uint32_t cqe_size = 1u << cq_ctx.cqe_shift_size;
     uint32_t cur_tail = load_device_u32(cq_ctx.tail_addr);
     if (has_reached(cur_tail, target_head)) {
         return {CompletionPollState::READY, PTO2_ERROR_NONE};
@@ -203,17 +224,24 @@ inline CompletionPollResult poll_rdma_event_handle(uint64_t event_handle, uint64
     uint32_t next_tail = cur_tail;
     while (!has_reached(next_tail, target_head)) {
         const uint64_t cqe_addr =
-            cq_ctx.buf_addr + static_cast<uint64_t>(cqe_size) * static_cast<uint64_t>(next_tail & (cq_ctx.depth - 1));
-        const uint32_t dw0 = load_cqe_dw0(cqe_addr);
-        const bool valid_owner = ((next_tail / cq_ctx.depth) & 1u) == 0;
-        const bool owner = ((dw0 >> 2) & 1u) != 0;
-        if (owner != valid_owner) {
+            cq_ctx.buf_addr + static_cast<uint64_t>(cqe_size) * static_cast<uint64_t>(next_tail & (cq_ring - 1));
+        auto *cqe = reinterpret_cast<volatile Hns1825Cqe *>(static_cast<uintptr_t>(cqe_addr));
+        invalidate_object(cqe, sizeof(*cqe));
+        const uint32_t owner_id_qpn = __atomic_load_n(&cqe->owner_id_qpn, __ATOMIC_ACQUIRE);
+        const uint32_t op_sr_wqebb = __atomic_load_n(&cqe->op_sr_wqebb, __ATOMIC_ACQUIRE);
+        constexpr uint32_t kOwnerShift = 31;
+        constexpr uint32_t kCqeOpcodeShift = 27;
+        constexpr uint32_t kCqeOpcodeMask = 0x1f;
+        constexpr uint32_t kCqeOptypeError = 0x1e;
+        constexpr uint32_t kCqeOptypeInvalid = 0x1f;
+        const uint32_t cqe_type = (op_sr_wqebb >> kCqeOpcodeShift) & kCqeOpcodeMask;
+        const bool owner = (owner_id_qpn & (1u << kOwnerShift)) != 0;
+        const bool expected_owner = ((next_tail & cq_ring) == 0);
+        if (cqe_type == kCqeOptypeInvalid || owner == expected_owner) {
             break;
         }
 
-        const uint8_t substatus = static_cast<uint8_t>((dw0 >> 16) & 0xFFu);
-        const uint8_t status = static_cast<uint8_t>((dw0 >> 24) & 0xFFu);
-        if (status != 0 || substatus != 0) {
+        if (cqe_type == kCqeOptypeError) {
             ++next_tail;
             update_tail_info(cq_ctx, wq_ctx, next_tail);
             return {CompletionPollState::FAILED, PTO2_ERROR_ASYNC_COMPLETION_INVALID};

@@ -7,18 +7,16 @@
 namespace {
 
 using pto2::rdma_backend::encode_rdma_event_handle;
+using pto2::rdma_backend::Hns1825Cqe;
 using pto2::rdma_backend::is_rdma_error_handle;
 using pto2::rdma_backend::kCqeBytes;
 using pto2::rdma_backend::poll_rdma_event_handle;
 using pto2::rdma_backend::RdmaCqCtx;
 using pto2::rdma_backend::RdmaWqCtx;
 
-constexpr uint32_t kTestCqDepth = 64;
-constexpr uint32_t kTestCqeShift = 6;
+constexpr uint32_t kTestCqDepth = 1024;
 
-struct alignas(kCqeBytes) TestRdmaCqe {
-    uint32_t dw[16];
-};
+struct alignas(kCqeBytes) TestRdmaCqe : Hns1825Cqe {};
 
 struct TestRdmaWorkspace {
     pto2::rdma_backend::RdmaInfo info;
@@ -26,20 +24,32 @@ struct TestRdmaWorkspace {
     RdmaCqCtx scq[2];
     uint32_t sq_tail[2];
     uint32_t cq_tail[2];
-    uint32_t cq_doorbell[2];
+    uint32_t cq_sw_doorbell[2];
     TestRdmaCqe scq_entries[2][kTestCqDepth];
 };
 
-inline bool test_cqe_ready_owner(uint32_t cqe_seq) { return ((cqe_seq / kTestCqDepth) & 1u) == 0; }
-
-inline uint32_t encode_test_cqe_dw0(uint32_t cqe_seq, uint8_t status, uint8_t substatus) {
-    const uint32_t owner = test_cqe_ready_owner(cqe_seq) ? 1u : 0u;
-    return (owner << 2) | (static_cast<uint32_t>(substatus) << 16) | (static_cast<uint32_t>(status) << 24);
+inline bool test_cqe_expected_owner(uint32_t cqe_seq) {
+    return (cqe_seq & (kTestCqDepth + pto2::rdma_backend::kHns1825CqeMaxGenNum)) == 0;
 }
 
-inline uint32_t encode_test_pending_cqe_dw0(uint32_t cqe_seq) {
-    const uint32_t owner = test_cqe_ready_owner(cqe_seq) ? 0u : 1u;
-    return owner << 2;
+inline void encode_test_cqe(TestRdmaCqe &cqe, uint32_t cqe_seq, bool error) {
+    constexpr uint32_t kOwnerShift = 31;
+    constexpr uint32_t kCqeOpcodeShift = 27;
+    constexpr uint32_t kCqeOptypeSend = 0;
+    constexpr uint32_t kCqeOptypeError = 0x1e;
+    const uint32_t owner = test_cqe_expected_owner(cqe_seq) ? 0u : 1u;
+    cqe.owner_id_qpn = owner << kOwnerShift;
+    cqe.op_sr_wqebb = (error ? kCqeOptypeError : kCqeOptypeSend) << kCqeOpcodeShift;
+    cqe.syndrome = error ? 9 : 0;
+}
+
+inline void encode_test_pending_cqe(TestRdmaCqe &cqe, uint32_t cqe_seq) {
+    constexpr uint32_t kOwnerShift = 31;
+    constexpr uint32_t kCqeOpcodeShift = 27;
+    constexpr uint32_t kCqeOptypeSend = 0;
+    const uint32_t owner = test_cqe_expected_owner(cqe_seq) ? 1u : 0u;
+    cqe.owner_id_qpn = owner << kOwnerShift;
+    cqe.op_sr_wqebb = kCqeOptypeSend << kCqeOpcodeShift;
 }
 
 struct SchedulerWorkspaceFixture {
@@ -56,16 +66,16 @@ struct SchedulerWorkspaceFixture {
         ws.info.scq_ptr = reinterpret_cast<uint64_t>(&ws.scq[0]);
         for (uint32_t rank = 0; rank < ws.info.rank_count; ++rank) {
             RdmaWqCtx &sq = ws.sq[rank];
-            sq.wqe_shift_size = kTestCqeShift;
+            sq.wqe_size = kCqeBytes;
             sq.depth = kTestCqDepth;
             sq.tail_addr = reinterpret_cast<uint64_t>(&ws.sq_tail[rank]);
 
             RdmaCqCtx &cq = ws.scq[rank];
             cq.buf_addr = reinterpret_cast<uint64_t>(&ws.scq_entries[rank][0]);
-            cq.cqe_shift_size = kTestCqeShift;
+            cq.cqe_size = kCqeBytes;
             cq.depth = kTestCqDepth;
             cq.tail_addr = reinterpret_cast<uint64_t>(&ws.cq_tail[rank]);
-            cq.db_addr = reinterpret_cast<uint64_t>(&ws.cq_doorbell[rank]);
+            cq.db_sw_addr = reinterpret_cast<uint64_t>(&ws.cq_sw_doorbell[rank]);
         }
     }
 
@@ -120,43 +130,43 @@ TEST(A5RdmaCompletionScheduler, TailAlreadyAtTargetIsReady) {
     auto result = poll_rdma_event_handle(encode_rdma_event_handle(1, 7), fixture.addr());
     EXPECT_EQ(result.state, CompletionPollState::READY);
     EXPECT_EQ(result.error_code, PTO2_ERROR_NONE);
-    EXPECT_EQ(fixture.ws.cq_doorbell[1], 0u);
+    EXPECT_EQ(fixture.ws.cq_sw_doorbell[1], 0u);
     EXPECT_EQ(fixture.ws.sq_tail[1], 0u);
 }
 
 TEST(A5RdmaCompletionScheduler, OwnerNotReadyReturnsPending) {
     SchedulerWorkspaceFixture fixture;
-    fixture.ws.scq_entries[1][0].dw[0] = encode_test_pending_cqe_dw0(0);
+    encode_test_pending_cqe(fixture.ws.scq_entries[1][0], 0);
 
     auto result = poll_rdma_event_handle(encode_rdma_event_handle(1, 1), fixture.addr());
     EXPECT_EQ(result.state, CompletionPollState::PENDING);
     EXPECT_EQ(result.error_code, PTO2_ERROR_NONE);
     EXPECT_EQ(fixture.ws.cq_tail[1], 0u);
-    EXPECT_EQ(fixture.ws.cq_doorbell[1], 0u);
+    EXPECT_EQ(fixture.ws.cq_sw_doorbell[1], 0u);
     EXPECT_EQ(fixture.ws.sq_tail[1], 0u);
 }
 
 TEST(A5RdmaCompletionScheduler, ReadyCqeAdvancesCqDoorbellAndSqTail) {
     SchedulerWorkspaceFixture fixture;
-    fixture.ws.scq_entries[1][0].dw[0] = encode_test_cqe_dw0(0, 0, 0);
+    encode_test_cqe(fixture.ws.scq_entries[1][0], 0, false);
 
     auto result = poll_rdma_event_handle(encode_rdma_event_handle(1, 1), fixture.addr());
     EXPECT_EQ(result.state, CompletionPollState::READY);
     EXPECT_EQ(result.error_code, PTO2_ERROR_NONE);
     EXPECT_EQ(fixture.ws.cq_tail[1], 1u);
-    EXPECT_EQ(fixture.ws.cq_doorbell[1], 1u);
+    EXPECT_EQ(fixture.ws.cq_sw_doorbell[1], __builtin_bswap32(1u));
     EXPECT_EQ(fixture.ws.sq_tail[1], 1u);
 }
 
 TEST(A5RdmaCompletionScheduler, CqeErrorFailsAfterRetiringCqe) {
     SchedulerWorkspaceFixture fixture;
-    fixture.ws.scq_entries[1][0].dw[0] = encode_test_cqe_dw0(0, 2, 9);
+    encode_test_cqe(fixture.ws.scq_entries[1][0], 0, true);
 
     auto result = poll_rdma_event_handle(encode_rdma_event_handle(1, 1), fixture.addr());
     EXPECT_EQ(result.state, CompletionPollState::FAILED);
     EXPECT_EQ(result.error_code, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
     EXPECT_EQ(fixture.ws.cq_tail[1], 1u);
-    EXPECT_EQ(fixture.ws.cq_doorbell[1], 1u);
+    EXPECT_EQ(fixture.ws.cq_sw_doorbell[1], __builtin_bswap32(1u));
     EXPECT_EQ(fixture.ws.sq_tail[1], 1u);
 }
 
