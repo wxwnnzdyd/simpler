@@ -89,6 +89,8 @@ def test_a5_comm_hccl_uses_mr1374_rdma_host_api_shape() -> None:
     assert "ResolvePhyId(out.phy_id)" in source
     assert "ResolveLocalRdmaIp(" in source
     assert "ResolveLocalRdmaIp(out.phy_id, out.local_ip)" in source
+    assert "rdma_resolve_local_ip_from_rootinfo(out.phy_id, out.local_ip)" in source
+    assert "\\\"addr\\\"" in source
     assert "manager->Init(config)" in source
     assert "WorkspaceInitResult::READY" in source
     assert "RdmaBackend::HNS_1825" not in source

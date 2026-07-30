@@ -29,6 +29,7 @@
 #include "common/unified_log.h"
 
 #include <chrono>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -883,6 +884,87 @@ static bool parse_u16_env(const char *name, uint16_t &out) {
     return true;
 }
 
+static bool rdma_extract_uint_after_key(
+    const std::string &s, const std::string &key, size_t from, uint32_t &value, size_t &key_pos
+) {
+    size_t p = s.find(key, from);
+    if (p == std::string::npos) return false;
+    key_pos = p;
+    p += key.size();
+    while (p < s.size() && (s[p] == ':' || std::isspace(static_cast<unsigned char>(s[p])) || s[p] == '"'))
+        ++p;
+    size_t start = p;
+    while (p < s.size() && std::isdigit(static_cast<unsigned char>(s[p])))
+        ++p;
+    if (p == start) return false;
+    value = static_cast<uint32_t>(std::strtoul(s.substr(start, p - start).c_str(), nullptr, 10));
+    return true;
+}
+
+static bool rdma_extract_quoted_after_key(
+    const std::string &s, const std::string &key, size_t from, std::string &out, size_t limit
+) {
+    size_t p = s.find(key, from);
+    if (p == std::string::npos || p >= limit) return false;
+    p = s.find('"', p + key.size());
+    if (p == std::string::npos || p >= limit) return false;
+    size_t start = p + 1;
+    size_t end = s.find('"', start);
+    if (end == std::string::npos || end > limit) return false;
+    out = s.substr(start, end - start);
+    return true;
+}
+
+static bool rdma_looks_like_ipv4(const std::string &value) {
+    int dots = 0;
+    for (char c : value) {
+        if (c == '.') {
+            ++dots;
+        } else if (!std::isdigit(static_cast<unsigned char>(c))) {
+            return false;
+        }
+    }
+    return dots == 3 && !value.empty();
+}
+
+static bool rdma_resolve_local_ip_from_rootinfo(uint32_t phy_id, std::string &ip) {
+    std::ifstream f(pto::comm::rdma::hns_1825::bootstrap::kDefaultRootInfoPath);
+    if (!f.is_open()) return false;
+
+    std::stringstream ss;
+    ss << f.rdbuf();
+    const std::string s = ss.str();
+    if (s.empty()) return false;
+
+    const std::string device_key = "\"device_id\"";
+    const std::string addr_key = "\"addr\"";
+    size_t scan = 0;
+    while (scan < s.size()) {
+        uint32_t dev = 0;
+        size_t dev_key_pos = 0;
+        if (!rdma_extract_uint_after_key(s, device_key, scan, dev, dev_key_pos)) break;
+
+        size_t next_dev = s.find(device_key, dev_key_pos + device_key.size());
+        size_t block_end = next_dev == std::string::npos ? s.size() : next_dev;
+        if (dev == phy_id) {
+            size_t cur = dev_key_pos;
+            std::string candidate;
+            while (rdma_extract_quoted_after_key(s, addr_key, cur, candidate, block_end)) {
+                if (rdma_looks_like_ipv4(candidate)) {
+                    ip = candidate;
+                    return true;
+                }
+                size_t adv = s.find(addr_key, cur);
+                if (adv == std::string::npos || adv >= block_end) break;
+                cur = adv + addr_key.size();
+            }
+            return false;
+        }
+        scan = block_end;
+    }
+    return false;
+}
+
 static bool resolve_rdma_bootstrap(CommHandle h, uint32_t base_rank, int device_id, RdmaBootstrapInfo &out) {
     (void)base_rank;
     (void)device_id;
@@ -890,7 +972,8 @@ static bool resolve_rdma_bootstrap(CommHandle h, uint32_t base_rank, int device_
         LOG_ERROR("[comm rank %d] RDMA bootstrap failed to resolve physical device id", h->rank);
         return false;
     }
-    if (!pto::comm::rdma::hns_1825::bootstrap::ResolveLocalRdmaIp(out.phy_id, out.local_ip)) {
+    if (!pto::comm::rdma::hns_1825::bootstrap::ResolveLocalRdmaIp(out.phy_id, out.local_ip) &&
+        !rdma_resolve_local_ip_from_rootinfo(out.phy_id, out.local_ip)) {
         LOG_ERROR("[comm rank %d] RDMA bootstrap failed to resolve local RoCE IP", h->rank);
         return false;
     }
