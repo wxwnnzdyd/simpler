@@ -108,7 +108,11 @@ def test_kernel_compiler_adds_ascend_device_headers_for_rdma_backend_headers() -
 
     assert "get_ascend_incore_include_dirs" in source
     assert 'root / "asc" / "include" / "interface"' in source
+    assert 'root / "asc" / "include" / "basic_api" / "interface"' in source
     assert 'root / "ascendc" / "include" / "basic_api" / "interface"' in source
+    assert '"kernel_operator_sys_var_intf.h"' in source
+    assert '"kernel_operator_sys_var_intf_impl.h"' in source
+    assert ".rglob(header)" in source
     assert "for inc_dir in self.get_ascend_incore_include_dirs():" in source
 
 

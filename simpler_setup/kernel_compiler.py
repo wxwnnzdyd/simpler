@@ -83,6 +83,7 @@ class KernelCompiler:
         """
         self.platform = platform
         self.project_root = PROJECT_ROOT
+        self._ascend_incore_include_dirs_cache: Optional[list[str]] = None
 
         # Map platform to architecture directory
         if platform in ("a2a3", "a2a3sim"):
@@ -180,6 +181,8 @@ class KernelCompiler:
 
     def get_ascend_incore_include_dirs(self) -> list[str]:
         """CANN device headers used by PTO-ISA backend-only includes."""
+        if self._ascend_incore_include_dirs_cache is not None:
+            return self._ascend_incore_include_dirs_cache
         ascend_home = env_manager.get("ASCEND_HOME_PATH")
         if not ascend_home:
             return []
@@ -197,12 +200,26 @@ class KernelCompiler:
                     root / "asc" / "include",
                     root / "asc" / "include" / "interface",
                     root / "asc" / "include" / "basic_api",
+                    root / "asc" / "include" / "basic_api" / "interface",
                     root / "ascendc" / "include",
                     root / "ascendc" / "include" / "basic_api",
                     root / "ascendc" / "include" / "basic_api" / "interface",
                 ]
             )
-        return [str(path) for path in candidates if path.is_dir()]
+        for header in ("kernel_operator_sys_var_intf.h", "kernel_operator_sys_var_intf_impl.h"):
+            try:
+                candidates.extend(path.parent for path in Path(ascend_home).rglob(header))
+            except OSError:
+                continue
+
+        include_dirs = []
+        seen = set()
+        for path in candidates:
+            if path.is_dir() and path not in seen:
+                include_dirs.append(str(path))
+                seen.add(path)
+        self._ascend_incore_include_dirs_cache = include_dirs
+        return include_dirs
 
     def _get_orchestration_config(self, runtime_name: str) -> tuple[list[str], list[str]]:
         """
