@@ -28,6 +28,7 @@
 
 #include "common/unified_log.h"
 
+#include <array>
 #include <chrono>
 #include <cctype>
 #include <cstdio>
@@ -927,6 +928,63 @@ static bool rdma_looks_like_ipv4(const std::string &value) {
     return dots == 3 && !value.empty();
 }
 
+static bool rdma_first_ipv4_in_line(const std::string &line, std::string &ip) {
+    size_t p = 0;
+    while (p < line.size()) {
+        while (p < line.size() && !std::isdigit(static_cast<unsigned char>(line[p])))
+            ++p;
+        size_t start = p;
+        while (p < line.size() && (std::isdigit(static_cast<unsigned char>(line[p])) || line[p] == '.'))
+            ++p;
+        if (p > start) {
+            std::string candidate = line.substr(start, p - start);
+            if (rdma_looks_like_ipv4(candidate) && candidate != "255.255.255.0") {
+                ip = candidate;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool rdma_resolve_local_ip_from_hccn_tool(int device_id, std::string &ip) {
+    if (device_id < 0) return false;
+
+    char cmd[256];
+    std::snprintf(
+        cmd, sizeof(cmd), "/usr/local/Ascend/driver/tools/hccn_tool -g -dev_info -i %d 2>/dev/null", device_id
+    );
+    std::array<char, 512> buffer{};
+    std::string output;
+    FILE *pipe = popen(cmd, "r");
+    if (pipe != nullptr) {
+        while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+            output += buffer.data();
+        }
+        pclose(pipe);
+    }
+    if (output.empty()) {
+        std::snprintf(cmd, sizeof(cmd), "hccn_tool -g -dev_info -i %d 2>/dev/null", device_id);
+        pipe = popen(cmd, "r");
+        if (pipe != nullptr) {
+            while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+                output += buffer.data();
+            }
+            pclose(pipe);
+        }
+    }
+
+    size_t pos = 0;
+    while (pos < output.size()) {
+        size_t nl = output.find('\n', pos);
+        if (nl == std::string::npos) nl = output.size();
+        std::string line = output.substr(pos, nl - pos);
+        if (line.find('|') != std::string::npos && rdma_first_ipv4_in_line(line, ip)) return true;
+        pos = nl + 1;
+    }
+    return false;
+}
+
 static bool rdma_resolve_local_ip_from_rootinfo(uint32_t phy_id, std::string &ip) {
     std::ifstream f(pto::comm::rdma::hns_1825::bootstrap::kDefaultRootInfoPath);
     if (!f.is_open()) return false;
@@ -967,12 +1025,12 @@ static bool rdma_resolve_local_ip_from_rootinfo(uint32_t phy_id, std::string &ip
 
 static bool resolve_rdma_bootstrap(CommHandle h, uint32_t base_rank, int device_id, RdmaBootstrapInfo &out) {
     (void)base_rank;
-    (void)device_id;
     if (!pto::comm::rdma::hns_1825::bootstrap::ResolvePhyId(out.phy_id)) {
         LOG_ERROR("[comm rank %d] RDMA bootstrap failed to resolve physical device id", h->rank);
         return false;
     }
     if (!pto::comm::rdma::hns_1825::bootstrap::ResolveLocalRdmaIp(out.phy_id, out.local_ip) &&
+        !rdma_resolve_local_ip_from_hccn_tool(device_id, out.local_ip) &&
         !rdma_resolve_local_ip_from_rootinfo(out.phy_id, out.local_ip)) {
         LOG_ERROR("[comm rank %d] RDMA bootstrap failed to resolve local RoCE IP", h->rank);
         return false;
