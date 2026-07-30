@@ -103,6 +103,15 @@ def test_kernel_compiler_forwards_rdma_workspace_macros_to_incore_builds() -> No
     assert "cmd += self._incore_feature_defines()" in source
 
 
+def test_kernel_compiler_adds_ascend_device_headers_for_rdma_backend_headers() -> None:
+    source = KERNEL_COMPILER.read_text()
+
+    assert "get_ascend_incore_include_dirs" in source
+    assert 'root / "asc" / "include" / "interface"' in source
+    assert 'root / "ascendc" / "include" / "basic_api" / "interface"' in source
+    assert "for inc_dir in self.get_ascend_incore_include_dirs():" in source
+
+
 def test_rdma_deferred_completion_demo_uses_rdma_adapter_and_remote_mr_base() -> None:
     common = RDMA_DEMO_COMMON.read_text()
     tget = RDMA_DEMO_TGET.read_text()

@@ -178,6 +178,32 @@ class KernelCompiler:
         """
         return [str(Path(__file__).resolve().parent / "incore")]
 
+    def get_ascend_incore_include_dirs(self) -> list[str]:
+        """CANN device headers used by PTO-ISA backend-only includes."""
+        ascend_home = env_manager.get("ASCEND_HOME_PATH")
+        if not ascend_home:
+            return []
+        roots = [Path(ascend_home)]
+        roots += [Path(ascend_home) / arch for arch in ("aarch64-linux", "x86_64-linux")]
+
+        candidates: list[Path] = []
+        for root in roots:
+            candidates.extend(
+                [
+                    root / "include",
+                    root / "include" / "external",
+                    root / "include" / "c_api",
+                    root / "include" / "c_api" / "internal",
+                    root / "asc" / "include",
+                    root / "asc" / "include" / "interface",
+                    root / "asc" / "include" / "basic_api",
+                    root / "ascendc" / "include",
+                    root / "ascendc" / "include" / "basic_api",
+                    root / "ascendc" / "include" / "basic_api" / "interface",
+                ]
+            )
+        return [str(path) for path in candidates if path.is_dir()]
+
     def _get_orchestration_config(self, runtime_name: str) -> tuple[list[str], list[str]]:
         """
         Load the optional "orchestration" section from a runtime's build_config.py.
@@ -382,6 +408,9 @@ class KernelCompiler:
         cmd.extend([f"-I{pto_include}", f"-I{pto_pto_include}"])
 
         for inc_dir in self.get_incore_include_dirs():
+            cmd.append(f"-I{os.path.abspath(inc_dir)}")
+
+        for inc_dir in self.get_ascend_incore_include_dirs():
             cmd.append(f"-I{os.path.abspath(inc_dir)}")
 
         if extra_include_dirs:
