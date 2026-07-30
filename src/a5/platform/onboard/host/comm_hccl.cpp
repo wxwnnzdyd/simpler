@@ -890,7 +890,7 @@ static bool resolve_rdma_bootstrap(CommHandle h, uint32_t base_rank, int device_
         LOG_ERROR("[comm rank %d] RDMA bootstrap failed to resolve physical device id", h->rank);
         return false;
     }
-    if (!pto::comm::rdma::hns_1825::bootstrap::ResolveLocalRdmaIp(out.phy_id, out.local_ip, h->rootinfo_path.c_str())) {
+    if (!pto::comm::rdma::hns_1825::bootstrap::ResolveLocalRdmaIp(out.phy_id, out.local_ip)) {
         LOG_ERROR("[comm rank %d] RDMA bootstrap failed to resolve local RoCE IP", h->rank);
         return false;
     }
