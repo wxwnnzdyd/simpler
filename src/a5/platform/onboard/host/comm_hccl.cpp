@@ -985,8 +985,14 @@ static bool rdma_resolve_local_ip_from_hccn_tool(int device_id, std::string &ip)
     return false;
 }
 
-static bool rdma_resolve_local_ip_from_rootinfo(uint32_t phy_id, std::string &ip) {
-    std::ifstream f(pto::comm::rdma::hns_1825::bootstrap::kDefaultRootInfoPath);
+static const char *rdma_rootinfo_path() {
+    const char *path = std::getenv("PTO_ROCE_ROOTINFO");
+    if (path != nullptr && *path != '\0') return path;
+    return pto::comm::rdma::hns_1825::bootstrap::kDefaultRootInfoPath;
+}
+
+static bool rdma_resolve_local_ip_from_rootinfo(uint32_t phy_id, std::string &ip, const char *rootinfo_path) {
+    std::ifstream f(rootinfo_path);
     if (!f.is_open()) return false;
 
     std::stringstream ss;
@@ -1029,9 +1035,10 @@ static bool resolve_rdma_bootstrap(CommHandle h, uint32_t base_rank, int device_
         LOG_ERROR("[comm rank %d] RDMA bootstrap failed to resolve physical device id", h->rank);
         return false;
     }
-    if (!pto::comm::rdma::hns_1825::bootstrap::ResolveLocalRdmaIp(out.phy_id, out.local_ip) &&
+    const char *rootinfo_path = rdma_rootinfo_path();
+    if (!pto::comm::rdma::hns_1825::bootstrap::ResolveLocalRdmaIp(out.phy_id, out.local_ip, rootinfo_path) &&
         !rdma_resolve_local_ip_from_hccn_tool(device_id, out.local_ip) &&
-        !rdma_resolve_local_ip_from_rootinfo(out.phy_id, out.local_ip)) {
+        !rdma_resolve_local_ip_from_rootinfo(out.phy_id, out.local_ip, rootinfo_path)) {
         LOG_ERROR("[comm rank %d] RDMA bootstrap failed to resolve local RoCE IP", h->rank);
         return false;
     }

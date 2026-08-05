@@ -1,0 +1,2 @@
+# Empty dependencies file for test_l3_l2_orch_comm_service.
+# This may be replaced when dependencies are built.

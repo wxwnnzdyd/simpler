@@ -1,0 +1,4 @@
+test_a5_rdma_completion_scheduler 13 0.000265948
+test_a5_aicore_completion_mailbox 1 0.00508266
+test_a5_urma_completion_scheduler 0 0
+---
