@@ -17,6 +17,7 @@
 
 #include "aicpu/platform_regs.h"
 #include "aicore_completion_mailbox.h"
+#include "common/unified_log.h"
 #include "pto_completion_token.h"
 #include "pto_runtime_status.h"
 
@@ -165,6 +166,11 @@ inline CompletionPollResult poll_rdma_event_handle(uint64_t event_handle, uint64
         return {CompletionPollState::READY, PTO2_ERROR_NONE};
     }
     if (is_rdma_error_handle(event_handle) || workspace_addr == 0) {
+        LOG_ERROR(
+            "RDMA completion invalid: bad handle/workspace handle=0x%llx workspace=0x%llx is_error=%u",
+            static_cast<unsigned long long>(event_handle), static_cast<unsigned long long>(workspace_addr),
+            static_cast<unsigned>(is_rdma_error_handle(event_handle))
+        );
         return {CompletionPollState::FAILED, PTO2_ERROR_ASYNC_COMPLETION_INVALID};
     }
 
@@ -186,6 +192,13 @@ inline CompletionPollResult poll_rdma_event_handle(uint64_t event_handle, uint64
     const uint64_t scq_ptr = __atomic_load_n(&info->scq_ptr, __ATOMIC_ACQUIRE);
     if (magic != kRdmaWorkspaceMagic || version != kRdmaWorkspaceVersion || backend != kRdmaBackendHns1825 ||
         qp_num == 0 || dest_rank >= rank_count || sq_ptr == 0 || scq_ptr == 0) {
+        LOG_ERROR(
+            "RDMA completion invalid: workspace metadata handle=0x%llx workspace=0x%llx dest_rank=%u target_head=%u "
+            "magic=0x%x version=%u backend=%u qp_num=%u rank_count=%u sq=0x%llx scq=0x%llx",
+            static_cast<unsigned long long>(event_handle), static_cast<unsigned long long>(workspace_addr), dest_rank,
+            target_head, magic, version, backend, qp_num, rank_count, static_cast<unsigned long long>(sq_ptr),
+            static_cast<unsigned long long>(scq_ptr)
+        );
         return {CompletionPollState::FAILED, PTO2_ERROR_ASYNC_COMPLETION_INVALID};
     }
 
@@ -213,6 +226,14 @@ inline CompletionPollResult poll_rdma_event_handle(uint64_t event_handle, uint64
     const uint32_t cq_ring = cq_ctx.depth + kHns1825CqeMaxGenNum;
     if (cqe_size < sizeof(Hns1825Cqe) || cqe_size > kCqeBytes || cq_ctx.buf_addr == 0 || cq_ctx.tail_addr == 0 ||
         cq_ctx.db_sw_addr == 0 || !is_power_of_two(cq_ring)) {
+        LOG_ERROR(
+            "RDMA completion invalid: cq context handle=0x%llx workspace=0x%llx dest_rank=%u target_head=%u "
+            "cqe_size=%u depth=%u cq_ring=%u cq_buf=0x%llx cq_tail=0x%llx cq_db_sw=0x%llx sq_tail=0x%llx",
+            static_cast<unsigned long long>(event_handle), static_cast<unsigned long long>(workspace_addr), dest_rank,
+            target_head, cqe_size, cq_ctx.depth, cq_ring, static_cast<unsigned long long>(cq_ctx.buf_addr),
+            static_cast<unsigned long long>(cq_ctx.tail_addr), static_cast<unsigned long long>(cq_ctx.db_sw_addr),
+            static_cast<unsigned long long>(wq_ctx.tail_addr)
+        );
         return {CompletionPollState::FAILED, PTO2_ERROR_ASYNC_COMPLETION_INVALID};
     }
 
@@ -242,6 +263,14 @@ inline CompletionPollResult poll_rdma_event_handle(uint64_t event_handle, uint64
         }
 
         if (cqe_type == kCqeOptypeError) {
+            const uint8_t syndrome = __atomic_load_n(&cqe->syndrome, __ATOMIC_ACQUIRE);
+            LOG_ERROR(
+                "RDMA completion invalid: CQE error handle=0x%llx workspace=0x%llx dest_rank=%u target_head=%u "
+                "cur_tail=%u next_tail=%u cqe_addr=0x%llx owner_id_qpn=0x%x op_sr_wqebb=0x%x syndrome=0x%x",
+                static_cast<unsigned long long>(event_handle), static_cast<unsigned long long>(workspace_addr),
+                dest_rank, target_head, cur_tail, next_tail, static_cast<unsigned long long>(cqe_addr), owner_id_qpn,
+                op_sr_wqebb, static_cast<unsigned>(syndrome)
+            );
             ++next_tail;
             update_tail_info(cq_ctx, wq_ctx, next_tail);
             return {CompletionPollState::FAILED, PTO2_ERROR_ASYNC_COMPLETION_INVALID};
