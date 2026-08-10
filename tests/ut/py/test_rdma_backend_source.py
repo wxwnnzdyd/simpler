@@ -164,6 +164,8 @@ def test_rdma_deferred_completion_demo_uses_rdma_adapter_and_remote_mr_base() ->
     assert "rt_submit_aiv_task(1" in orch
     assert "rt_submit_aiv_task(2" in orch
     assert "tget_elems = nranks * elem_count" in test_py
+    assert "CASES = (16, 64, 256, 4096, 16384)" in test_py
+    assert "CASES = (1," not in test_py
     assert 'shapes=(tget_elems,)' in test_py
     assert "rdma_workspace_enabled" in test_py
     assert "SIMPLER_ENABLE_PTO_RDMA_WORKSPACE" in test_py

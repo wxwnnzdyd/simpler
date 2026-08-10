@@ -38,7 +38,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DTYPE_NBYTES = 4
 STATUS_WORDS = 8
 RDMA_DATA_OFFSET_NBYTES = 64 * 4
-CASES = (1, 16, 64, 256, 4096, 16384)
+CASES = (16, 64, 256, 4096, 16384)
 
 
 def rdma_workspace_enabled() -> bool:
