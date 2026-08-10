@@ -149,9 +149,16 @@ def test_rdma_deferred_completion_demo_uses_rdma_adapter_and_remote_mr_base() ->
     assert "BuildAsyncSession<pto::comm::DmaEngine::RDMA>" in consumer
     assert "rdma_scratch" in consumer
     assert "readback_session, 2" in consumer
+    assert "TensorCreateInfo tget_output_info" not in orch
+    assert "Tensor tget0_recv = tget_recv.view" in orch
+    assert "Tensor tget1_recv = tget_recv.view" in orch
+    assert "tget0_args.add_output(tget0_recv)" in orch
+    assert "tget1_args.add_output(tget1_recv)" in orch
     assert "rt_submit_aiv_task(0" in orch
     assert "rt_submit_aiv_task(1" in orch
     assert "rt_submit_aiv_task(2" in orch
+    assert "tget_elems = nranks * elem_count" in test_py
+    assert 'shapes=(tget_elems,)' in test_py
     assert "rdma_workspace_enabled" in test_py
     assert "SIMPLER_ENABLE_PTO_RDMA_WORKSPACE" in test_py
     assert "pytest.skip" in test_py

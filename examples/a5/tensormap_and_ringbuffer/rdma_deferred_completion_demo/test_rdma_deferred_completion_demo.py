@@ -138,13 +138,14 @@ def _run_case_on_worker(worker: Worker, chip_handle, elem_count: int, nranks: in
         raise ValueError(f"rdma_deferred_completion_demo needs exactly 2 devices, got {nranks}")
 
     send_nbytes = elem_count * DTYPE_NBYTES
-    tget_nbytes = elem_count * DTYPE_NBYTES
+    tget_elems = nranks * elem_count
+    tget_nbytes = tget_elems * DTYPE_NBYTES
     tput_elems = (nranks + 1) * elem_count
     tput_nbytes = tput_elems * DTYPE_NBYTES
     window_size = max(RDMA_DATA_OFFSET_NBYTES + send_nbytes + tget_nbytes + tput_nbytes, 4 * 1024 * 1024)
 
     send_host = [_send_pattern(rank, elem_count) for rank in range(nranks)]
-    tget_zero = [_zero_float(elem_count) for _ in range(nranks)]
+    tget_zero = [_zero_float(tget_elems) for _ in range(nranks)]
     tput_zero = [_zero_float(tput_elems) for _ in range(nranks)]
     status = [_zero_i32(STATUS_WORDS) for _ in range(nranks)]
 
@@ -161,7 +162,7 @@ def _run_case_on_worker(worker: Worker, chip_handle, elem_count: int, nranks: in
                     nbytes=RDMA_DATA_OFFSET_NBYTES,
                 ),
                 CommBufferSpec(name="send", dtype="float32", count=elem_count, nbytes=send_nbytes),
-                CommBufferSpec(name="tget_recv", dtype="float32", count=elem_count, nbytes=tget_nbytes),
+                CommBufferSpec(name="tget_recv", dtype="float32", count=tget_elems, nbytes=tget_nbytes),
                 CommBufferSpec(name="tput_recv", dtype="float32", count=tput_elems, nbytes=tput_nbytes),
             ],
         ) as handle:
@@ -186,7 +187,7 @@ def _run_case_on_worker(worker: Worker, chip_handle, elem_count: int, nranks: in
                 args.add_tensor(
                     Tensor.make(
                         data=domain.buffer_ptrs["tget_recv"],
-                        shapes=(elem_count,),
+                        shapes=(tget_elems,),
                         dtype=DataType.FLOAT32,
                         child_memory=True,
                     ),

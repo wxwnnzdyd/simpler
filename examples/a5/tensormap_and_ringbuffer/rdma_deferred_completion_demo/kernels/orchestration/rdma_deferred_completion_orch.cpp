@@ -28,14 +28,17 @@ __attribute__((visibility("default"))) void rdma_deferred_completion_orchestrati
     auto *comm_ctx = reinterpret_cast<CommContext *>(static_cast<uintptr_t>(orch_args.scalar(0)));
     const uint32_t elem_count = static_cast<uint32_t>(orch_args.scalar(1));
 
-    uint32_t output_shape[1] = {elem_count};
     uint32_t marker_shape[1] = {1};
+    uint32_t tget_view_shape[1] = {elem_count};
+    uint32_t tget0_view_offset[1] = {0};
+    uint32_t tget1_view_offset[1] = {elem_count};
+    Tensor tget0_recv = tget_recv.view(tget_view_shape, tget0_view_offset);
+    Tensor tget1_recv = tget_recv.view(tget_view_shape, tget1_view_offset);
 
     L0TaskArgs tget0_args;
-    TensorCreateInfo tget_output_info(output_shape, 1, DataType::FLOAT32);
     TensorCreateInfo tget_marker_info(marker_shape, 1, DataType::INT32);
     tget0_args.add_input(send);
-    tget0_args.add_output(tget_output_info);
+    tget0_args.add_output(tget0_recv);
     tget0_args.add_output(tget_marker_info);
     tget0_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     tget0_args.add_scalar(elem_count);
@@ -45,7 +48,7 @@ __attribute__((visibility("default"))) void rdma_deferred_completion_orchestrati
 
     L0TaskArgs tget1_args;
     tget1_args.add_input(send);
-    tget1_args.add_output(tget_output_info);
+    tget1_args.add_output(tget1_recv);
     tget1_args.add_output(tget_marker_info);
     tget1_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     tget1_args.add_scalar(elem_count);
