@@ -264,12 +264,17 @@ inline CompletionPollResult poll_rdma_event_handle(uint64_t event_handle, uint64
 
         if (cqe_type == kCqeOptypeError) {
             const uint8_t syndrome = __atomic_load_n(&cqe->syndrome, __ATOMIC_ACQUIRE);
+            const uint32_t byte_cnt = __atomic_load_n(&cqe->byte_cnt, __ATOMIC_ACQUIRE);
+            const uint32_t imm_data = __atomic_load_n(&cqe->imm_data, __ATOMIC_ACQUIRE);
+            const uint32_t wqe_num = __atomic_load_n(&cqe->wqe_num, __ATOMIC_ACQUIRE);
+            const uint32_t vlan_queue_index = __atomic_load_n(&cqe->vlan_queue_index, __ATOMIC_ACQUIRE);
             LOG_ERROR(
                 "RDMA completion invalid: CQE error handle=0x%llx workspace=0x%llx dest_rank=%u target_head=%u "
-                "cur_tail=%u next_tail=%u cqe_addr=0x%llx owner_id_qpn=0x%x op_sr_wqebb=0x%x syndrome=0x%x",
+                "cur_tail=%u next_tail=%u cqe_addr=0x%llx owner_id_qpn=0x%x op_sr_wqebb=0x%x "
+                "byte_cnt=0x%x imm_data=0x%x wqe_num=0x%x vlan_queue_index=0x%x syndrome=0x%x",
                 static_cast<unsigned long long>(event_handle), static_cast<unsigned long long>(workspace_addr),
                 dest_rank, target_head, cur_tail, next_tail, static_cast<unsigned long long>(cqe_addr), owner_id_qpn,
-                op_sr_wqebb, static_cast<unsigned>(syndrome)
+                op_sr_wqebb, byte_cnt, imm_data, wqe_num, vlan_queue_index, static_cast<unsigned>(syndrome)
             );
             ++next_tail;
             update_tail_info(cq_ctx, wq_ctx, next_tail);
