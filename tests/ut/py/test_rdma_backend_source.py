@@ -172,6 +172,36 @@ def test_rdma_deferred_completion_demo_uses_rdma_adapter_and_remote_mr_base() ->
     assert "pytest.skip" in test_py
 
 
+def test_rdma_deferred_completion_demo_exposes_hardening_repeat_cli() -> None:
+    test_py = RDMA_DEMO_TEST.read_text()
+
+    assert 'parser.add_argument("--repeat", type=int, default=1)' in test_py
+    assert "if repeat < 1:" in test_py
+    assert "for iteration in range(repeat):" in test_py
+    assert "run(args.platform, parse_device_range(args.device), build=args.build, repeat=args.repeat)" in test_py
+
+
+def test_rdma_deferred_completion_demo_documents_multi_event_and_multi_task_coverage() -> None:
+    tget = RDMA_DEMO_TGET.read_text()
+    tput = RDMA_DEMO_TPUT.read_text()
+    orch = RDMA_DEMO_ORCH.read_text()
+
+    assert "uint32_t request_count = 1" in tget
+    assert "uint32_t request_count = 1" in tput
+    assert "request_count++" in tget
+    assert "request_count++" in tput
+    assert tget.count("send_request_entry") >= 2
+    assert tput.count("send_request_entry") >= 2
+    assert "TaskOutputTensors tget0_outputs" in orch
+    assert "TaskOutputTensors tget1_outputs" in orch
+    assert "TaskOutputTensors tput0_outputs" in orch
+    assert "TaskOutputTensors tput1_outputs" in orch
+    assert "consumer_args.add_input(tget0_marker)" in orch
+    assert "consumer_args.add_input(tget1_marker)" in orch
+    assert "consumer_args.add_input(tput0_marker)" in orch
+    assert "consumer_args.add_input(tput1_marker)" in orch
+
+
 def test_rdma_scheduler_abi_matches_mr1374_workspace_and_hns1825_contexts() -> None:
     source = RDMA_SCHEDULER.read_text()
 
