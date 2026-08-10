@@ -43,8 +43,8 @@ __attribute__((visibility("default"))) void rdma_deferred_completion_orchestrati
     tget0_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     tget0_args.add_scalar(elem_count);
     TaskOutputTensors tget0_outputs = rt_submit_aiv_task(0, tget0_args);
-    Tensor tget0_tmp = tget0_outputs.get_ref(0);
-    Tensor tget0_marker = tget0_outputs.get_ref(1);
+    Tensor tget0_tmp = tget0_recv;
+    Tensor tget0_marker = tget0_outputs.get_ref(0);
 
     L0TaskArgs tget1_args;
     tget1_args.add_input(send);
@@ -53,8 +53,8 @@ __attribute__((visibility("default"))) void rdma_deferred_completion_orchestrati
     tget1_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     tget1_args.add_scalar(elem_count);
     TaskOutputTensors tget1_outputs = rt_submit_aiv_task(0, tget1_args);
-    Tensor tget1_tmp = tget1_outputs.get_ref(0);
-    Tensor tget1_marker = tget1_outputs.get_ref(1);
+    Tensor tget1_tmp = tget1_recv;
+    Tensor tget1_marker = tget1_outputs.get_ref(0);
 
     L0TaskArgs tput0_args;
     TensorCreateInfo marker_info(marker_shape, 1, DataType::INT32);

@@ -154,6 +154,12 @@ def test_rdma_deferred_completion_demo_uses_rdma_adapter_and_remote_mr_base() ->
     assert "Tensor tget1_recv = tget_recv.view" in orch
     assert "tget0_args.add_output(tget0_recv)" in orch
     assert "tget1_args.add_output(tget1_recv)" in orch
+    assert "Tensor tget0_tmp = tget0_recv" in orch
+    assert "Tensor tget1_tmp = tget1_recv" in orch
+    assert "Tensor tget0_marker = tget0_outputs.get_ref(0)" in orch
+    assert "Tensor tget1_marker = tget1_outputs.get_ref(0)" in orch
+    assert "tget0_outputs.get_ref(1)" not in orch
+    assert "tget1_outputs.get_ref(1)" not in orch
     assert "rt_submit_aiv_task(0" in orch
     assert "rt_submit_aiv_task(1" in orch
     assert "rt_submit_aiv_task(2" in orch
