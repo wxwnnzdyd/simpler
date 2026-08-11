@@ -12,13 +12,6 @@ MAILBOX_TYPES = REPO_ROOT / "src/a5/runtime/tensormap_and_ringbuffer/runtime/aic
 HOST_CMAKE = REPO_ROOT / "src/a5/platform/onboard/host/CMakeLists.txt"
 HOST_COMM = REPO_ROOT / "src/a5/platform/onboard/host/comm_hccl.cpp"
 KERNEL_COMPILER = REPO_ROOT / "simpler_setup/kernel_compiler.py"
-RDMA_DEMO = REPO_ROOT / "examples/a5/tensormap_and_ringbuffer/rdma_deferred_completion_demo"
-RDMA_DEMO_COMMON = RDMA_DEMO / "kernels/aiv/rdma_deferred_completion_common.h"
-RDMA_DEMO_TGET = RDMA_DEMO / "kernels/aiv/kernel_rdma_deferred_completion_tget.cpp"
-RDMA_DEMO_TPUT = RDMA_DEMO / "kernels/aiv/kernel_rdma_deferred_completion_tput.cpp"
-RDMA_DEMO_CONSUMER = RDMA_DEMO / "kernels/aiv/kernel_rdma_deferred_completion_consumer.cpp"
-RDMA_DEMO_ORCH = RDMA_DEMO / "kernels/orchestration/rdma_deferred_completion_orch.cpp"
-RDMA_DEMO_TEST = RDMA_DEMO / "test_rdma_deferred_completion_demo.py"
 RDMA_SCHEDULER = (
     REPO_ROOT / "src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/rdma/rdma_completion_scheduler.h"
 )
@@ -119,87 +112,6 @@ def test_kernel_compiler_adds_ascend_device_headers_for_rdma_backend_headers() -
     assert '"kernel_operator_sys_var_intf_impl.h"' in source
     assert ".rglob(header)" in source
     assert "for inc_dir in self.get_ascend_incore_include_dirs():" in source
-
-
-def test_rdma_deferred_completion_demo_uses_rdma_adapter_and_remote_mr_base() -> None:
-    common = RDMA_DEMO_COMMON.read_text()
-    tget = RDMA_DEMO_TGET.read_text()
-    tput = RDMA_DEMO_TPUT.read_text()
-    consumer = RDMA_DEMO_CONSUMER.read_text()
-    orch = RDMA_DEMO_ORCH.read_text()
-    test_py = RDMA_DEMO_TEST.read_text()
-
-    assert "backend/rdma/rdma_completion_kernel.h" in common
-    assert "PTO_RDMA_SUPPORTED" in common
-    assert "pto2::rdma_backend::peer_mr_base_addr" in common
-    assert "comm_ctx->windowsIn[peer]" not in common
-    assert "RdmaScratchTile" in common
-    assert "pto::comm::sdma::UB_ALIGN_SIZE" in common
-    assert "rdma_scratch_tile" in common
-    assert "RdmaTget(" in tget
-    assert "RdmaTput(" in tput
-    assert "rdma_scratch" in tget
-    assert "rdma_scratch" in tput
-    assert "comm_ctx->rankId" in tget
-    assert "comm_ctx->rankId" in tput
-    assert tget.count("send_request_entry") >= 2
-    assert tput.count("send_request_entry") >= 2
-    assert "event.Wait" not in tget
-    assert "event.Wait" not in tput
-    assert "BuildAsyncSession<pto::comm::DmaEngine::RDMA>" in consumer
-    assert "rdma_scratch" in consumer
-    assert "readback_session, 2" in consumer
-    assert "TensorCreateInfo tget_output_info" not in orch
-    assert "Tensor tget0_recv = tget_recv.view" in orch
-    assert "Tensor tget1_recv = tget_recv.view" in orch
-    assert "tget0_args.add_output(tget0_recv)" in orch
-    assert "tget1_args.add_output(tget1_recv)" in orch
-    assert "Tensor tget0_tmp = tget0_recv" in orch
-    assert "Tensor tget1_tmp = tget1_recv" in orch
-    assert "Tensor tget0_marker = tget0_outputs.get_ref(0)" in orch
-    assert "Tensor tget1_marker = tget1_outputs.get_ref(0)" in orch
-    assert "tget0_outputs.get_ref(1)" not in orch
-    assert "tget1_outputs.get_ref(1)" not in orch
-    assert "rt_submit_aiv_task(0" in orch
-    assert "rt_submit_aiv_task(1" in orch
-    assert "rt_submit_aiv_task(2" in orch
-    assert "tget_elems = nranks * elem_count" in test_py
-    assert "CASES = (16, 64, 256, 4096, 16384)" in test_py
-    assert "CASES = (1," not in test_py
-    assert 'shapes=(tget_elems,)' in test_py
-    assert "rdma_workspace_enabled" in test_py
-    assert "SIMPLER_ENABLE_PTO_RDMA_WORKSPACE" in test_py
-    assert "pytest.skip" in test_py
-
-
-def test_rdma_deferred_completion_demo_exposes_hardening_repeat_cli() -> None:
-    test_py = RDMA_DEMO_TEST.read_text()
-
-    assert 'parser.add_argument("--repeat", type=int, default=1)' in test_py
-    assert "if repeat < 1:" in test_py
-    assert "for iteration in range(repeat):" in test_py
-    assert "run(args.platform, parse_device_range(args.device), build=args.build, repeat=args.repeat)" in test_py
-
-
-def test_rdma_deferred_completion_demo_documents_multi_event_and_multi_task_coverage() -> None:
-    tget = RDMA_DEMO_TGET.read_text()
-    tput = RDMA_DEMO_TPUT.read_text()
-    orch = RDMA_DEMO_ORCH.read_text()
-
-    assert "uint32_t request_count = 1" in tget
-    assert "uint32_t request_count = 1" in tput
-    assert "request_count++" in tget
-    assert "request_count++" in tput
-    assert tget.count("send_request_entry") >= 2
-    assert tput.count("send_request_entry") >= 2
-    assert "TaskOutputTensors tget0_outputs" in orch
-    assert "TaskOutputTensors tget1_outputs" in orch
-    assert "TaskOutputTensors tput0_outputs" in orch
-    assert "TaskOutputTensors tput1_outputs" in orch
-    assert "consumer_args.add_input(tget0_marker)" in orch
-    assert "consumer_args.add_input(tget1_marker)" in orch
-    assert "consumer_args.add_input(tput0_marker)" in orch
-    assert "consumer_args.add_input(tput1_marker)" in orch
 
 
 def test_rdma_scheduler_abi_matches_mr1374_workspace_and_hns1825_contexts() -> None:
