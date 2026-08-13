@@ -15,6 +15,7 @@ KERNEL_COMPILER = REPO_ROOT / "simpler_setup/kernel_compiler.py"
 RDMA_SCHEDULER = (
     REPO_ROOT / "src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/rdma/rdma_completion_scheduler.h"
 )
+SCHEDULER_COMPLETION = REPO_ROOT / "src/a5/runtime/tensormap_and_ringbuffer/runtime/scheduler/scheduler_completion.cpp"
 
 
 def test_rdma_kernel_backend_exposes_deferred_adapter_contract() -> None:
@@ -127,6 +128,17 @@ def test_rdma_scheduler_abi_matches_mr1374_workspace_and_hns1825_contexts() -> N
     assert "uint32_t cqe_size;" in source
     assert "1u << cq_ctx.cqe" not in source
     assert "db_sw_addr" in source
-    assert "kHns1825CqeMaxGenNum" in source
+    assert "is_hns1825_cqe_owner_ready" in source
+    assert "const uint32_t cq_ring = cq_ctx.depth;" in source
+    assert "kHns1825CqeMaxGenNum" not in source
     assert "owner_id_qpn" in source
     assert "op_sr_wqebb" in source
+
+
+def test_a5_scheduler_invalidates_deferred_completion_slab_before_reading_count() -> None:
+    source = SCHEDULER_COMPLETION.read_text()
+    assert "volatile DeferredCompletionSlab *deferred_slab" in source
+    assert "cache_invalidate_range" in source
+    assert "sizeof(*deferred_slab)" in source
+    assert source.index("cache_invalidate_range") < source.index("deferred_slab->error_code")
+    assert source.index("cache_invalidate_range") < source.index("deferred_slab->count")
