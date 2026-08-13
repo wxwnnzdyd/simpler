@@ -133,7 +133,22 @@ def _zero_i32(count: int) -> torch.Tensor:
     return torch.zeros(count, dtype=torch.int32).share_memory_()
 
 
-def _run_case_on_worker(worker: Worker, chip_handle, elem_count: int, nranks: int) -> bool:
+def _status_i32(count: int) -> torch.Tensor:
+    return torch.full((count,), -1, dtype=torch.int32).share_memory_()
+
+
+def _make_case_buffers(elem_count: int, nranks: int):
+    tget_elems = nranks * elem_count
+    tput_elems = (nranks + 1) * elem_count
+    return {
+        "send_host": [_send_pattern(rank, elem_count) for rank in range(nranks)],
+        "tget_zero": [_zero_float(tget_elems) for _ in range(nranks)],
+        "tput_zero": [_zero_float(tput_elems) for _ in range(nranks)],
+        "status": [_status_i32(STATUS_WORDS) for _ in range(nranks)],
+    }
+
+
+def _run_case_on_worker(worker: Worker, chip_handle, elem_count: int, nranks: int, case_buffers) -> bool:
     if nranks != 2:
         raise ValueError(f"rdma_deferred_completion_demo needs exactly 2 devices, got {nranks}")
 
@@ -144,10 +159,10 @@ def _run_case_on_worker(worker: Worker, chip_handle, elem_count: int, nranks: in
     tput_nbytes = tput_elems * DTYPE_NBYTES
     window_size = max(RDMA_DATA_OFFSET_NBYTES + send_nbytes + tget_nbytes + tput_nbytes, 4 * 1024 * 1024)
 
-    send_host = [_send_pattern(rank, elem_count) for rank in range(nranks)]
-    tget_zero = [_zero_float(tget_elems) for _ in range(nranks)]
-    tput_zero = [_zero_float(tput_elems) for _ in range(nranks)]
-    status = [_zero_i32(STATUS_WORDS) for _ in range(nranks)]
+    send_host = case_buffers["send_host"]
+    tget_zero = case_buffers["tget_zero"]
+    tput_zero = case_buffers["tput_zero"]
+    status = case_buffers["status"]
 
     def orch_fn(orch, _args, cfg):
         with orch.allocate_domain(
@@ -222,6 +237,7 @@ def run_case(platform: str, device_ids: list[int], elem_count: int, *, build: bo
     if len(device_ids) != 2:
         raise ValueError(f"rdma_deferred_completion_demo needs exactly 2 devices, got {device_ids}")
 
+    case_buffers = _make_case_buffers(elem_count, len(device_ids))
     chip_callable = build_chip_callable(platform)
     worker = Worker(
         level=3,
@@ -234,7 +250,7 @@ def run_case(platform: str, device_ids: list[int], elem_count: int, *, build: bo
     chip_handle = worker.register(chip_callable)
     try:
         worker.init()
-        return _run_case_on_worker(worker, chip_handle, elem_count, len(device_ids))
+        return _run_case_on_worker(worker, chip_handle, elem_count, len(device_ids), case_buffers)
     finally:
         worker.close()
 
@@ -244,7 +260,7 @@ def _print_status(elem_count: int, status: list[torch.Tensor]) -> bool:
     for rank, rank_status in enumerate(status):
         words = [int(x) for x in rank_status.tolist()]
         print(f"[rdma_deferred_completion_demo] count={elem_count} rank={rank} status={words}")
-        ok = ok and words[0] == 0
+        ok = ok and words[0] == 0 and words[1] == elem_count
     return ok
 
 

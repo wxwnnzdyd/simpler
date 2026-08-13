@@ -29,7 +29,7 @@ struct TestRdmaWorkspace {
 };
 
 inline bool test_cqe_expected_owner(uint32_t cqe_seq) {
-    return (cqe_seq & (kTestCqDepth + pto2::rdma_backend::kHns1825CqeMaxGenNum)) == 0;
+    return (cqe_seq & (kTestCqDepth + pto2::rdma_backend::kHns1825CqeMaxGenNum)) != 0;
 }
 
 inline void encode_test_cqe(TestRdmaCqe &cqe, uint32_t cqe_seq, bool error) {
@@ -137,6 +137,17 @@ TEST(A5RdmaCompletionScheduler, TailAlreadyAtTargetIsReady) {
 TEST(A5RdmaCompletionScheduler, OwnerNotReadyReturnsPending) {
     SchedulerWorkspaceFixture fixture;
     encode_test_pending_cqe(fixture.ws.scq_entries[1][0], 0);
+
+    auto result = poll_rdma_event_handle(encode_rdma_event_handle(1, 1), fixture.addr());
+    EXPECT_EQ(result.state, CompletionPollState::PENDING);
+    EXPECT_EQ(result.error_code, PTO2_ERROR_NONE);
+    EXPECT_EQ(fixture.ws.cq_tail[1], 0u);
+    EXPECT_EQ(fixture.ws.cq_sw_doorbell[1], 0u);
+    EXPECT_EQ(fixture.ws.sq_tail[1], 0u);
+}
+
+TEST(A5RdmaCompletionScheduler, ZeroInitializedCqeReturnsPending) {
+    SchedulerWorkspaceFixture fixture;
 
     auto result = poll_rdma_event_handle(encode_rdma_event_handle(1, 1), fixture.addr());
     EXPECT_EQ(result.state, CompletionPollState::PENDING);

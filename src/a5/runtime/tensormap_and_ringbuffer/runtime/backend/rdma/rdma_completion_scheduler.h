@@ -257,7 +257,7 @@ inline CompletionPollResult poll_rdma_event_handle(uint64_t event_handle, uint64
         constexpr uint32_t kCqeOptypeInvalid = 0x1f;
         const uint32_t cqe_type = (op_sr_wqebb >> kCqeOpcodeShift) & kCqeOpcodeMask;
         const bool owner = (owner_id_qpn & (1u << kOwnerShift)) != 0;
-        const bool expected_owner = ((next_tail & cq_ring) == 0);
+        const bool expected_owner = (next_tail & cq_ring) != 0;
         if (cqe_type == kCqeOptypeInvalid || owner == expected_owner) {
             break;
         }

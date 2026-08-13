@@ -1092,10 +1092,19 @@ static bool init_rdma_workspace(
     }
 
     auto manager = std::make_unique<pto::comm::rdma::RdmaWorkspaceManager>();
-    if (manager->Init(config) != pto::comm::rdma::WorkspaceInitResult::READY) {
+    const auto init_result = manager->Init(config);
+    if (init_result != pto::comm::rdma::WorkspaceInitResult::READY) {
         LOG_ERROR(
-            "[comm rank %d] RDMA workspace init failed (rank_id=%u rank_count=%u size=%llu)", h->rank, domain_rank,
-            rank_count, static_cast<unsigned long long>(symmetric_size)
+            "[comm rank %d] RDMA workspace init failed (result=%u rank_id=%u rank_count=%u phy_id=%u ip=%s "
+            "base_port=%u peer0_phy=%u peer0_ip=%s peer0_addr=0x%llx peer1_phy=%u peer1_ip=%s "
+            "peer1_addr=0x%llx size=%llu)",
+            h->rank, static_cast<unsigned>(init_result), domain_rank, rank_count, bootstrap.phy_id,
+            bootstrap.local_ip.c_str(), static_cast<unsigned>(bootstrap.base_port),
+            rank_count > 0 ? peers[0].phy_id : 0, rank_count > 0 ? peers[0].roce_ip : "",
+            static_cast<unsigned long long>(rank_count > 0 ? peers[0].symmetric_addr : 0),
+            rank_count > 1 ? peers[1].phy_id : 0, rank_count > 1 ? peers[1].roce_ip : "",
+            static_cast<unsigned long long>(rank_count > 1 ? peers[1].symmetric_addr : 0),
+            static_cast<unsigned long long>(symmetric_size)
         );
         return false;
     }
