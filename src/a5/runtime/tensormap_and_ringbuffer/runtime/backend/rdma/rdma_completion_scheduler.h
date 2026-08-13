@@ -25,7 +25,6 @@ namespace pto2::rdma_backend {
 
 inline constexpr uint32_t kHandleRankIdShift = 32;
 inline constexpr uint32_t kCqeBytes = 64;
-inline constexpr uint32_t kHns1825CqeMaxGenNum = 1024;
 inline constexpr uint32_t kCqUpdateCiMask = 0xffffffu;
 inline constexpr uint32_t kRdmaWorkspaceMagic = 0x52444d41u;
 inline constexpr uint32_t kRdmaWorkspaceVersion = 1u;
@@ -132,6 +131,11 @@ inline bool has_reached(uint32_t current, uint32_t target) { return static_cast<
 
 inline bool is_power_of_two(uint32_t value) { return value != 0 && (value & (value - 1u)) == 0; }
 
+inline bool is_hns1825_cqe_owner_ready(bool owner, uint32_t cur_tail, uint32_t cq_ring) {
+    const bool expected_owner = (cur_tail & cq_ring) == 0;
+    return owner != expected_owner;
+}
+
 inline uint32_t htobe32(uint32_t value) { return __builtin_bswap32(value); }
 
 inline uint32_t load_device_u32(uint64_t addr) {
@@ -223,7 +227,7 @@ inline CompletionPollResult poll_rdma_event_handle(uint64_t event_handle, uint64
     RdmaWqCtx wq_ctx{};
     wq_ctx.tail_addr = __atomic_load_n(&wq_entry->tail_addr, __ATOMIC_ACQUIRE);
     const uint32_t cqe_size = cq_ctx.cqe_size == 0 ? kCqeBytes : cq_ctx.cqe_size;
-    const uint32_t cq_ring = cq_ctx.depth + kHns1825CqeMaxGenNum;
+    const uint32_t cq_ring = cq_ctx.depth;
     if (cqe_size < sizeof(Hns1825Cqe) || cqe_size > kCqeBytes || cq_ctx.buf_addr == 0 || cq_ctx.tail_addr == 0 ||
         cq_ctx.db_sw_addr == 0 || !is_power_of_two(cq_ring)) {
         LOG_ERROR(
@@ -257,8 +261,7 @@ inline CompletionPollResult poll_rdma_event_handle(uint64_t event_handle, uint64
         constexpr uint32_t kCqeOptypeInvalid = 0x1f;
         const uint32_t cqe_type = (op_sr_wqebb >> kCqeOpcodeShift) & kCqeOpcodeMask;
         const bool owner = (owner_id_qpn & (1u << kOwnerShift)) != 0;
-        const bool expected_owner = (next_tail & cq_ring) != 0;
-        if (cqe_type == kCqeOptypeInvalid || owner == expected_owner) {
+        if (cqe_type == kCqeOptypeInvalid || !is_hns1825_cqe_owner_ready(owner, next_tail, cq_ring)) {
             break;
         }
 
