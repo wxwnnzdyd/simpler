@@ -23,22 +23,28 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     auto remote_send_g = rdma_deferred_completion::global_float(remote_send, first_count);
     auto rdma_scratch = rdma_deferred_completion::rdma_scratch_tile();
     uint32_t request_count = 1;
-    (void)send_request_entry(
+    if (!send_request_entry(
         async_ctx, RdmaTget(
                        local_tget, remote_send_g, rdma_scratch, reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace),
                        peer, comm_ctx->rankId, 0
                    )
-    );
+    )) {
+        rdma_deferred_completion::store_marker(marker, -10);
+        return;
+    }
     if (second_count != 0) {
         request_count++;
         auto local_tget_tail = rdma_deferred_completion::global_float(tget + first_count, second_count);
         auto remote_send_tail = rdma_deferred_completion::global_float(remote_send + first_count, second_count);
-        (void)send_request_entry(
+        if (!send_request_entry(
             async_ctx, RdmaTget(
                            local_tget_tail, remote_send_tail, rdma_scratch,
                            reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace), peer, comm_ctx->rankId, 1
                        )
-        );
+        )) {
+            rdma_deferred_completion::store_marker(marker, -11);
+            return;
+        }
     }
     rdma_deferred_completion::store_marker(marker, static_cast<int32_t>(request_count));
 }
