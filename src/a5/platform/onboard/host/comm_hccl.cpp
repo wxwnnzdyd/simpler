@@ -1036,8 +1036,8 @@ static bool resolve_rdma_bootstrap(CommHandle h, uint32_t base_rank, int device_
         return false;
     }
     const char *rootinfo_path = rdma_rootinfo_path();
-    if (!pto::comm::rdma::hns_1825::bootstrap::ResolveLocalRdmaIp(out.phy_id, out.local_ip, rootinfo_path) &&
-        !rdma_resolve_local_ip_from_hccn_tool(device_id, out.local_ip) &&
+    if (!rdma_resolve_local_ip_from_hccn_tool(device_id, out.local_ip) &&
+        !pto::comm::rdma::hns_1825::bootstrap::ResolveLocalRdmaIp(out.phy_id, out.local_ip, rootinfo_path) &&
         !rdma_resolve_local_ip_from_rootinfo(out.phy_id, out.local_ip, rootinfo_path)) {
         LOG_ERROR("[comm rank %d] RDMA bootstrap failed to resolve local RoCE IP", h->rank);
         return false;
