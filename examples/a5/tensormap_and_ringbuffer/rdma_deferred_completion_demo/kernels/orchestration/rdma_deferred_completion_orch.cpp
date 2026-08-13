@@ -35,11 +35,14 @@ __attribute__((visibility("default"))) void rdma_deferred_completion_orchestrati
     Tensor tget0_recv = tget_recv.view(tget_view_shape, tget0_view_offset);
     Tensor tget1_recv = tget_recv.view(tget_view_shape, tget1_view_offset);
 
+    // The HNS1825 RDMA session uses one SQ per peer; serialize producer posts through marker dependencies.
+
     L0TaskArgs tget0_args;
     TensorCreateInfo tget_marker_info(marker_shape, 1, DataType::INT32);
     tget0_args.add_input(send);
     tget0_args.add_output(tget0_recv);
     tget0_args.add_output(tget_marker_info);
+    tget0_args.add_input(send);
     tget0_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     tget0_args.add_scalar(elem_count);
     TaskOutputTensors tget0_outputs = rt_submit_aiv_task(0, tget0_args);
@@ -50,6 +53,7 @@ __attribute__((visibility("default"))) void rdma_deferred_completion_orchestrati
     tget1_args.add_input(send);
     tget1_args.add_output(tget1_recv);
     tget1_args.add_output(tget_marker_info);
+    tget1_args.add_input(tget0_marker);
     tget1_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     tget1_args.add_scalar(elem_count);
     TaskOutputTensors tget1_outputs = rt_submit_aiv_task(0, tget1_args);
@@ -61,6 +65,7 @@ __attribute__((visibility("default"))) void rdma_deferred_completion_orchestrati
     tput0_args.add_input(send);
     tput0_args.add_input(tput_recv);
     tput0_args.add_output(marker_info);
+    tput0_args.add_input(tget1_marker);
     tput0_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     tput0_args.add_scalar(elem_count);
     TaskOutputTensors tput0_outputs = rt_submit_aiv_task(1, tput0_args);
@@ -70,6 +75,7 @@ __attribute__((visibility("default"))) void rdma_deferred_completion_orchestrati
     tput1_args.add_input(send);
     tput1_args.add_input(tput_recv);
     tput1_args.add_output(marker_info);
+    tput1_args.add_input(tput0_marker);
     tput1_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     tput1_args.add_scalar(elem_count);
     TaskOutputTensors tput1_outputs = rt_submit_aiv_task(1, tput1_args);

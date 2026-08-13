@@ -66,12 +66,12 @@ def build_chip_callable(platform: str) -> ChipCallable:
         (
             0,
             "kernels/aiv/kernel_rdma_deferred_completion_tget.cpp",
-            [ArgDirection.IN, ArgDirection.OUT, ArgDirection.OUT, ArgDirection.IN, ArgDirection.IN],
+            [ArgDirection.IN, ArgDirection.OUT, ArgDirection.OUT, ArgDirection.IN, ArgDirection.IN, ArgDirection.IN],
         ),
         (
             1,
             "kernels/aiv/kernel_rdma_deferred_completion_tput.cpp",
-            [ArgDirection.IN, ArgDirection.IN, ArgDirection.OUT, ArgDirection.IN, ArgDirection.IN],
+            [ArgDirection.IN, ArgDirection.IN, ArgDirection.OUT, ArgDirection.IN, ArgDirection.IN, ArgDirection.IN],
         ),
         (
             2,

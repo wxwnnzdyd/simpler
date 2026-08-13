@@ -16,6 +16,15 @@ RDMA_SCHEDULER = (
     REPO_ROOT / "src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/rdma/rdma_completion_scheduler.h"
 )
 SCHEDULER_COMPLETION = REPO_ROOT / "src/a5/runtime/tensormap_and_ringbuffer/runtime/scheduler/scheduler_completion.cpp"
+RDMA_DEFERRED_DEMO = (
+    REPO_ROOT
+    / "examples/a5/tensormap_and_ringbuffer/rdma_deferred_completion_demo/test_rdma_deferred_completion_demo.py"
+)
+RDMA_DEFERRED_ORCH = (
+    REPO_ROOT
+    / "examples/a5/tensormap_and_ringbuffer/rdma_deferred_completion_demo/kernels/orchestration"
+    / "rdma_deferred_completion_orch.cpp"
+)
 
 
 def test_rdma_kernel_backend_exposes_deferred_adapter_contract() -> None:
@@ -142,3 +151,15 @@ def test_a5_scheduler_invalidates_deferred_completion_slab_before_reading_count(
     assert "sizeof(*deferred_slab)" in source
     assert source.index("cache_invalidate_range") < source.index("deferred_slab->error_code")
     assert source.index("cache_invalidate_range") < source.index("deferred_slab->count")
+
+
+def test_rdma_deferred_demo_serializes_hns1825_sq_posts() -> None:
+    py_source = RDMA_DEFERRED_DEMO.read_text()
+    orch_source = RDMA_DEFERRED_ORCH.read_text()
+
+    assert py_source.count("[ArgDirection.IN, ArgDirection.OUT, ArgDirection.OUT") == 1
+    assert py_source.count("[ArgDirection.IN, ArgDirection.IN, ArgDirection.OUT") == 1
+    assert "serialize producer posts through marker dependencies" in orch_source
+    assert "tget1_args.add_input(tget0_marker)" in orch_source
+    assert "tput0_args.add_input(tget1_marker)" in orch_source
+    assert "tput1_args.add_input(tput0_marker)" in orch_source

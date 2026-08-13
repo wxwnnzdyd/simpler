@@ -4,8 +4,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     __gm__ Tensor *send_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ Tensor *tget_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
     __gm__ Tensor *marker_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
-    __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[3]);
-    uint32_t elem_count = static_cast<uint32_t>(args[4]);
+    __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[4]);
+    uint32_t elem_count = static_cast<uint32_t>(args[5]);
 
     __gm__ float *send = rdma_deferred_completion::tensor_data<float>(send_tensor);
     __gm__ float *tget = rdma_deferred_completion::tensor_data<float>(tget_tensor);
