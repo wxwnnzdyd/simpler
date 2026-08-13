@@ -24,26 +24,28 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     auto remote_tput = rdma_deferred_completion::global_float(remote_tput_slot, first_count);
     auto rdma_scratch = rdma_deferred_completion::rdma_scratch_tile();
     uint32_t request_count = 1;
-    if (!send_request_entry(
+    pto2::rdma_backend::RdmaSubmitStatus submit_status = pto2::rdma_backend::submit_rdma_request_status(
         async_ctx, RdmaTput(
                        remote_tput, local_send, rdma_scratch, reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace),
                        peer, comm_ctx->rankId, 0
                    )
-    )) {
-        rdma_deferred_completion::store_marker(marker, -20);
+    );
+    if (submit_status != pto2::rdma_backend::RdmaSubmitStatus::OK) {
+        rdma_deferred_completion::store_marker(marker, static_cast<int32_t>(submit_status));
         return;
     }
     if (second_count != 0) {
         request_count++;
         auto local_send_tail = rdma_deferred_completion::global_float(send + first_count, second_count);
         auto remote_tput_tail = rdma_deferred_completion::global_float(remote_tput_slot + first_count, second_count);
-        if (!send_request_entry(
+        submit_status = pto2::rdma_backend::submit_rdma_request_status(
             async_ctx, RdmaTput(
                            remote_tput_tail, local_send_tail, rdma_scratch,
                            reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace), peer, comm_ctx->rankId, 1
                        )
-        )) {
-            rdma_deferred_completion::store_marker(marker, -21);
+        );
+        if (submit_status != pto2::rdma_backend::RdmaSubmitStatus::OK) {
+            rdma_deferred_completion::store_marker(marker, static_cast<int32_t>(submit_status));
             return;
         }
     }

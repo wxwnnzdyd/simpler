@@ -86,6 +86,17 @@ inline __aicore__ RdmaRequestDescriptor<DstTensor, SrcTensor, ScratchTileT> Rdma
 
 namespace pto2::detail {
 
+enum class RdmaEventRegistrationResult : int32_t {
+    OK = 0,
+    INVALID_EVENT = -31,
+    REGISTRATION_FAILED = -32,
+};
+
+template <typename PtoAsyncEvent, typename PtoAsyncSession>
+inline __aicore__ RdmaEventRegistrationResult register_rdma_async_event_status(
+    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session, __gm__ uint8_t *workspace
+);
+
 template <typename PtoAsyncEvent, typename PtoAsyncSession>
 inline __aicore__ bool register_rdma_async_event(
     AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session, __gm__ uint8_t *workspace
@@ -94,6 +105,14 @@ inline __aicore__ bool register_rdma_async_event(
 }  // namespace pto2::detail
 
 namespace pto2::rdma_backend {
+
+enum class RdmaSubmitStatus : int32_t {
+    OK = 0,
+    BUILD_SESSION_FAILED = -30,
+    INVALID_EVENT = -31,
+    REGISTRATION_FAILED = -32,
+    UNSUPPORTED = -33,
+};
 
 inline __aicore__ uint64_t peer_mr_base_addr(__gm__ uint8_t *workspace, uint32_t peer) {
 #if defined(PTO_RDMA_SUPPORTED)
@@ -111,15 +130,15 @@ inline __aicore__ __gm__ T *peer_mr_ptr(__gm__ uint8_t *workspace, uint32_t peer
 }
 
 template <typename DstTensor, typename SrcTensor, typename ScratchTileT>
-inline __aicore__ bool
-submit_rdma_request(AsyncCtx &ctx, RdmaRequestDescriptor<DstTensor, SrcTensor, ScratchTileT> desc) {
+inline __aicore__ RdmaSubmitStatus
+submit_rdma_request_status(AsyncCtx &ctx, RdmaRequestDescriptor<DstTensor, SrcTensor, ScratchTileT> desc) {
 #if defined(PTO_RDMA_SUPPORTED)
     pto::comm::AsyncSession session;
     if (!pto::comm::BuildAsyncSession<pto::comm::DmaEngine::RDMA>(
             desc.scratch, desc.workspace, desc.peer_rank, desc.local_rank, session, desc.sync_id
         )) {
         pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
-        return false;
+        return RdmaSubmitStatus::BUILD_SESSION_FAILED;
     }
 
     pto::comm::AsyncEvent event;
@@ -128,16 +147,26 @@ submit_rdma_request(AsyncCtx &ctx, RdmaRequestDescriptor<DstTensor, SrcTensor, S
     } else {
         event = pto::comm::TPUT_ASYNC<pto::comm::DmaEngine::RDMA>(desc.dst, desc.src, session);
     }
-    if (!pto2::detail::register_rdma_async_event(ctx, event, session, desc.workspace)) {
-        return false;
+    const pto2::detail::RdmaEventRegistrationResult reg_result =
+        pto2::detail::register_rdma_async_event_status(ctx, event, session, desc.workspace);
+    if (reg_result != pto2::detail::RdmaEventRegistrationResult::OK) {
+        return reg_result == pto2::detail::RdmaEventRegistrationResult::INVALID_EVENT ?
+                   RdmaSubmitStatus::INVALID_EVENT :
+                   RdmaSubmitStatus::REGISTRATION_FAILED;
     }
     pto2::detail::defer_flush(ctx);
-    return true;
+    return RdmaSubmitStatus::OK;
 #else
     (void)desc;
     pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
-    return false;
+    return RdmaSubmitStatus::UNSUPPORTED;
 #endif
+}
+
+template <typename DstTensor, typename SrcTensor, typename ScratchTileT>
+inline __aicore__ bool
+submit_rdma_request(AsyncCtx &ctx, RdmaRequestDescriptor<DstTensor, SrcTensor, ScratchTileT> desc) {
+    return submit_rdma_request_status(ctx, desc) == RdmaSubmitStatus::OK;
 }
 
 }  // namespace pto2::rdma_backend
@@ -145,22 +174,22 @@ submit_rdma_request(AsyncCtx &ctx, RdmaRequestDescriptor<DstTensor, SrcTensor, S
 namespace pto2::detail {
 
 template <typename PtoAsyncEvent, typename PtoAsyncSession>
-inline __aicore__ bool register_rdma_async_event(
+inline __aicore__ RdmaEventRegistrationResult register_rdma_async_event_status(
     AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session, __gm__ uint8_t *workspace
 ) {
     if (ctx.task_token.is_invalid() || ctx.completion_count == nullptr || ctx.completion_entries == nullptr) {
         (void)event.Wait(session);
-        return true;
+        return RdmaEventRegistrationResult::OK;
     }
     if (event.handle == 0) {
-        return true;
+        return RdmaEventRegistrationResult::OK;
     }
 
     const uint32_t engine = static_cast<uint32_t>(event.engine);
     if (engine != static_cast<uint32_t>(::pto::comm::DmaEngine::RDMA) || workspace == nullptr) {
         defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
         (void)event.Wait(session);
-        return false;
+        return RdmaEventRegistrationResult::INVALID_EVENT;
     }
 
     CompletionToken token{
@@ -173,9 +202,16 @@ inline __aicore__ bool register_rdma_async_event(
     if (!register_completion_condition(ctx, token)) {
         defer_error(ctx, PTO2_ERROR_ASYNC_REGISTRATION_FAILED);
         (void)event.Wait(session);
-        return false;
+        return RdmaEventRegistrationResult::REGISTRATION_FAILED;
     }
-    return true;
+    return RdmaEventRegistrationResult::OK;
+}
+
+template <typename PtoAsyncEvent, typename PtoAsyncSession>
+inline __aicore__ bool register_rdma_async_event(
+    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session, __gm__ uint8_t *workspace
+) {
+    return register_rdma_async_event_status(ctx, event, session, workspace) == RdmaEventRegistrationResult::OK;
 }
 
 }  // namespace pto2::detail
