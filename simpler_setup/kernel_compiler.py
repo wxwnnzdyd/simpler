@@ -124,6 +124,14 @@ class KernelCompiler:
             return ["-DPTO_RDMA_SUPPORTED", "-DPTO_RDMA_BACKEND_HNS_1825_SUPPORTED"]
         return []
 
+    @staticmethod
+    def _pto_isa_include_dirs(pto_isa_root: str) -> list[str]:
+        include_dirs = [os.path.join(pto_isa_root, "include")]
+        pkg_inc = os.path.join(pto_isa_root, "pkg_inc")
+        if os.path.isdir(pkg_inc):
+            include_dirs.append(pkg_inc)
+        return include_dirs
+
     def get_platform_include_dirs(self) -> list[str]:
         """
         Get platform-specific include directories for orchestration compilation.
@@ -411,9 +419,6 @@ class KernelCompiler:
         if pto_isa_root is None:
             raise ValueError("pto_isa_root is required for incore compilation")
 
-        pto_include = os.path.join(pto_isa_root, "include")
-        pto_pto_include = os.path.join(pto_isa_root, "include", "pto")
-
         # Generate output path
         output_path = self._make_temp_path(
             prefix=f"{os.path.basename(source_path)}.incore_", suffix=".o", build_dir=build_dir
@@ -422,7 +427,8 @@ class KernelCompiler:
         # Build command from toolchain
         cmd = [self.ccec.cxx_path] + self.ccec.get_compile_flags(core_type=core_type)
         cmd += self._incore_feature_defines()
-        cmd.extend([f"-I{pto_include}", f"-I{pto_pto_include}"])
+        for include_dir in self._pto_isa_include_dirs(pto_isa_root):
+            cmd.extend([f"-I{include_dir}", f"-I{os.path.join(include_dir, 'pto')}"])
 
         for inc_dir in self.get_incore_include_dirs():
             cmd.append(f"-I{os.path.abspath(inc_dir)}")
@@ -628,9 +634,8 @@ class KernelCompiler:
 
         # Add PTO ISA header paths if provided
         if pto_isa_root:
-            pto_include = os.path.join(pto_isa_root, "include")
-            pto_pto_include = os.path.join(pto_isa_root, "include", "pto")
-            cmd.extend([f"-I{pto_include}", f"-I{pto_pto_include}"])
+            for include_dir in self._pto_isa_include_dirs(pto_isa_root):
+                cmd.extend([f"-I{include_dir}", f"-I{os.path.join(include_dir, 'pto')}"])
 
         for inc_dir in self.get_incore_include_dirs():
             cmd.append(f"-I{os.path.abspath(inc_dir)}")
