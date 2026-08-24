@@ -81,7 +81,6 @@ def test_a5_comm_hccl_keeps_urma_and_rdma_workspace_paths_macro_gated() -> None:
     assert "#ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE" in source
     assert "#ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE" in source
     assert "#include \"pto/comm/async/rdma/rdma_workspace_manager.hpp\"" in source
-    assert "#include \"pto/comm/async/rdma/backends/hns_1825/hns_1825_bootstrap.hpp\"" in source
     assert "std::unique_ptr<pto::comm::rdma::RdmaWorkspaceManager> rdma_workspace" in source
 
 
@@ -89,10 +88,8 @@ def test_a5_comm_hccl_uses_mr1374_rdma_host_api_shape() -> None:
     source = HOST_COMM.read_text()
 
     assert "#define __gm__" in source
-    assert "ResolvePhyId(out.phy_id)" in source
-    assert "ResolveLocalRdmaIp(" in source
+    assert "out.phy_id = static_cast<uint32_t>(device_id)" in source
     assert "PTO_ROCE_ROOTINFO" in source
-    assert "ResolveLocalRdmaIp(out.phy_id, out.local_ip, rootinfo_path)" in source
     assert "rdma_resolve_local_ip_from_hccn_tool(device_id, out.local_ip)" in source
     assert "rdma_resolve_local_ip_from_rootinfo(out.phy_id, out.local_ip, rootinfo_path)" in source
     assert "hccn_tool -g -dev_info -i %d" in source

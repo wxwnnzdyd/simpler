@@ -82,13 +82,17 @@ if(SIMPLER_PTO_ASYNC_WORKSPACE_OVERLAY_COUNT GREATER 0)
             "(needs pto-isa host headers)")
     endif()
     list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "$ENV{PTO_ISA_ROOT}/include")
+    if(EXISTS "$ENV{PTO_ISA_ROOT}/pkg_inc")
+        list(APPEND CMAKE_CUSTOM_INCLUDE_DIRS "$ENV{PTO_ISA_ROOT}/pkg_inc")
+    endif()
 endif()
 
 if(SIMPLER_ENABLE_PTO_RDMA_WORKSPACE)
-    if(NOT EXISTS "$ENV{PTO_ISA_ROOT}/include/pto/comm/async/rdma/rdma_workspace_manager.hpp")
+    if(NOT EXISTS "$ENV{PTO_ISA_ROOT}/include/pto/comm/async/rdma/rdma_workspace_manager.hpp" AND
+       NOT EXISTS "$ENV{PTO_ISA_ROOT}/pkg_inc/pto/comm/async/rdma/rdma_workspace_manager.hpp")
         message(FATAL_ERROR
             "PTO RDMA workspace overlay requires pto-isa RDMA headers "
-            "($ENV{PTO_ISA_ROOT}/include/pto/comm/async/rdma/rdma_workspace_manager.hpp not found)")
+            "($ENV{PTO_ISA_ROOT}/include/pto/comm/async/rdma/rdma_workspace_manager.hpp or pkg_inc equivalent not found)")
     endif()
 endif()
 

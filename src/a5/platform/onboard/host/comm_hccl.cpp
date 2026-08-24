@@ -60,7 +60,6 @@
 #define __gm__
 #endif
 #include "pto/comm/async/rdma/rdma_workspace_manager.hpp"
-#include "pto/comm/async/rdma/backends/hns_1825/hns_1825_bootstrap.hpp"
 #endif
 
 // Thin wrappers around the HCCL public APIs we use. Kept as a translation
@@ -987,8 +986,7 @@ static bool rdma_resolve_local_ip_from_hccn_tool(int device_id, std::string &ip)
 
 static const char *rdma_rootinfo_path() {
     const char *path = std::getenv("PTO_ROCE_ROOTINFO");
-    if (path != nullptr && *path != '\0') return path;
-    return pto::comm::rdma::hns_1825::bootstrap::kDefaultRootInfoPath;
+    return path != nullptr && *path != '\0' ? path : "";
 }
 
 static bool rdma_resolve_local_ip_from_rootinfo(uint32_t phy_id, std::string &ip, const char *rootinfo_path) {
@@ -1031,13 +1029,16 @@ static bool rdma_resolve_local_ip_from_rootinfo(uint32_t phy_id, std::string &ip
 
 static bool resolve_rdma_bootstrap(CommHandle h, uint32_t base_rank, int device_id, RdmaBootstrapInfo &out) {
     (void)base_rank;
-    if (!pto::comm::rdma::hns_1825::bootstrap::ResolvePhyId(out.phy_id)) {
-        LOG_ERROR("[comm rank %d] RDMA bootstrap failed to resolve physical device id", h->rank);
+    if (h == nullptr || device_id < 0) {
         return false;
     }
+
+    // The public pto-isa package exposes the RDMA workspace manager through
+    // pkg_inc, but does not expose the old HNS1825 bootstrap helper. For the
+    // single-host A5 path, the ACL device id is also the HNS1825 physical id.
+    out.phy_id = static_cast<uint32_t>(device_id);
     const char *rootinfo_path = rdma_rootinfo_path();
-    if (!pto::comm::rdma::hns_1825::bootstrap::ResolveLocalRdmaIp(out.phy_id, out.local_ip, rootinfo_path) &&
-        !rdma_resolve_local_ip_from_hccn_tool(device_id, out.local_ip) &&
+    if (!rdma_resolve_local_ip_from_hccn_tool(device_id, out.local_ip) &&
         !rdma_resolve_local_ip_from_rootinfo(out.phy_id, out.local_ip, rootinfo_path)) {
         LOG_ERROR("[comm rank %d] RDMA bootstrap failed to resolve local RoCE IP", h->rank);
         return false;
