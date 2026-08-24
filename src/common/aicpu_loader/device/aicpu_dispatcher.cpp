@@ -157,13 +157,13 @@ extern "C" {
 // the old AICPU kernel stubs we replaced. If a future CANN version begins
 // invoking Static as a warm-up probe, returning failure would be a silent
 // regression versus the prior behavior.
-__attribute__((visibility("default"))) int StaticTileFwkBackendKernelServer(void *args) {
+__attribute__((visibility("default"))) int StaticTileFwkBkndKernelServer(void *args) {
     (void)args;
     simpler_dispatcher::DispatcherLog("Static: stub (not expected to be called)");
     return 0;
 }
 
-__attribute__((visibility("default"))) uint32_t DynTileFwkBackendKernelServer(void *args) {
+__attribute__((visibility("default"))) uint32_t DynTileFwkBkndKernelServer(void *args) {
     (void)args;
     simpler_dispatcher::DispatcherLog("Server: stub (dispatcher is upload-only, not expected to be called)");
     return 0;
@@ -173,7 +173,7 @@ __attribute__((visibility("default"))) uint32_t DynTileFwkBackendKernelServer(vo
 // the main scheduler's preinstall path, return. Once this returns, host's
 // host's subsequent rtsBinaryLoadFromFile can resolve the runtime SO directly — this dispatcher SO
 // never gets referenced again.
-__attribute__((visibility("default"))) uint32_t DynTileFwkBackendKernelServerInit(void *args) {
+__attribute__((visibility("default"))) uint32_t DynTileFwkBkndKernelServerInit(void *args) {
     if (args == nullptr) {
         simpler_dispatcher::DispatcherLog("Init: args==nullptr");
         return 1;
