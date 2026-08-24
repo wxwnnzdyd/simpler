@@ -188,7 +188,7 @@ int LoadAicpuOp::BootstrapDispatcher(
         char op_name[32];
     } args = {};
     args.k_args.device_args_ptr = reinterpret_cast<uint64_t>(dev_args.ptr);
-    std::strncpy(args.kernel_name, "DynTileFwkKernelServerInit", sizeof(args.kernel_name) - 1);
+    std::strncpy(args.kernel_name, "DynTileFwkBackendKernelServerInit", sizeof(args.kernel_name) - 1);
     std::strncpy(args.so_name, "libaicpu_extend_kernels.so", sizeof(args.so_name) - 1);
     args.op_name[0] = '\0';
 
