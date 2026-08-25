@@ -66,6 +66,8 @@ inline CompletionPollResult counter_poll_op(const CompletionCondition &cond) {
     if (cond.counter_addr == nullptr) {
         return {CompletionPollState::FAILED, PTO2_ERROR_ASYNC_COMPLETION_INVALID};
     }
+    uintptr_t line = reinterpret_cast<uintptr_t>(cond.counter_addr) & ~(uintptr_t(PTO2_ALIGN_SIZE) - 1u);
+    cache_invalidate_range(reinterpret_cast<const void *>(line), PTO2_ALIGN_SIZE);
     return {
         *cond.counter_addr >= cond.expected_value ? CompletionPollState::READY : CompletionPollState::PENDING,
         PTO2_ERROR_NONE
