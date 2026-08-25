@@ -28,7 +28,7 @@
  *   2. libaicpu_extend_kernels writes the dispatcher bytes to its own private
  *      path (some /tmp on device, often unlinked after open), dlopens us,
  *      dlsym's the three CANN-contract symbols (Static + DynInit + Dyn),
- *      invokes our `DynTileFwkBkndKernelServerInit`.
+ *      invokes our `DynTileFwkBackendKernelServerInit`.
  *   3. Our Init reads inner_so_bin/inner_so_len/device_id from DeviceArgs,
  *      fingerprints the bytes (ELF Build-ID), and writes them to
  *      `/usr/lib64/aicpu_kernels/0/aicpu_kernels_device/simpler_inner_<fp>_<device_id>.so`.
@@ -63,8 +63,8 @@
 // upload-only and host's per-task launches target the runtime SO directly).
 extern "C" {
 __attribute__((visibility("default"))) int StaticTileFwkBackendKernelServer(void *args);
-__attribute__((visibility("default"))) uint32_t DynTileFwkBkndKernelServerInit(void *args);
-__attribute__((visibility("default"))) uint32_t DynTileFwkBkndKernelServer(void *args);
+__attribute__((visibility("default"))) uint32_t DynTileFwkBackendKernelServerInit(void *args);
+__attribute__((visibility("default"))) uint32_t DynTileFwkBackendKernelServer(void *args);
 }
 
 #endif  // COMMON_AICPU_DISPATCHER_AICPU_DISPATCHER_H_

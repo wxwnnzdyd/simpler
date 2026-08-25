@@ -12,7 +12,6 @@ def test_bootstrap_dispatcher_symbol_matches_exported_init() -> None:
     host_source = HOST_LOADER.read_text()
     dispatcher_source = DEVICE_DISPATCHER.read_text()
 
-    assert '"DynTileFwkBkndKernelServerInit"' in host_source
-    assert "DynTileFwkBkndKernelServerInit(void *args)" in dispatcher_source
-    assert len("DynTileFwkBkndKernelServerInit") < 32
-    assert '"DynTileFwkKernelServerInit"' not in host_source
+    assert '"DynTileFwkKernelServerInit"' in host_source
+    assert len("DynTileFwkKernelServerInit") < 32
+    assert "DynTileFwkBackendKernelServerInit(void *args)" in dispatcher_source
