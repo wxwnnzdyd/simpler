@@ -46,7 +46,7 @@
 #include "hccl/hccl_comm.h"
 #include "hccl/hccl_types.h"
 #ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
-#include "pto/comm/async/sdma/sdma_workspace_manager.hpp"
+#include "pto/comm/workspace.hpp"
 #endif
 
 // Thin wrappers around the HCCL public APIs we use. Kept as a translation
@@ -91,7 +91,7 @@ struct CommHandle_ {
     std::vector<CommContext *> derived_contexts;
     std::unordered_map<uint64_t, std::unique_ptr<DomainAllocation>> domain_allocations;
 #ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
-    std::unique_ptr<pto::comm::sdma::SdmaWorkspaceManager> sdma_workspace;
+    pto::comm::Workspace sdma_workspace{};
 #endif
 };
 
@@ -650,13 +650,40 @@ static std::string domain_barrier_tag(uint64_t allocation_id, const char *phase)
 // the build-time PTO-ISA dependency is absent.
 static void ensure_sdma_workspace(CommHandle h) {
 #ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
-    if (h->sdma_workspace) return;
-    h->sdma_workspace = std::make_unique<pto::comm::sdma::SdmaWorkspaceManager>();
-    if (h->sdma_workspace->Init()) {
-        h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->sdma_workspace->GetWorkspaceAddr());
-        h->host_ctx.workSpaceSize = 16 * 1024;
-    } else {
-        h->sdma_workspace.reset();
+    if (h->sdma_workspace.addr != nullptr || h->sdma_workspace.impl != nullptr) return;
+    pto::comm::WorkspaceRequest req{};
+    const auto status = pto::comm::CreateWorkspace(pto::comm::DmaEngine::SDMA, req, &h->sdma_workspace);
+    if (status == pto::comm::WorkspaceStatus::Ok) {
+        h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->sdma_workspace.addr);
+        h->host_ctx.workSpaceSize = h->sdma_workspace.bytes;
+        return;
+    }
+    pto::comm::AbandonWorkspace(&h->sdma_workspace);
+    h->host_ctx.workSpace = 0;
+    h->host_ctx.workSpaceSize = 0;
+#else
+    (void)h;
+#endif
+}
+
+static void destroy_sdma_workspace(CommHandle h) {
+#ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
+    if (h != nullptr) {
+        pto::comm::DestroyWorkspace(&h->sdma_workspace);
+        h->host_ctx.workSpace = 0;
+        h->host_ctx.workSpaceSize = 0;
+    }
+#else
+    (void)h;
+#endif
+}
+
+static void abandon_sdma_workspace(CommHandle h) {
+#ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
+    if (h != nullptr) {
+        pto::comm::AbandonWorkspace(&h->sdma_workspace);
+        h->host_ctx.workSpace = 0;
+        h->host_ctx.workSpaceSize = 0;
     }
 #else
     (void)h;
@@ -1136,6 +1163,7 @@ extern "C" int comm_destroy(CommHandle h) try {
             if (rc == 0) rc = -1;
         }
     }
+    destroy_sdma_workspace(h);
 
     // NOTE: we do NOT destroy h->stream — it is caller-owned.
     // We also do NOT call aclrtResetDevice / aclFinalize here.  Device/ACL
@@ -1155,10 +1183,12 @@ extern "C" int comm_destroy(CommHandle h) try {
     return rc;
 } catch (const std::exception &e) {
     LOG_ERROR("[comm] comm_destroy: exception: %s", e.what());
+    abandon_sdma_workspace(h);
     if (h) delete h;
     return -1;
 } catch (...) {
     LOG_ERROR("[comm] comm_destroy: unknown exception");
+    abandon_sdma_workspace(h);
     if (h) delete h;
     return -1;
 }

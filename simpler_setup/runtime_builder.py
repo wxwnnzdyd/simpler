@@ -242,8 +242,9 @@ class RuntimeBuilder:
         """Stamp identifying the sources this build was compiled from.
 
         Combines the runtime repo HEAD with the pto-isa commit for onboard
-        runtimes that embed PTO-ISA host headers, so the cmake cache is
-        invalidated whenever either changes. An
+        runtimes that embed PTO-ISA host headers, and the CANN toolkit root
+        for onboard runtimes, so the cmake cache is invalidated whenever any
+        compiled dependency source changes. An
         empty runtime HEAD is preserved verbatim so the
         ``_invalidate_cache_if_stale`` 'unavailable → clean rebuild' path still
         fires rather than being masked by a present pto-isa commit.
@@ -253,9 +254,12 @@ class RuntimeBuilder:
             return ""
         if pto_isa_commit is None:
             pto_isa_commit = self._resolve_build_pto_isa_commit()
+        parts = [runtime_commit]
         if pto_isa_commit:
-            return f"{runtime_commit}:pto-isa={pto_isa_commit}"
-        return runtime_commit
+            parts.append(f"pto-isa={pto_isa_commit}")
+        if self._variant == "onboard":
+            parts.append(f"ascend-home={os.environ.get('ASCEND_HOME_PATH', '').strip()}")
+        return ":".join(parts)
 
     def _lookup_binaries(self, name: str, output_dir: Path) -> RuntimeBinaries:
         """Look up pre-built binaries from output_dir.

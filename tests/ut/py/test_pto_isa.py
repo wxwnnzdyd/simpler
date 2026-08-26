@@ -58,6 +58,7 @@ def test_clone_lands_on_pinned_commit(tmp_path, monkeypatch):
     target = tmp_path / "build" / "pto-isa"
     calls = []
 
+    monkeypatch.delenv(pto_isa.PTO_ISA_CLONE_URL_ENV, raising=False)
     monkeypatch.setattr(pto_isa, "_is_git_available", lambda: True)
 
     def fake_run_git(args, cwd=None, timeout=30, check=False):
@@ -70,6 +71,28 @@ def test_clone_lands_on_pinned_commit(tmp_path, monkeypatch):
     assert pto_isa._clone(target, PIN_A, verbose=False)
     assert calls == [
         ["clone", "--no-checkout", "https://github.com/hw-native-sys/pto-isa.git", str(target)],
+        ["checkout", "--detach", "--force", PIN_A],
+    ]
+
+
+def test_clone_uses_pto_isa_clone_url_env(tmp_path, monkeypatch):
+    target = tmp_path / "build" / "pto-isa"
+    clone_url = "https://gitcode.com/wxwnnzdyd/pto-isa.git"
+    calls = []
+
+    monkeypatch.setenv(pto_isa.PTO_ISA_CLONE_URL_ENV, clone_url)
+    monkeypatch.setattr(pto_isa, "_is_git_available", lambda: True)
+
+    def fake_run_git(args, cwd=None, timeout=30, check=False):
+        calls.append(args)
+        return subprocess.CompletedProcess(["git", *args], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(pto_isa, "_run_git", fake_run_git)
+    monkeypatch.setattr(pto_isa, "get_pto_isa_head", lambda root: PIN_A)
+
+    assert pto_isa._clone(target, PIN_A, verbose=False)
+    assert calls == [
+        ["clone", "--no-checkout", clone_url, str(target)],
         ["checkout", "--detach", "--force", PIN_A],
     ]
 
@@ -113,6 +136,50 @@ def test_ensure_pto_isa_root_clones_when_missing(tmp_path, monkeypatch):
 
     assert pto_isa.ensure_pto_isa_root() == str(clone_path.resolve())
     assert events == [("clone", clone_path, PIN_A)]
+
+
+def test_ensure_pto_isa_root_links_matching_sibling_checkout(tmp_path, monkeypatch):
+    clone_path = tmp_path / "simpler" / "build" / "pto-isa"
+    sibling = tmp_path / "pto-isa"
+    make_pto_isa_checkout(sibling)
+
+    monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: PIN_A)
+    monkeypatch.setattr(pto_isa, "get_pto_isa_clone_path", lambda: clone_path)
+    monkeypatch.setattr(pto_isa, "get_pto_isa_head", lambda root: PIN_A if root == str(sibling) else "")
+    monkeypatch.setattr(pto_isa, "_clone", lambda *a, **k: pytest.fail("unexpected clone when sibling matches pin"))
+
+    assert pto_isa.ensure_pto_isa_root(verbose=True) == str(sibling.resolve())
+    assert clone_path.is_symlink()
+    assert clone_path.resolve() == sibling.resolve()
+
+
+def test_ensure_pto_isa_root_ignores_wrong_revision_sibling_checkout(tmp_path, monkeypatch):
+    clone_path = tmp_path / "simpler" / "build" / "pto-isa"
+    sibling = tmp_path / "pto-isa"
+    make_pto_isa_checkout(sibling)
+    events = []
+
+    monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: PIN_A)
+    monkeypatch.setattr(pto_isa, "get_pto_isa_clone_path", lambda: clone_path)
+    monkeypatch.setattr(
+        pto_isa,
+        "get_pto_isa_head",
+        lambda root: PIN_B if root == str(sibling) else PIN_A,
+    )
+    monkeypatch.setattr(
+        pto_isa, "_is_pristine_at_commit", lambda *a, **k: pytest.fail("unexpected pristine check before clone")
+    )
+
+    def fake_clone(path, commit, verbose=False):
+        events.append(("clone", path, commit))
+        make_pto_isa_checkout(path)
+        return True
+
+    monkeypatch.setattr(pto_isa, "_clone", fake_clone)
+
+    assert pto_isa.ensure_pto_isa_root(verbose=True) == str(clone_path.resolve())
+    assert events == [("clone", clone_path, PIN_A)]
+    assert not clone_path.is_symlink()
 
 
 def test_is_cloned_requires_arch_instruction_headers(tmp_path):

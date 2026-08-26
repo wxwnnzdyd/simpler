@@ -50,7 +50,7 @@
 #include "hccl/hccl_comm.h"
 #include "hccl/hccl_types.h"
 #ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
-#include "pto/comm/async/sdma/sdma_workspace_manager.hpp"
+#include "pto/comm/workspace.hpp"
 #endif
 #ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
 #include "pto/comm/async/urma/urma_workspace_manager.hpp"
@@ -118,7 +118,7 @@ struct CommHandle_ {
     std::vector<CommContext *> derived_contexts;
     std::unordered_map<uint64_t, std::unique_ptr<DomainAllocation>> domain_allocations;
 #ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
-    std::unique_ptr<pto::comm::sdma::SdmaWorkspaceManager> sdma_workspace;
+    pto::comm::Workspace sdma_workspace{};
 #endif
 #ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
     std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> urma_workspace;
@@ -292,6 +292,11 @@ static void reset_domain_async_workspace(DomainAllocation &alloc) {
 
 static void reset_handle_async_workspace(CommHandle h) {
     if (h == nullptr) return;
+#ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
+    pto::comm::DestroyWorkspace(&h->sdma_workspace);
+    h->host_ctx.workSpace = 0;
+    h->host_ctx.workSpaceSize = 0;
+#endif
 #ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
     h->urma_workspace.reset();
 #endif
@@ -797,14 +802,17 @@ static std::string domain_barrier_tag(uint64_t allocation_id, const char *phase)
 // stays 0, SDMA demos self-skip) when the macro is undefined.
 static void ensure_sdma_workspace(CommHandle h) {
 #ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
-    if (h->sdma_workspace) return;
-    h->sdma_workspace = std::make_unique<pto::comm::sdma::SdmaWorkspaceManager>();
-    if (h->sdma_workspace->Init()) {
-        h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->sdma_workspace->GetWorkspaceAddr());
-        h->host_ctx.workSpaceSize = 16 * 1024;
-    } else {
-        h->sdma_workspace.reset();
+    if (h->sdma_workspace.addr != nullptr || h->sdma_workspace.impl != nullptr) return;
+    pto::comm::WorkspaceRequest req{};
+    const auto status = pto::comm::CreateWorkspace(pto::comm::DmaEngine::SDMA, req, &h->sdma_workspace);
+    if (status == pto::comm::WorkspaceStatus::Ok) {
+        h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->sdma_workspace.addr);
+        h->host_ctx.workSpaceSize = h->sdma_workspace.bytes;
+        return;
     }
+    pto::comm::AbandonWorkspace(&h->sdma_workspace);
+    h->host_ctx.workSpace = 0;
+    h->host_ctx.workSpaceSize = 0;
 #else
     (void)h;
 #endif
@@ -1311,9 +1319,9 @@ static int domain_alloc_via_ipc(
     uint64_t domain_workspace_addr = 0;
     uint64_t domain_workspace_size = 0;
 #ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
-    if (h->sdma_workspace) {
-        domain_workspace_addr = reinterpret_cast<uint64_t>(h->sdma_workspace->GetWorkspaceAddr());
-        domain_workspace_size = 16 * 1024;
+    if (h->sdma_workspace.addr != nullptr || h->sdma_workspace.impl != nullptr) {
+        domain_workspace_addr = reinterpret_cast<uint64_t>(h->sdma_workspace.addr);
+        domain_workspace_size = h->sdma_workspace.bytes;
     }
 #endif
 #ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE

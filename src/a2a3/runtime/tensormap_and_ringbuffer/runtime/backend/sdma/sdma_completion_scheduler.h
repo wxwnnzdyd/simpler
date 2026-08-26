@@ -64,3 +64,13 @@ inline void retire_sdma_event_record(uint64_t record_addr) {
     __atomic_store_n(channel_info, packed, __ATOMIC_RELEASE);
     cache_flush_range(const_cast<const void *>(reinterpret_cast<volatile void *>(channel_info)), sizeof(uint64_t));
 }
+
+inline CompletionPollResult poll_sdma_post_done(uint64_t record_addr, uint64_t post_id) {
+    if (record_addr == 0 || post_id == 0) {
+        return {CompletionPollState::FAILED, PTO2_ERROR_ASYNC_COMPLETION_INVALID};
+    }
+    volatile uint64_t *record = reinterpret_cast<volatile uint64_t *>(static_cast<uintptr_t>(record_addr));
+    cache_invalidate_range(reinterpret_cast<const void *>(sdma_completion_cache_line(record)), PTO2_ALIGN_SIZE);
+    uint64_t done_id = __atomic_load_n(record, __ATOMIC_ACQUIRE);
+    return {done_id >= post_id ? CompletionPollState::READY : CompletionPollState::PENDING, PTO2_ERROR_NONE};
+}
