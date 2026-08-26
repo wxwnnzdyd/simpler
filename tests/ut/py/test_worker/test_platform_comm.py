@@ -169,7 +169,24 @@ def _rank_entry(
             non_dense_ctx_ptr = worker.comm_derive_context(comm, non_dense_rank_ids, non_dense_domain_rank, 0, 4096)
             non_dense_ctx = _CommContext()
             worker.copy_from(ctypes.addressof(non_dense_ctx), non_dense_ctx_ptr, ctypes.sizeof(non_dense_ctx))
-            if non_dense_ctx.workSpace != 0 or non_dense_ctx.workSpaceSize != 0:
+            sdma_overlay_enabled = os.environ.get("SIMPLER_ENABLE_PTO_SDMA_WORKSPACE", "").upper() in {
+                "1",
+                "ON",
+                "TRUE",
+                "YES",
+            }
+            if sdma_overlay_enabled:
+                if non_dense_ctx.workSpace != host_ctx.workSpace:
+                    raise AssertionError(
+                        f"non-dense derived SDMA workSpace=0x{non_dense_ctx.workSpace:x}, "
+                        f"expected base=0x{host_ctx.workSpace:x}"
+                    )
+                if non_dense_ctx.workSpaceSize != host_ctx.workSpaceSize:
+                    raise AssertionError(
+                        f"non-dense derived SDMA workSpaceSize={non_dense_ctx.workSpaceSize}, "
+                        f"expected base={host_ctx.workSpaceSize}"
+                    )
+            elif non_dense_ctx.workSpace != 0 or non_dense_ctx.workSpaceSize != 0:
                 raise AssertionError(
                     "non-dense derived context must disable URMA workspace, got "
                     f"workSpace=0x{non_dense_ctx.workSpace:x} workSpaceSize={non_dense_ctx.workSpaceSize}"
