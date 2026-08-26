@@ -294,6 +294,95 @@ inline CompletionPollResult poll_rdma_event_handle(uint64_t event_handle, uint64
     };
 }
 
+inline void
+log_rdma_event_handle_snapshot(uint64_t event_handle, uint64_t workspace_addr, int32_t entry_idx, int32_t cond_idx) {
+    uint32_t dest_rank = 0;
+    uint32_t target_head = 0;
+    decode_rdma_event_handle(event_handle, dest_rank, target_head);
+    LOG_INFO_V9(
+        "[ASYNC_WAIT RDMA entry=%d cond=%d] handle=0x%llx workspace=0x%llx dest_rank=%u target_head=%u", entry_idx,
+        cond_idx, static_cast<unsigned long long>(event_handle), static_cast<unsigned long long>(workspace_addr),
+        dest_rank, target_head
+    );
+
+    if (event_handle == 0 || workspace_addr == 0 || is_rdma_error_handle(event_handle)) {
+        return;
+    }
+
+    auto *info = reinterpret_cast<volatile RdmaInfo *>(static_cast<uintptr_t>(workspace_addr));
+    invalidate_object(info, sizeof(*info));
+    const uint32_t magic = __atomic_load_n(&info->magic, __ATOMIC_ACQUIRE);
+    const uint32_t version = __atomic_load_n(&info->version, __ATOMIC_ACQUIRE);
+    const uint32_t backend = __atomic_load_n(&info->backend, __ATOMIC_ACQUIRE);
+    const uint32_t qp_num = __atomic_load_n(&info->qp_num, __ATOMIC_ACQUIRE);
+    const uint32_t rank_count = __atomic_load_n(&info->rank_count, __ATOMIC_ACQUIRE);
+    const uint64_t sq_ptr = __atomic_load_n(&info->sq_ptr, __ATOMIC_ACQUIRE);
+    const uint64_t scq_ptr = __atomic_load_n(&info->scq_ptr, __ATOMIC_ACQUIRE);
+    LOG_INFO_V9(
+        "[ASYNC_WAIT RDMA entry=%d cond=%d] info magic=0x%x version=%u backend=%u qp_num=%u rank_count=%u sq=0x%llx "
+        "scq=0x%llx",
+        entry_idx, cond_idx, magic, version, backend, qp_num, rank_count, static_cast<unsigned long long>(sq_ptr),
+        static_cast<unsigned long long>(scq_ptr)
+    );
+    if (magic != kRdmaWorkspaceMagic || version != kRdmaWorkspaceVersion || backend != kRdmaBackendHns1825 ||
+        qp_num == 0 || dest_rank >= rank_count || sq_ptr == 0 || scq_ptr == 0) {
+        return;
+    }
+
+    const uint64_t ctx_index = static_cast<uint64_t>(dest_rank) * qp_num;
+    auto *cq_entry = reinterpret_cast<volatile RdmaCqCtx *>(
+        static_cast<uintptr_t>(scq_ptr + ctx_index * static_cast<uint64_t>(sizeof(RdmaCqCtx)))
+    );
+    auto *wq_entry = reinterpret_cast<volatile RdmaWqCtx *>(
+        static_cast<uintptr_t>(sq_ptr + ctx_index * static_cast<uint64_t>(sizeof(RdmaWqCtx)))
+    );
+    invalidate_object(cq_entry, sizeof(*cq_entry));
+    invalidate_object(wq_entry, sizeof(*wq_entry));
+
+    RdmaCqCtx cq_ctx{};
+    cq_ctx.buf_addr = __atomic_load_n(&cq_entry->buf_addr, __ATOMIC_ACQUIRE);
+    cq_ctx.cqe_size = __atomic_load_n(&cq_entry->cqe_size, __ATOMIC_ACQUIRE);
+    cq_ctx.depth = __atomic_load_n(&cq_entry->depth, __ATOMIC_ACQUIRE);
+    cq_ctx.tail_addr = __atomic_load_n(&cq_entry->tail_addr, __ATOMIC_ACQUIRE);
+    cq_ctx.db_sw_addr = __atomic_load_n(&cq_entry->db_sw_addr, __ATOMIC_ACQUIRE);
+    RdmaWqCtx wq_ctx{};
+    wq_ctx.tail_addr = __atomic_load_n(&wq_entry->tail_addr, __ATOMIC_ACQUIRE);
+    const uint32_t cqe_size = cq_ctx.cqe_size == 0 ? kCqeBytes : cq_ctx.cqe_size;
+    const uint32_t cur_tail = cq_ctx.tail_addr != 0 ? load_device_u32(cq_ctx.tail_addr) : 0;
+    const bool ctx_valid = cqe_size >= sizeof(Hns1825Cqe) && cqe_size <= kCqeBytes && cq_ctx.buf_addr != 0 &&
+                           cq_ctx.tail_addr != 0 && cq_ctx.db_sw_addr != 0 && is_power_of_two(cq_ctx.depth);
+    LOG_INFO_V9(
+        "[ASYNC_WAIT RDMA entry=%d cond=%d] cq depth=%u cqe_size=%u cur_tail=%u target_head=%u cq_buf=0x%llx "
+        "cq_tail=0x%llx cq_db_sw=0x%llx sq_tail=0x%llx valid=%u",
+        entry_idx, cond_idx, cq_ctx.depth, cqe_size, cur_tail, target_head,
+        static_cast<unsigned long long>(cq_ctx.buf_addr), static_cast<unsigned long long>(cq_ctx.tail_addr),
+        static_cast<unsigned long long>(cq_ctx.db_sw_addr), static_cast<unsigned long long>(wq_ctx.tail_addr),
+        static_cast<unsigned>(ctx_valid)
+    );
+    if (!ctx_valid || has_reached(cur_tail, target_head)) {
+        return;
+    }
+
+    const uint64_t cqe_addr =
+        cq_ctx.buf_addr + static_cast<uint64_t>(cqe_size) * static_cast<uint64_t>(cur_tail & (cq_ctx.depth - 1));
+    auto *cqe = reinterpret_cast<volatile Hns1825Cqe *>(static_cast<uintptr_t>(cqe_addr));
+    invalidate_object(cqe, sizeof(*cqe));
+    const uint32_t owner_id_qpn = __atomic_load_n(&cqe->owner_id_qpn, __ATOMIC_ACQUIRE);
+    const uint32_t op_sr_wqebb = __atomic_load_n(&cqe->op_sr_wqebb, __ATOMIC_ACQUIRE);
+    constexpr uint32_t kOwnerShift = 31;
+    constexpr uint32_t kCqeOpcodeShift = 27;
+    constexpr uint32_t kCqeOpcodeMask = 0x1f;
+    const bool owner = (owner_id_qpn & (1u << kOwnerShift)) != 0;
+    const uint32_t cqe_type = (op_sr_wqebb >> kCqeOpcodeShift) & kCqeOpcodeMask;
+    LOG_INFO_V9(
+        "[ASYNC_WAIT RDMA entry=%d cond=%d] cqe addr=0x%llx owner=%u ready=%u type=0x%x owner_id_qpn=0x%x "
+        "op_sr_wqebb=0x%x syndrome=0x%x",
+        entry_idx, cond_idx, static_cast<unsigned long long>(cqe_addr), static_cast<unsigned>(owner),
+        static_cast<unsigned>(is_hns1825_cqe_owner_ready(owner, cur_tail, cq_ctx.depth)), cqe_type, owner_id_qpn,
+        op_sr_wqebb, static_cast<unsigned>(__atomic_load_n(&cqe->syndrome, __ATOMIC_ACQUIRE))
+    );
+}
+
 inline void retire_rdma_event_handle(uint64_t /*event_handle*/, uint64_t /*workspace_addr*/) {}
 
 }  // namespace pto2::rdma_backend

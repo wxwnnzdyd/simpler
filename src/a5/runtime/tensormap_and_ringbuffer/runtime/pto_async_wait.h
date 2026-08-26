@@ -322,6 +322,8 @@ struct AsyncWaitList {
         int thread_idx
 #endif
     );
+
+    void log_diagnostics(AICoreCompletionMailbox *aicore_mailbox);
 };
 
 #endif  // PTO_ASYNC_WAIT_H
