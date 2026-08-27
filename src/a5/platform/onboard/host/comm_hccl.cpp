@@ -49,11 +49,8 @@
 #include "acl/acl.h"
 #include "hccl/hccl_comm.h"
 #include "hccl/hccl_types.h"
-#ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
+#if defined(SIMPLER_ENABLE_PTO_SDMA_WORKSPACE) || defined(SIMPLER_ENABLE_PTO_URMA_WORKSPACE)
 #include "pto/comm/workspace.hpp"
-#endif
-#ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
-#include "pto/comm/async/urma/urma_workspace_manager.hpp"
 #endif
 #ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
 #ifndef __gm__
@@ -94,7 +91,7 @@ struct DomainAllocation {
     // these are released explicitly at domain teardown rather than left to reset.
     std::vector<std::pair<void *, aclrtDrvMemHandle>> peer_windows;
 #ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
-    std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> urma_workspace;
+    pto::comm::Workspace urma_workspace{};
 #endif
 #ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
     std::unique_ptr<pto::comm::rdma::RdmaWorkspaceManager> rdma_workspace;
@@ -121,7 +118,7 @@ struct CommHandle_ {
     pto::comm::Workspace sdma_workspace{};
 #endif
 #ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
-    std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> urma_workspace;
+    pto::comm::Workspace urma_workspace{};
 #endif
 #ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
     std::unique_ptr<pto::comm::rdma::RdmaWorkspaceManager> rdma_workspace;
@@ -283,7 +280,7 @@ static void release_domain_peer_windows(DomainAllocation &alloc) {
 static void reset_domain_async_workspace(DomainAllocation &alloc) {
     (void)alloc;
 #ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
-    alloc.urma_workspace.reset();
+    pto::comm::DestroyWorkspace(&alloc.urma_workspace);
 #endif
 #ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
     alloc.rdma_workspace.reset();
@@ -298,7 +295,9 @@ static void reset_handle_async_workspace(CommHandle h) {
     h->host_ctx.workSpaceSize = 0;
 #endif
 #ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
-    h->urma_workspace.reset();
+    pto::comm::DestroyWorkspace(&h->urma_workspace);
+    h->host_ctx.workSpace = 0;
+    h->host_ctx.workSpaceSize = 0;
 #endif
 #ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
     h->rdma_workspace.reset();
@@ -819,16 +818,6 @@ static void ensure_sdma_workspace(CommHandle h) {
 }
 
 #ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
-static uint64_t urma_workspace_bytes(uint32_t rank_count) {
-    using namespace pto::comm::urma;
-    constexpr uint32_t qp_num = 1;
-    return sizeof(UrmaInfo) +
-           static_cast<uint64_t>(rank_count) *
-               (2ULL * sizeof(UrmaWQCtx) * qp_num + 2ULL * sizeof(UrmaCqCtx) * qp_num + sizeof(UrmaMemInfo) * qp_num);
-}
-#endif
-
-#ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
 static bool rank_ids_are_dense_prefix(const uint32_t *rank_ids, size_t rank_count) {
     if (rank_ids == nullptr) return false;
     for (size_t i = 0; i < rank_count; ++i) {
@@ -839,29 +828,37 @@ static bool rank_ids_are_dense_prefix(const uint32_t *rank_ids, size_t rank_coun
 
 static bool init_urma_workspace(
     CommHandle h, uint32_t rank_id, uint32_t rank_count, void *symmetric_addr, uint64_t symmetric_size,
-    std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> &workspace
+    pto::comm::Workspace &workspace
 ) {
-    if (workspace) return workspace->GetWorkspaceAddr() != nullptr;
+    if (workspace.addr != nullptr || workspace.impl != nullptr) return workspace.addr != nullptr;
     if (h == nullptr || h->hccl_comm == nullptr || symmetric_addr == nullptr || symmetric_size == 0 ||
         rank_id >= rank_count) {
         return false;
     }
 
-    auto manager = std::make_unique<pto::comm::urma::UrmaWorkspaceManager>();
-    if (!manager->Init(h->hccl_comm, rank_id, rank_count, symmetric_addr, symmetric_size)) {
+    pto::comm::WorkspaceRequest req{};
+    req.hcclComm = h->hccl_comm;
+    req.rankId = rank_id;
+    req.rankNum = rank_count;
+    req.symmetricAddr = symmetric_addr;
+    req.symmetricBytes = symmetric_size;
+    const auto status = pto::comm::CreateWorkspace(pto::comm::DmaEngine::URMA, req, &workspace);
+    if (status != pto::comm::WorkspaceStatus::Ok) {
         LOG_WARN(
-            "[comm rank %d] URMA workspace init failed (rank_id=%u rank_count=%u size=%llu)", h->rank, rank_id,
-            rank_count, static_cast<unsigned long long>(symmetric_size)
+            "[comm rank %d] URMA workspace init failed (status=%d rank_id=%u rank_count=%u size=%llu)", h->rank,
+            static_cast<int>(status), rank_id, rank_count, static_cast<unsigned long long>(symmetric_size)
         );
+        pto::comm::AbandonWorkspace(&workspace);
         return false;
     }
-    workspace = std::move(manager);
     return true;
 }
 
 static bool ensure_base_urma_workspace(CommHandle h) {
     if (h == nullptr) return false;
-    if (h->urma_workspace) return h->host_ctx.workSpace != 0 && h->host_ctx.workSpaceSize != 0;
+    if (h->urma_workspace.addr != nullptr || h->urma_workspace.impl != nullptr) {
+        return h->host_ctx.workSpace != 0 && h->host_ctx.workSpaceSize != 0;
+    }
     void *local_buf = reinterpret_cast<void *>(static_cast<uintptr_t>(h->host_ctx.windowsIn[h->rank]));
     if (!init_urma_workspace(
             h, static_cast<uint32_t>(h->rank), static_cast<uint32_t>(h->nranks), local_buf, h->host_ctx.winSize,
@@ -869,8 +866,8 @@ static bool ensure_base_urma_workspace(CommHandle h) {
         )) {
         return false;
     }
-    h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->urma_workspace->GetWorkspaceAddr());
-    h->host_ctx.workSpaceSize = urma_workspace_bytes(static_cast<uint32_t>(h->nranks));
+    h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->urma_workspace.addr);
+    h->host_ctx.workSpaceSize = h->urma_workspace.bytes;
     return h->host_ctx.workSpace != 0 && h->host_ctx.workSpaceSize != 0;
 }
 #endif
@@ -1334,8 +1331,8 @@ static int domain_alloc_via_ipc(
             release_own_vmm_window(localBuf, handle);
             return -1;
         }
-        domain_workspace_addr = reinterpret_cast<uint64_t>(out->urma_workspace->GetWorkspaceAddr());
-        domain_workspace_size = urma_workspace_bytes(static_cast<uint32_t>(rank_count));
+        domain_workspace_addr = reinterpret_cast<uint64_t>(out->urma_workspace.addr);
+        domain_workspace_size = out->urma_workspace.bytes;
     } else {
         LOG_WARN("[comm rank %d] alloc_domain: URMA workspace disabled for non-dense rank mapping", h->rank);
     }

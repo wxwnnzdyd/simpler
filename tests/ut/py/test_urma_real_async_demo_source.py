@@ -135,27 +135,47 @@ def test_phase2_workspace_smoke_asserts_a5_acceptance_points() -> None:
 def test_phase2_comm_hccl_initializes_and_propagates_urma_workspace() -> None:
     source = (REPO_ROOT / "src/a5/platform/onboard/host/comm_hccl.cpp").read_text()
     assert "if (!ensure_base_urma_workspace(h)) return -1;" in source
-    assert "h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->urma_workspace->GetWorkspaceAddr())" in source
-    assert "h->host_ctx.workSpaceSize = urma_workspace_bytes" in source
+    assert "h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->urma_workspace.addr)" in source
+    assert "h->host_ctx.workSpaceSize = h->urma_workspace.bytes" in source
     assert "ctx.workSpace = h->host_ctx.workSpace" in source
-    assert "slice_window_addr(h->host_ctx.windowsIn[base_rank], window_offset)" in source
-    assert "domain_alloc_via_ipc" not in source
-    assert "out->urma_workspace" not in source
+    assert "ctx.windowsIn[i] = h->host_ctx.windowsIn[base_rank] + window_offset" in source
+    assert "ctx.windowsOut[i] = h->host_ctx.windowsOut[base_rank] + window_offset" in source
+    assert "static int domain_alloc_via_ipc" in source
+    assert "domain_workspace_addr = reinterpret_cast<uint64_t>(out->urma_workspace.addr)" in source
+    assert "domain_workspace_size = out->urma_workspace.bytes" in source
     assert "rank_ids_are_dense_prefix" in source
     assert "URMA workspace disabled for non-dense rank mapping" in source
 
 
-def test_phase3_comm_hccl_uses_native_urma_workspace_manager() -> None:
+def test_phase3_comm_hccl_uses_unified_urma_workspace() -> None:
     source = (REPO_ROOT / "src/a5/platform/onboard/host/comm_hccl.cpp").read_text()
     cmake = (REPO_ROOT / "src/a5/platform/onboard/host/CMakeLists.txt").read_text()
-    assert '#include "pto/comm/async/urma/urma_workspace_manager.hpp"' in source
-    assert "pto::comm::urma::UrmaWorkspaceManager" in source
+    assert '#include "pto/comm/workspace.hpp"' in source
+    assert "pto::comm::Workspace urma_workspace{}" in source
+    assert "pto::comm::WorkspaceRequest req{}" in source
+    assert "req.hcclComm = h->hccl_comm" in source
+    assert "req.rankId = rank_id" in source
+    assert "req.rankNum = rank_count" in source
+    assert "req.symmetricAddr = symmetric_addr" in source
+    assert "req.symmetricBytes = symmetric_size" in source
+    assert "pto::comm::CreateWorkspace(pto::comm::DmaEngine::URMA, req, &workspace)" in source
+    assert "pto::comm::DestroyWorkspace(&h->urma_workspace)" in source
+    assert "pto::comm::DestroyWorkspace(&alloc.urma_workspace)" in source
+    assert "pto::comm::AbandonWorkspace(&workspace)" in source
+    assert "urma_workspace_bytes" not in source
+    assert '#include "pto/comm/async/urma/urma_workspace_manager.hpp"' not in source
+    assert "pto::comm::urma::UrmaWorkspaceManager" not in source
     assert "class A5UrmaWorkspaceManager" not in source
     assert "ResolveDeviceChannelEntity" not in source
     assert "refusing private conversion" not in source
     assert "BuildChannelEntityToDevice" not in source
     assert "GetUserRemoteMem" not in source
     assert "set(HCCL_LINK_TARGETS ${HCCL_LIB} ${HCOMM_LIB})" in cmake
+    assert "SIMPLER_ENABLE_PTO_URMA_WORKSPACE=1" in cmake
+    assert "PTO_COMM_WORKSPACE_SDMA_SUPPORTED=0" in cmake
+    assert "PTO_COMM_WORKSPACE_URMA_SUPPORTED=1" in cmake
+    assert "PTO_COMM_WORKSPACE_RDMA_SUPPORTED=0" in cmake
+    assert "PTO_URMA_SUPPORTED" in cmake
 
 
 def test_phase3_comm_alloc_windows_fails_without_urma_workspace() -> None:
