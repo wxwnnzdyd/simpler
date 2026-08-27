@@ -308,8 +308,7 @@ def test_phase4_real_deferred_consumer_depends_on_deferred_outputs() -> None:
 
 def test_phase4_urma_backend_design_tracks_current_contract() -> None:
     source = URMA_BACKEND_DESIGN.read_text()
-    design = (REPO_ROOT.parent / "design.md").read_text()
-    design_zn = (REPO_ROOT.parent / "design_zn.md").read_text()
+    status = STATUS_DOC.read_text()
 
     assert "PTO-ISA URMA async operations" in source
     assert "backend_cookie = workspace" in source
@@ -321,6 +320,5 @@ def test_phase4_urma_backend_design_tracks_current_contract() -> None:
     assert "Address helper" in source
     assert "peer_mr_base_addr" in source
     assert "peer_mr_ptr" in source
-    assert "peer_mr_base_addr" in design
-    assert "peer_mr_ptr" in design
-    assert "peer_mr_base_addr" in design_zn
+    assert "peer_mr_base_addr" in status
+    assert "peer_mr_ptr" in status
