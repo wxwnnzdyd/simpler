@@ -140,6 +140,9 @@ def test_phase2_comm_hccl_initializes_and_propagates_urma_workspace() -> None:
     assert "ctx.workSpace = h->host_ctx.workSpace" in source
     assert "ctx.windowsIn[i] = h->host_ctx.windowsIn[base_rank] + window_offset" in source
     assert "ctx.windowsOut[i] = h->host_ctx.windowsOut[base_rank] + window_offset" in source
+    assert "if (!rank_ids_are_dense_prefix(rank_ids, rank_count))" in source
+    assert "ctx.workSpace = 0" in source
+    assert "ctx.workSpaceSize = 0" in source
     assert "static int domain_alloc_via_ipc" in source
     assert "domain_workspace_addr = reinterpret_cast<uint64_t>(out->urma_workspace.addr)" in source
     assert "domain_workspace_size = out->urma_workspace.bytes" in source
