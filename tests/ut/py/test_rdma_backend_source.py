@@ -88,10 +88,18 @@ def test_a5_comm_hccl_uses_mr1374_rdma_host_api_shape() -> None:
     source = HOST_COMM.read_text()
 
     assert "#define __gm__" in source
-    assert "out.phy_id = static_cast<uint32_t>(device_id)" in source
+    assert "aclrtGetPhyDevIdByUserDevId" in source
+    assert "PTO_ROCE_PHYIDS" in source
     assert "PTO_ROCE_ROOTINFO" in source
+    assert "kDefaultRdmaRootinfoPath = \"/etc/hccl_rootinfo.json\"" in source
+    assert "kDefaultVirtualTopologyPath = \"/var/run/ascend-topologyd/virtualTopology.xml\"" in source
+    assert "rdma_resolve_local_ip_from_virtual_topology(out.phy_id, out.local_ip)" in source
+    assert "rdma_resolve_local_ip_from_env(base_rank, rank_count, out.local_ip)" in source
+    assert "PTO_ROCE_LOCAL_IP" in source
+    assert "PTO_ROCE_IPS" in source
     assert "rdma_resolve_local_ip_from_hccn_tool(device_id, out.local_ip)" in source
     assert "rdma_resolve_local_ip_from_rootinfo(out.phy_id, out.local_ip, rootinfo_path)" in source
+    assert "s.find(\"\\\"CLOS\\\"\", dev_key_pos)" in source
     assert "hccn_tool -g -dev_info -i %d" in source
     assert "\\\"addr\\\"" in source
     assert "manager->Init(config)" in source

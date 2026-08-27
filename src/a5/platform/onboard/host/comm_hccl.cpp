@@ -31,9 +31,11 @@
 #include <array>
 #include <chrono>
 #include <cctype>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -820,7 +822,6 @@ static uint64_t urma_workspace_bytes(uint32_t rank_count) {
 }
 #endif
 
-#ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
 static bool rank_ids_are_dense_prefix(const uint32_t *rank_ids, size_t rank_count) {
     if (rank_ids == nullptr) return false;
     for (size_t i = 0; i < rank_count; ++i) {
@@ -829,6 +830,7 @@ static bool rank_ids_are_dense_prefix(const uint32_t *rank_ids, size_t rank_coun
     return true;
 }
 
+#ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
 static bool init_urma_workspace(
     CommHandle h, uint32_t rank_id, uint32_t rank_count, void *symmetric_addr, uint64_t symmetric_size,
     std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> &workspace
@@ -873,6 +875,68 @@ struct RdmaBootstrapInfo {
     std::string local_ip;
     uint16_t base_port = 60032;
 };
+
+constexpr const char *kDefaultRdmaRootinfoPath = "/etc/hccl_rootinfo.json";
+constexpr const char *kDefaultVirtualTopologyPath = "/var/run/ascend-topologyd/virtualTopology.xml";
+
+static bool rdma_split_csv_env(const char *name, std::vector<std::string> &out) {
+    const char *value = std::getenv(name);
+    if (value == nullptr) return false;
+    std::stringstream ss(value);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        size_t b = item.find_first_not_of(" \t");
+        if (b == std::string::npos) continue;
+        size_t e = item.find_last_not_of(" \t");
+        out.push_back(item.substr(b, e - b + 1));
+    }
+    return !out.empty();
+}
+
+static bool rdma_resolve_phy_id_from_runtime(uint32_t &phy_id) {
+    using GetDevFn = int (*)(int32_t *);
+    using MapFn = int (*)(int32_t, int32_t *);
+
+    auto getDev = reinterpret_cast<GetDevFn>(dlsym(RTLD_DEFAULT, "aclrtGetDevice"));
+    auto byUser = reinterpret_cast<MapFn>(dlsym(RTLD_DEFAULT, "aclrtGetPhyDevIdByUserDevId"));
+    auto byLogic = reinterpret_cast<MapFn>(dlsym(RTLD_DEFAULT, "aclrtGetPhyDevIdByLogicDevId"));
+    auto byIndex = reinterpret_cast<MapFn>(dlsym(RTLD_DEFAULT, "rtGetDevicePhyIdByIndex"));
+    if (getDev == nullptr) return false;
+
+    int32_t user_id = -1;
+    if (getDev(&user_id) != 0 || user_id < 0) return false;
+
+    int32_t phy = -1;
+    if (byUser != nullptr && byUser(user_id, &phy) == 0 && phy >= 0) {
+        phy_id = static_cast<uint32_t>(phy);
+        return true;
+    }
+    if (byLogic != nullptr && byLogic(user_id, &phy) == 0 && phy >= 0) {
+        phy_id = static_cast<uint32_t>(phy);
+        return true;
+    }
+    if (byIndex != nullptr && byIndex(user_id, &phy) == 0 && phy >= 0) {
+        phy_id = static_cast<uint32_t>(phy);
+        return true;
+    }
+    return false;
+}
+
+static bool rdma_resolve_phy_id(uint32_t base_rank, uint32_t rank_count, int device_id, uint32_t &phy_id) {
+    std::vector<std::string> phy_ids;
+    if (rdma_split_csv_env("PTO_ROCE_PHYIDS", phy_ids) && phy_ids.size() == rank_count && base_rank < phy_ids.size()) {
+        char *end = nullptr;
+        unsigned long parsed = std::strtoul(phy_ids[base_rank].c_str(), &end, 10);
+        if (end != phy_ids[base_rank].c_str() && *end == '\0' && parsed <= UINT_MAX) {
+            phy_id = static_cast<uint32_t>(parsed);
+            return true;
+        }
+    }
+    if (rdma_resolve_phy_id_from_runtime(phy_id)) return true;
+    phy_id = static_cast<uint32_t>(device_id);
+    LOG_WARN("[comm] RDMA phyId resolution unavailable, falling back to device id %d", device_id);
+    return true;
+}
 
 static bool parse_u16_env(const char *name, uint16_t &out) {
     const char *value = std::getenv(name);
@@ -986,7 +1050,7 @@ static bool rdma_resolve_local_ip_from_hccn_tool(int device_id, std::string &ip)
 
 static const char *rdma_rootinfo_path() {
     const char *path = std::getenv("PTO_ROCE_ROOTINFO");
-    return path != nullptr && *path != '\0' ? path : "";
+    return path != nullptr && *path != '\0' ? path : kDefaultRdmaRootinfoPath;
 }
 
 static bool rdma_resolve_local_ip_from_rootinfo(uint32_t phy_id, std::string &ip, const char *rootinfo_path) {
@@ -1009,7 +1073,9 @@ static bool rdma_resolve_local_ip_from_rootinfo(uint32_t phy_id, std::string &ip
         size_t next_dev = s.find(device_key, dev_key_pos + device_key.size());
         size_t block_end = next_dev == std::string::npos ? s.size() : next_dev;
         if (dev == phy_id) {
-            size_t cur = dev_key_pos;
+            size_t clos = s.find("\"CLOS\"", dev_key_pos);
+            if (clos == std::string::npos || clos >= block_end) return false;
+            size_t cur = clos;
             std::string candidate;
             while (rdma_extract_quoted_after_key(s, addr_key, cur, candidate, block_end)) {
                 if (rdma_looks_like_ipv4(candidate)) {
@@ -1027,20 +1093,59 @@ static bool rdma_resolve_local_ip_from_rootinfo(uint32_t phy_id, std::string &ip
     return false;
 }
 
-static bool resolve_rdma_bootstrap(CommHandle h, uint32_t base_rank, int device_id, RdmaBootstrapInfo &out) {
-    (void)base_rank;
+static bool rdma_resolve_local_ip_from_virtual_topology(uint32_t phy_id, std::string &ip) {
+    if (phy_id > static_cast<uint32_t>(INT_MAX)) return false;
+    using ResolveFn = int (*)(int, char *, size_t);
+
+    void *topo_handle = nullptr;
+    auto resolve = reinterpret_cast<ResolveFn>(dlsym(RTLD_DEFAULT, "GetRoceIpFromXml"));
+    if (resolve == nullptr) {
+        topo_handle = dlopen("libtopoaddrinfo.so", RTLD_NOW | RTLD_LOCAL);
+        if (topo_handle == nullptr) return false;
+        resolve = reinterpret_cast<ResolveFn>(dlsym(topo_handle, "GetRoceIpFromXml"));
+    }
+
+    char buffer[64] = {0};
+    const bool ok = resolve != nullptr && resolve(static_cast<int>(phy_id), buffer, sizeof(buffer)) == 0 &&
+                    rdma_looks_like_ipv4(buffer);
+    if (ok) ip = buffer;
+    if (topo_handle != nullptr) dlclose(topo_handle);
+    return ok;
+}
+
+static bool rdma_resolve_local_ip_from_env(uint32_t base_rank, uint32_t rank_count, std::string &ip) {
+    const char *local_ip = std::getenv("PTO_ROCE_LOCAL_IP");
+    if (local_ip != nullptr && rdma_looks_like_ipv4(local_ip)) {
+        ip = local_ip;
+        return true;
+    }
+    std::vector<std::string> ips;
+    if (rdma_split_csv_env("PTO_ROCE_IPS", ips) && ips.size() == rank_count && base_rank < ips.size() &&
+        rdma_looks_like_ipv4(ips[base_rank])) {
+        ip = ips[base_rank];
+        return true;
+    }
+    return false;
+}
+
+static bool resolve_rdma_bootstrap(
+    CommHandle h, uint32_t base_rank, uint32_t rank_count, int device_id, RdmaBootstrapInfo &out
+) {
     if (h == nullptr || device_id < 0) {
         return false;
     }
 
-    // The public pto-isa package exposes the RDMA workspace manager through
-    // pkg_inc, but does not expose the old HNS1825 bootstrap helper. For the
-    // single-host A5 path, the ACL device id is also the HNS1825 physical id.
-    out.phy_id = static_cast<uint32_t>(device_id);
+    if (!rdma_resolve_phy_id(base_rank, rank_count, device_id, out.phy_id)) return false;
     const char *rootinfo_path = rdma_rootinfo_path();
     if (!rdma_resolve_local_ip_from_rootinfo(out.phy_id, out.local_ip, rootinfo_path) &&
+        !rdma_resolve_local_ip_from_virtual_topology(out.phy_id, out.local_ip) &&
+        !rdma_resolve_local_ip_from_env(base_rank, rank_count, out.local_ip) &&
         !rdma_resolve_local_ip_from_hccn_tool(device_id, out.local_ip)) {
-        LOG_ERROR("[comm rank %d] RDMA bootstrap failed to resolve local RoCE IP", h->rank);
+        LOG_ERROR(
+            "[comm rank %d] RDMA bootstrap failed to resolve local RoCE IP "
+            "(no usable %s CLOS entry, no usable %s, and no PTO_ROCE_LOCAL_IP / PTO_ROCE_IPS)",
+            h->rank, rootinfo_path, kDefaultVirtualTopologyPath
+        );
         return false;
     }
     if (!parse_u16_env("PTO_ROCE_BASE_PORT", out.base_port)) {
@@ -1199,7 +1304,9 @@ static int domain_alloc_via_ipc(
     const int32_t myPid = static_cast<int32_t>(getpid());
 #ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
     RdmaBootstrapInfo rdma_bootstrap{};
-    if (!resolve_rdma_bootstrap(h, static_cast<uint32_t>(h->rank), myDevice, rdma_bootstrap)) {
+    if (!resolve_rdma_bootstrap(
+            h, static_cast<uint32_t>(h->rank), static_cast<uint32_t>(rank_count), myDevice, rdma_bootstrap
+        )) {
         release_own_vmm_window(localBuf, handle);
         return -1;
     }
@@ -1518,8 +1625,10 @@ extern "C" int comm_derive_context(
     }
 
     CommContext ctx{};
-    ctx.workSpace = h->host_ctx.workSpace;
-    ctx.workSpaceSize = h->host_ctx.workSpaceSize;
+    if (rank_ids_are_dense_prefix(rank_ids, rank_count)) {
+        ctx.workSpace = h->host_ctx.workSpace;
+        ctx.workSpaceSize = h->host_ctx.workSpaceSize;
+    }
     ctx.rankId = domain_rank;
     ctx.rankNum = static_cast<uint32_t>(rank_count);
     ctx.winSize = window_size;

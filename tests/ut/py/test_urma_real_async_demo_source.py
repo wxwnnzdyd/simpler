@@ -137,10 +137,9 @@ def test_phase2_comm_hccl_initializes_and_propagates_urma_workspace() -> None:
     assert "if (!ensure_base_urma_workspace(h)) return -1;" in source
     assert "h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->urma_workspace->GetWorkspaceAddr())" in source
     assert "h->host_ctx.workSpaceSize = urma_workspace_bytes" in source
+    assert "if (rank_ids_are_dense_prefix(rank_ids, rank_count))" in source
     assert "ctx.workSpace = h->host_ctx.workSpace" in source
-    assert "slice_window_addr(h->host_ctx.windowsIn[base_rank], window_offset)" in source
-    assert "domain_alloc_via_ipc" not in source
-    assert "out->urma_workspace" not in source
+    assert "ctx.workSpaceSize = h->host_ctx.workSpaceSize" in source
     assert "rank_ids_are_dense_prefix" in source
     assert "URMA workspace disabled for non-dense rank mapping" in source
 
