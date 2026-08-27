@@ -532,7 +532,7 @@ class TestAbbrevStamp:
 
 
 class TestBuildCacheStamp:
-    """Test cmake cache stamp composition (runtime HEAD + pto-isa commit)."""
+    """Test cmake cache stamp composition (runtime HEAD + pto-isa/CANN inputs)."""
 
     def _make_builder(self, platform):
         from simpler_setup.platform_info import parse_platform  # noqa: PLC0415
@@ -553,7 +553,7 @@ class TestBuildCacheStamp:
         monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: "isa_sha")
 
         builder = self._make_builder(platform)
-        assert builder._build_cache_stamp() == "runtime_sha:pto-isa=isa_sha"
+        assert builder._build_cache_stamp() == "runtime_sha:pto-isa=isa_sha:ascend-home="
 
     def test_non_pto_user_uses_pure_runtime_sha(self, monkeypatch):
         """Other arch/variant ignores pto-isa → stamp keyed on runtime HEAD only."""

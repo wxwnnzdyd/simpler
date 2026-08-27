@@ -71,6 +71,9 @@ def test_a5_host_cmake_gates_rdma_workspace_overlay() -> None:
     assert "SIMPLER_ENABLE_PTO_URMA_WORKSPACE_DEFAULT ON" in cmake
     assert "Only one PTO async workspace overlay may be enabled" in cmake
     assert "PTO RDMA workspace overlay requires pto-isa RDMA headers" in cmake
+    assert "PTO_COMM_WORKSPACE_SDMA_SUPPORTED=0" in cmake
+    assert "PTO_COMM_WORKSPACE_URMA_SUPPORTED=0" in cmake
+    assert "PTO_COMM_WORKSPACE_RDMA_SUPPORTED=1" in cmake
     assert "PTO_RDMA_SUPPORTED" in cmake
     assert "PTO_RDMA_BACKEND_HNS_1825_SUPPORTED" in cmake
 
@@ -80,8 +83,8 @@ def test_a5_comm_hccl_keeps_urma_and_rdma_workspace_paths_macro_gated() -> None:
 
     assert "#ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE" in source
     assert "#ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE" in source
-    assert "#include \"pto/comm/async/rdma/rdma_workspace_manager.hpp\"" in source
-    assert "std::unique_ptr<pto::comm::rdma::RdmaWorkspaceManager> rdma_workspace" in source
+    assert "#include \"pto/comm/workspace.hpp\"" in source
+    assert "pto::comm::Workspace rdma_workspace{}" in source
 
 
 def test_a5_comm_hccl_uses_mr1374_rdma_host_api_shape() -> None:
@@ -94,8 +97,16 @@ def test_a5_comm_hccl_uses_mr1374_rdma_host_api_shape() -> None:
     assert "rdma_resolve_local_ip_from_rootinfo(out.phy_id, out.local_ip, rootinfo_path)" in source
     assert "hccn_tool -g -dev_info -i %d" in source
     assert "\\\"addr\\\"" in source
-    assert "manager->Init(config)" in source
-    assert "WorkspaceInitResult::READY" in source
+    assert "pto::comm::RdmaTransportConfig rdma{}" in source
+    assert "pto::comm::WorkspaceRequest req{}" in source
+    assert "req.rdma = &rdma" in source
+    assert "pto::comm::CreateWorkspace(pto::comm::DmaEngine::RDMA, req, &workspace)" in source
+    assert "pto::comm::DestroyWorkspace(&alloc.rdma_workspace)" in source
+    assert "pto::comm::DestroyWorkspace(&h->rdma_workspace)" in source
+    assert "pto::comm::AbandonWorkspace(&workspace)" in source
+    assert "rdma_workspace_bytes" not in source
+    assert "manager->Init(config)" not in source
+    assert "WorkspaceInitResult::READY" not in source
     assert "RdmaBackend::HNS_1825" not in source
 
 
