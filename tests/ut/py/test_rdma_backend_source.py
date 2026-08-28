@@ -155,11 +155,16 @@ def test_rdma_scheduler_stall_snapshot_reports_sq_and_cq_progress() -> None:
     source = RDMA_SCHEDULER.read_text()
 
     assert "load_device_u32_or_zero" in source
-    assert "sq wqn=%u head=%u tail=%u db_sw_be=0x%x" in source
+    assert "load_wq_ctx" in source
+    assert "load_cq_ctx" in source
+    assert "sq=0x%llx rq=0x%llx scq=0x%llx rcq=0x%llx" in source
+    assert "%s wqn=%u head=%u tail=%u db_sw_be=0x%x" in source
     assert "head_addr=0x%llx " in source
     assert "tail_addr=0x%llx db_hw=0x%llx db_sw=0x%llx" in source
-    assert "cq cqn=%u depth=%u cqe_size=%u cur_tail=%u target_head=%u" in source
+    assert "%s cqn=%u depth=%u cqe_size=%u cur_tail=%u target_head=%u" in source
     assert "db_sw_be=0x%x cq_buf=0x%llx" in source
+    assert "log_rdma_wq_snapshot(\"rq\"" in source
+    assert "log_rdma_cq_snapshot(\"rcq\"" in source
 
 
 def test_rdma_domain_bootstrap_resolves_env_arrays_by_domain_rank() -> None:
