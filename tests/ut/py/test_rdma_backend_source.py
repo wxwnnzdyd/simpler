@@ -177,6 +177,23 @@ def test_rdma_domain_bootstrap_resolves_env_arrays_by_domain_rank() -> None:
     assert "resolve_rdma_bootstrap(\n            h, static_cast<uint32_t>(h->rank)" not in source
 
 
+def test_rdma_kernel_uses_peer_independent_session_and_explicit_peer_ops() -> None:
+    backend = RDMA_BACKEND_KERNEL.read_text()
+    consumer = (
+        REPO_ROOT
+        / "examples/a5/tensormap_and_ringbuffer/rdma_deferred_completion_demo/kernels/aiv"
+        / "kernel_rdma_deferred_completion_consumer.cpp"
+    ).read_text()
+
+    assert "desc.scratch, desc.workspace, desc.local_rank, session, desc.sync_id" in backend
+    assert "desc.scratch, desc.workspace, desc.peer_rank, desc.local_rank, session" not in backend
+    assert "TGET_ASYNC<pto::comm::DmaEngine::RDMA>(desc.dst, desc.src, session, desc.peer_rank)" in backend
+    assert "TPUT_ASYNC<pto::comm::DmaEngine::RDMA>(desc.dst, desc.src, session, desc.peer_rank)" in backend
+    assert "comm_ctx->workSpace), comm_ctx->rankId," in consumer
+    assert "readback_session, 2" in consumer
+    assert "TGET_ASYNC<pto::comm::DmaEngine::RDMA>(local_scratch, remote_tput, readback_session, peer)" in consumer
+
+
 def test_a5_scheduler_invalidates_deferred_completion_slab_before_reading_count() -> None:
     source = SCHEDULER_COMPLETION.read_text()
     assert "volatile DeferredCompletionSlab *deferred_slab" in source

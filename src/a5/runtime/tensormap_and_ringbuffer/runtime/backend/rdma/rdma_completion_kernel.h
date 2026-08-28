@@ -135,7 +135,7 @@ submit_rdma_request_status(AsyncCtx &ctx, RdmaRequestDescriptor<DstTensor, SrcTe
 #if defined(PTO_RDMA_SUPPORTED)
     pto::comm::AsyncSession session;
     if (!pto::comm::BuildAsyncSession<pto::comm::DmaEngine::RDMA>(
-            desc.scratch, desc.workspace, desc.peer_rank, desc.local_rank, session, desc.sync_id
+            desc.scratch, desc.workspace, desc.local_rank, session, desc.sync_id
         )) {
         pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
         return RdmaSubmitStatus::BUILD_SESSION_FAILED;
@@ -143,9 +143,9 @@ submit_rdma_request_status(AsyncCtx &ctx, RdmaRequestDescriptor<DstTensor, SrcTe
 
     pto::comm::AsyncEvent event;
     if (desc.op == RdmaOp::TGET) {
-        event = pto::comm::TGET_ASYNC<pto::comm::DmaEngine::RDMA>(desc.dst, desc.src, session);
+        event = pto::comm::TGET_ASYNC<pto::comm::DmaEngine::RDMA>(desc.dst, desc.src, session, desc.peer_rank);
     } else {
-        event = pto::comm::TPUT_ASYNC<pto::comm::DmaEngine::RDMA>(desc.dst, desc.src, session);
+        event = pto::comm::TPUT_ASYNC<pto::comm::DmaEngine::RDMA>(desc.dst, desc.src, session, desc.peer_rank);
     }
     const pto2::detail::RdmaEventRegistrationResult reg_result =
         pto2::detail::register_rdma_async_event_status(ctx, event, session, desc.workspace);

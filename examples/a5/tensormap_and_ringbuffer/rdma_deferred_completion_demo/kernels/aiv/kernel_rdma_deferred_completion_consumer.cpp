@@ -84,7 +84,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     auto rdma_scratch = rdma_deferred_completion::rdma_scratch_tile();
     pto::comm::AsyncSession readback_session;
     if (!pto::comm::BuildAsyncSession<pto::comm::DmaEngine::RDMA>(
-            rdma_scratch, reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace), peer, comm_ctx->rankId,
+            rdma_scratch, reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace), comm_ctx->rankId,
             readback_session, 2
         )) {
         rdma_deferred_completion::set_status(
@@ -93,7 +93,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         return;
     }
     auto readback_event =
-        pto::comm::TGET_ASYNC<pto::comm::DmaEngine::RDMA>(local_scratch, remote_tput, readback_session);
+        pto::comm::TGET_ASYNC<pto::comm::DmaEngine::RDMA>(local_scratch, remote_tput, readback_session, peer);
     if (!rdma_deferred_completion::wait_rdma_bounded(readback_event, readback_session)) {
         rdma_deferred_completion::set_status(
             status, rdma_deferred_completion::Status::kTputReadbackFailed, elem_count, peer
