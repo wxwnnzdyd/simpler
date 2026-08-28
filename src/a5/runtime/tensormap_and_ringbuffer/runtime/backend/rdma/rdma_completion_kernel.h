@@ -112,6 +112,7 @@ enum class RdmaSubmitStatus : int32_t {
     INVALID_EVENT = -31,
     REGISTRATION_FAILED = -32,
     UNSUPPORTED = -33,
+    COMPLETION_FAILED = -34,
 };
 
 inline __aicore__ uint64_t peer_mr_base_addr(__gm__ uint8_t *workspace, uint32_t peer) {
@@ -153,6 +154,11 @@ submit_rdma_request_status(AsyncCtx &ctx, RdmaRequestDescriptor<DstTensor, SrcTe
         return reg_result == pto2::detail::RdmaEventRegistrationResult::INVALID_EVENT ?
                    RdmaSubmitStatus::INVALID_EVENT :
                    RdmaSubmitStatus::REGISTRATION_FAILED;
+    }
+    const uint32_t wait_status = pto::comm::rdma::WaitEventStatus(event.handle, session);
+    if (wait_status != 0) {
+        pto2::detail::defer_error(ctx, PTO2_ERROR_ASYNC_COMPLETION_INVALID);
+        return RdmaSubmitStatus::COMPLETION_FAILED;
     }
     pto2::detail::defer_flush(ctx);
     return RdmaSubmitStatus::OK;

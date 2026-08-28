@@ -37,6 +37,7 @@ def test_rdma_kernel_backend_exposes_deferred_adapter_contract() -> None:
     assert "DmaEngine::RDMA" in backend
     assert "TGET_ASYNC<pto::comm::DmaEngine::RDMA>" in backend
     assert "TPUT_ASYNC<pto::comm::DmaEngine::RDMA>" in backend
+    assert "WaitEventStatus(event.handle, session)" in backend
     assert "register_rdma_async_event" in backend
     assert "COMPLETION_ENGINE_ROCE" in backend
     assert "COMPLETION_TYPE_RDMA_EVENT_HANDLE" in backend
