@@ -32,7 +32,12 @@ namespace rdma_deferred_completion {
 using ShapeDyn = pto::Shape<1, 1, 1, 1, pto::DYNAMIC>;
 using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, 1>;
 using GlobalFloat = pto::GlobalTensor<float, ShapeDyn, StrideDyn>;
-using RdmaScratchTile = pto::Tile<pto::TileType::Vec, uint8_t, 1, pto::comm::sdma::UB_ALIGN_SIZE>;
+#ifdef PTO_RDMA_SUPPORTED
+constexpr uint32_t kRdmaScratchBytes = pto::comm::rdma::kRdmaScratchBytes;
+#else
+constexpr uint32_t kRdmaScratchBytes = pto::comm::sdma::UB_ALIGN_SIZE;
+#endif
+using RdmaScratchTile = pto::Tile<pto::TileType::Vec, uint8_t, 1, kRdmaScratchBytes>;
 
 constexpr uint32_t kMaxRemoteWritePollIters = 10000000;
 constexpr uint32_t kRdmaScratchOffset = 0;

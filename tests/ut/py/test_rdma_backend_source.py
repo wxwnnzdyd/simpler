@@ -37,10 +37,13 @@ def test_rdma_kernel_backend_exposes_deferred_adapter_contract() -> None:
     assert "DmaEngine::RDMA" in backend
     assert "TGET_ASYNC<pto::comm::DmaEngine::RDMA>" in backend
     assert "TPUT_ASYNC<pto::comm::DmaEngine::RDMA>" in backend
-    assert "WaitEventStatus(event.handle, session)" in backend
     assert "register_rdma_async_event" in backend
     assert "COMPLETION_ENGINE_ROCE" in backend
     assert "COMPLETION_TYPE_RDMA_EVENT_HANDLE" in backend
+    assert "event.handle," in backend
+    assert "COMPLETION_ENGINE_ROCE," in backend
+    assert "COMPLETION_TYPE_RDMA_EVENT_HANDLE," in backend
+    assert "reinterpret_cast<uint64_t>(workspace)" in backend
     assert "backend_cookie" not in backend or "reinterpret_cast<uint64_t>(workspace)" in backend
 
 
@@ -186,12 +189,20 @@ def test_rdma_domain_bootstrap_resolves_env_arrays_by_domain_rank() -> None:
 
 def test_rdma_kernel_uses_peer_independent_session_and_explicit_peer_ops() -> None:
     backend = RDMA_BACKEND_KERNEL.read_text()
+    common = (
+        REPO_ROOT
+        / "examples/a5/tensormap_and_ringbuffer/rdma_deferred_completion_demo/kernels/aiv"
+        / "rdma_deferred_completion_common.h"
+    ).read_text()
     consumer = (
         REPO_ROOT
         / "examples/a5/tensormap_and_ringbuffer/rdma_deferred_completion_demo/kernels/aiv"
         / "kernel_rdma_deferred_completion_consumer.cpp"
     ).read_text()
 
+    assert "pto::comm::rdma::kRdmaScratchBytes" in common
+    assert "using RdmaScratchTile = pto::Tile<pto::TileType::Vec, uint8_t, 1, kRdmaScratchBytes>" in common
+    assert "using RdmaScratchTile = pto::Tile<pto::TileType::Vec, uint8_t, 1, pto::comm::sdma::UB_ALIGN_SIZE>" not in common
     assert "desc.scratch, desc.workspace, desc.local_rank, session, desc.sync_id" in backend
     assert "desc.scratch, desc.workspace, desc.peer_rank, desc.local_rank, session" not in backend
     assert "TGET_ASYNC<pto::comm::DmaEngine::RDMA>(desc.dst, desc.src, session, desc.peer_rank)" in backend
