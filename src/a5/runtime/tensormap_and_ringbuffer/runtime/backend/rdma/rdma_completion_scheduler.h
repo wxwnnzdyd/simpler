@@ -143,6 +143,8 @@ inline uint32_t load_device_u32(uint64_t addr) {
     return __atomic_load_n(ptr, __ATOMIC_ACQUIRE);
 }
 
+inline uint32_t load_device_u32_or_zero(uint64_t addr) { return addr != 0 ? load_device_u32(addr) : 0; }
+
 inline void store_device_u32(uint64_t addr, uint32_t value) {
     auto *ptr = reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(addr));
     __atomic_store_n(ptr, value, __ATOMIC_RELEASE);
@@ -346,18 +348,32 @@ log_rdma_event_handle_snapshot(uint64_t event_handle, uint64_t workspace_addr, i
     cq_ctx.tail_addr = __atomic_load_n(&cq_entry->tail_addr, __ATOMIC_ACQUIRE);
     cq_ctx.db_sw_addr = __atomic_load_n(&cq_entry->db_sw_addr, __ATOMIC_ACQUIRE);
     RdmaWqCtx wq_ctx{};
+    wq_ctx.wqn = __atomic_load_n(&wq_entry->wqn, __ATOMIC_ACQUIRE);
+    wq_ctx.head_addr = __atomic_load_n(&wq_entry->head_addr, __ATOMIC_ACQUIRE);
     wq_ctx.tail_addr = __atomic_load_n(&wq_entry->tail_addr, __ATOMIC_ACQUIRE);
+    wq_ctx.db_addr = __atomic_load_n(&wq_entry->db_addr, __ATOMIC_ACQUIRE);
+    wq_ctx.db_sw_addr = __atomic_load_n(&wq_entry->db_sw_addr, __ATOMIC_ACQUIRE);
     const uint32_t cqe_size = cq_ctx.cqe_size == 0 ? kCqeBytes : cq_ctx.cqe_size;
     const uint32_t cur_tail = cq_ctx.tail_addr != 0 ? load_device_u32(cq_ctx.tail_addr) : 0;
+    const uint32_t sq_head = load_device_u32_or_zero(wq_ctx.head_addr);
+    const uint32_t sq_tail = load_device_u32_or_zero(wq_ctx.tail_addr);
+    const uint32_t sq_db_sw = load_device_u32_or_zero(wq_ctx.db_sw_addr);
+    const uint32_t cq_db_sw = load_device_u32_or_zero(cq_ctx.db_sw_addr);
     const bool ctx_valid = cqe_size >= sizeof(Hns1825Cqe) && cqe_size <= kCqeBytes && cq_ctx.buf_addr != 0 &&
                            cq_ctx.tail_addr != 0 && cq_ctx.db_sw_addr != 0 && is_power_of_two(cq_ctx.depth);
     LOG_INFO_V9(
-        "[ASYNC_WAIT RDMA entry=%d cond=%d] cq depth=%u cqe_size=%u cur_tail=%u target_head=%u cq_buf=0x%llx "
-        "cq_tail=0x%llx cq_db_sw=0x%llx sq_tail=0x%llx valid=%u",
-        entry_idx, cond_idx, cq_ctx.depth, cqe_size, cur_tail, target_head,
+        "[ASYNC_WAIT RDMA entry=%d cond=%d] sq wqn=%u head=%u tail=%u db_sw_be=0x%x head_addr=0x%llx "
+        "tail_addr=0x%llx db_hw=0x%llx db_sw=0x%llx",
+        entry_idx, cond_idx, wq_ctx.wqn, sq_head, sq_tail, sq_db_sw, static_cast<unsigned long long>(wq_ctx.head_addr),
+        static_cast<unsigned long long>(wq_ctx.tail_addr), static_cast<unsigned long long>(wq_ctx.db_addr),
+        static_cast<unsigned long long>(wq_ctx.db_sw_addr)
+    );
+    LOG_INFO_V9(
+        "[ASYNC_WAIT RDMA entry=%d cond=%d] cq cqn=%u depth=%u cqe_size=%u cur_tail=%u target_head=%u "
+        "db_sw_be=0x%x cq_buf=0x%llx cq_tail=0x%llx cq_db_sw=0x%llx valid=%u",
+        entry_idx, cond_idx, cq_ctx.cqn, cq_ctx.depth, cqe_size, cur_tail, target_head, cq_db_sw,
         static_cast<unsigned long long>(cq_ctx.buf_addr), static_cast<unsigned long long>(cq_ctx.tail_addr),
-        static_cast<unsigned long long>(cq_ctx.db_sw_addr), static_cast<unsigned long long>(wq_ctx.tail_addr),
-        static_cast<unsigned>(ctx_valid)
+        static_cast<unsigned long long>(cq_ctx.db_sw_addr), static_cast<unsigned>(ctx_valid)
     );
     if (!ctx_valid || has_reached(cur_tail, target_head)) {
         return;

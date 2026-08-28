@@ -1128,9 +1128,8 @@ static bool rdma_resolve_local_ip_from_env(uint32_t base_rank, uint32_t rank_cou
     return false;
 }
 
-static bool resolve_rdma_bootstrap(
-    CommHandle h, uint32_t base_rank, uint32_t rank_count, int device_id, RdmaBootstrapInfo &out
-) {
+static bool
+resolve_rdma_bootstrap(CommHandle h, uint32_t base_rank, uint32_t rank_count, int device_id, RdmaBootstrapInfo &out) {
     if (h == nullptr || device_id < 0) {
         return false;
     }
@@ -1304,9 +1303,7 @@ static int domain_alloc_via_ipc(
     const int32_t myPid = static_cast<int32_t>(getpid());
 #ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
     RdmaBootstrapInfo rdma_bootstrap{};
-    if (!resolve_rdma_bootstrap(
-            h, static_cast<uint32_t>(h->rank), static_cast<uint32_t>(rank_count), myDevice, rdma_bootstrap
-        )) {
+    if (!resolve_rdma_bootstrap(h, domain_rank, static_cast<uint32_t>(rank_count), myDevice, rdma_bootstrap)) {
         release_own_vmm_window(localBuf, handle);
         return -1;
     }

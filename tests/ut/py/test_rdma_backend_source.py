@@ -151,6 +151,27 @@ def test_rdma_scheduler_abi_matches_mr1374_workspace_and_hns1825_contexts() -> N
     assert "op_sr_wqebb" in source
 
 
+def test_rdma_scheduler_stall_snapshot_reports_sq_and_cq_progress() -> None:
+    source = RDMA_SCHEDULER.read_text()
+
+    assert "load_device_u32_or_zero" in source
+    assert "sq wqn=%u head=%u tail=%u db_sw_be=0x%x" in source
+    assert "head_addr=0x%llx " in source
+    assert "tail_addr=0x%llx db_hw=0x%llx db_sw=0x%llx" in source
+    assert "cq cqn=%u depth=%u cqe_size=%u cur_tail=%u target_head=%u" in source
+    assert "db_sw_be=0x%x cq_buf=0x%llx" in source
+
+
+def test_rdma_domain_bootstrap_resolves_env_arrays_by_domain_rank() -> None:
+    source = HOST_COMM.read_text()
+
+    assert (
+        "resolve_rdma_bootstrap(h, domain_rank, static_cast<uint32_t>(rank_count), myDevice, rdma_bootstrap)"
+        in source
+    )
+    assert "resolve_rdma_bootstrap(\n            h, static_cast<uint32_t>(h->rank)" not in source
+
+
 def test_a5_scheduler_invalidates_deferred_completion_slab_before_reading_count() -> None:
     source = SCHEDULER_COMPLETION.read_text()
     assert "volatile DeferredCompletionSlab *deferred_slab" in source
