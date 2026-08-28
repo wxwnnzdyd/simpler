@@ -141,6 +141,8 @@ def test_rdma_scheduler_abi_matches_mr1374_workspace_and_hns1825_contexts() -> N
     assert "static_assert(sizeof(RdmaCqCtx) == 64" in source
     assert "struct Hns1825Cqe" in source
     assert "static_assert(sizeof(Hns1825Cqe) == 32" in source
+    assert "struct RdmaMemInfo" in source
+    assert "static_assert(sizeof(RdmaMemInfo) == 24" in source
     assert "uint32_t cqe_size;" in source
     assert "1u << cq_ctx.cqe" not in source
     assert "db_sw_addr" in source
@@ -157,12 +159,16 @@ def test_rdma_scheduler_stall_snapshot_reports_sq_and_cq_progress() -> None:
     assert "load_device_u32_or_zero" in source
     assert "load_wq_ctx" in source
     assert "load_cq_ctx" in source
-    assert "sq=0x%llx rq=0x%llx scq=0x%llx rcq=0x%llx" in source
-    assert "%s wqn=%u head=%u tail=%u db_sw_be=0x%x" in source
+    assert "load_mem_info" in source
+    assert "sq=0x%llx rq=0x%llx scq=0x%llx rcq=0x%llx mem=0x%llx" in source
+    assert "%s wqn=%u depth=%u wqe_size=%u head=%u tail=%u db_sw_be=0x%x" in source
     assert "head_addr=0x%llx " in source
     assert "tail_addr=0x%llx db_hw=0x%llx db_sw=0x%llx" in source
     assert "%s cqn=%u depth=%u cqe_size=%u cur_tail=%u target_head=%u" in source
     assert "db_sw_be=0x%x cq_buf=0x%llx" in source
+    assert "log_rdma_mem_snapshot" in source
+    assert "log_rdma_wqe_snapshot" in source
+    assert "%s wqe index=%u addr=0x%llx raw64=" in source
     assert "log_rdma_wq_snapshot(\"rq\"" in source
     assert "log_rdma_cq_snapshot(\"rcq\"" in source
 
