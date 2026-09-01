@@ -25,6 +25,14 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     uint32_t second_count = rdma_deferred_completion::second_chunk_count(elem_count);
     auto rdma_scratch = rdma_deferred_completion::rdma_scratch_tile();
 
+    // DIAG: one-way discriminator (mirror of the TGET producer). rank 0 posts
+    // the TPUT and waits; rank 1 posts nothing. Confirms whether the wire path
+    // is fine in isolation vs. bidirectional RDMA being the failure trigger.
+    if (comm_ctx->rankId != 0) {
+        rdma_deferred_completion::store_marker(marker, 1);
+        return;
+    }
+
     auto local_send = rdma_deferred_completion::global_float(send, first_count);
     auto remote_tput = rdma_deferred_completion::global_float(remote_tput_slot, first_count);
     pto::comm::AsyncSession session;

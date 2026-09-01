@@ -24,6 +24,15 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     uint32_t second_count = rdma_deferred_completion::second_chunk_count(elem_count);
     auto rdma_scratch = rdma_deferred_completion::rdma_scratch_tile();
 
+    // DIAG: one-way discriminator. rank 0 posts the TGET and waits in AICore
+    // (equivalent to native root-only TGET); rank 1 posts nothing. If rank 0's
+    // wait succeeds, the wire path is fine and the failure is bidirectional
+    // RDMA; if rank 0 also times out, the AICore doorbell/compile is suspect.
+    if (comm_ctx->rankId != 0) {
+        rdma_deferred_completion::store_marker(marker, 1);
+        return;
+    }
+
     auto local_tget = rdma_deferred_completion::global_float(tget, first_count);
     auto remote_send_g = rdma_deferred_completion::global_float(remote_send, first_count);
     pto::comm::AsyncSession session;
