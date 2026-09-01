@@ -292,15 +292,16 @@ inline void log_rdma_cq_snapshot(
     const char *queue_name, const RdmaCqCtx &cq_ctx, uint32_t target_head, int32_t entry_idx, int32_t cond_idx
 ) {
     const uint32_t cqe_size = cq_ctx.cqe_size == 0 ? kCqeBytes : cq_ctx.cqe_size;
+    const uint32_t cur_head = load_device_u32_or_zero(cq_ctx.head_addr);
     const uint32_t cur_tail = load_device_u32_or_zero(cq_ctx.tail_addr);
     const bool ctx_valid = is_cq_ctx_valid(cq_ctx, cqe_size);
     LOG_INFO_V9(
-        "[ASYNC_WAIT RDMA entry=%d cond=%d] %s cqn=%u depth=%u cqe_size=%u cur_tail=%u target_head=%u "
-        "db_sw_be=0x%x cq_buf=0x%llx cq_tail=0x%llx cq_db_sw=0x%llx valid=%u",
-        entry_idx, cond_idx, queue_name, cq_ctx.cqn, cq_ctx.depth, cqe_size, cur_tail, target_head,
+        "[ASYNC_WAIT RDMA entry=%d cond=%d] %s cqn=%u depth=%u cqe_size=%u cur_head=%u cur_tail=%u target_head=%u "
+        "db_sw_be=0x%x cq_buf=0x%llx cq_head=0x%llx cq_tail=0x%llx cq_db_sw=0x%llx valid=%u",
+        entry_idx, cond_idx, queue_name, cq_ctx.cqn, cq_ctx.depth, cqe_size, cur_head, cur_tail, target_head,
         load_device_u32_or_zero(cq_ctx.db_sw_addr), static_cast<unsigned long long>(cq_ctx.buf_addr),
-        static_cast<unsigned long long>(cq_ctx.tail_addr), static_cast<unsigned long long>(cq_ctx.db_sw_addr),
-        static_cast<unsigned>(ctx_valid)
+        static_cast<unsigned long long>(cq_ctx.head_addr), static_cast<unsigned long long>(cq_ctx.tail_addr),
+        static_cast<unsigned long long>(cq_ctx.db_sw_addr), static_cast<unsigned>(ctx_valid)
     );
     log_rdma_cqe_snapshot(queue_name, cq_ctx, cur_tail, cqe_size, entry_idx, cond_idx);
 }
