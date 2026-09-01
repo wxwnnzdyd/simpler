@@ -272,6 +272,18 @@ static void release_own_vmm_window(void *va, aclrtDrvMemHandle handle) {
     }
 }
 
+// RDMA-aware raw-window release for domain_alloc_via_ipc failure paths: under
+// the RDMA overlay the buffer is a plain low-segment aclrtMalloc pointer and
+// must be aclrtFree'd (never unmap/release a non-VMM address); otherwise it is
+// a VMM-mapped VA released via release_own_vmm_window.
+static void release_domain_window_raw(void *buf, aclrtDrvMemHandle handle) {
+#ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
+    if (buf != nullptr) aclrtFree(buf);
+#else
+    release_own_vmm_window(buf, handle);
+#endif
+}
+
 // Release every per-peer VMM import recorded on a domain allocation and clear
 // the list, so a re-release is a no-op.  Own window and device_ctx are freed
 // separately by the caller.
@@ -280,6 +292,22 @@ static void release_domain_peer_windows(DomainAllocation &alloc) {
         release_own_vmm_window(pw.first, pw.second);
     }
     alloc.peer_windows.clear();
+}
+
+// Release the own local window.  Under the RDMA overlay the window is a plain
+// low-segment aclrtMalloc pointer (own_handle == nullptr); otherwise it is a
+// VMM-mapped VA with a physical handle.
+static void release_domain_local_buffer(DomainAllocation &alloc) {
+    if (alloc.local_buf == nullptr) return;
+#ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
+    aclrtFree(alloc.local_buf);
+    alloc.local_buf = nullptr;
+    alloc.own_handle = nullptr;
+#else
+    release_own_vmm_window(alloc.local_buf, alloc.own_handle);
+    alloc.local_buf = nullptr;
+    alloc.own_handle = nullptr;
+#endif
 }
 
 static void reset_domain_async_workspace(DomainAllocation &alloc) {
@@ -1163,6 +1191,30 @@ static uint64_t rdma_workspace_bytes(uint32_t rank_count) {
                (2ULL * sizeof(RoceSqCtx) * qp_num + 2ULL * sizeof(RoceCqCtx) * qp_num + sizeof(RdmaMemInfo));
 }
 
+// The HNS1825 RDMA NIC can only DMA to the low GM segment (native pto-isa
+// tests aclrtMalloc(HUGE_FIRST) into 0x1200..., and a VMM window reserved with
+// hint=0 lands at 0x1240...000000, which the NIC never reaches — WQEs are
+// consumed but no CQE ever appears). aclrtMalloc is not guaranteed to return
+// in the low segment, so retry a bounded number of times and verify the base
+// stays below the 0x1200... segment ceiling. Used only for the RDMA overlay's
+// symmetric buffer; the non-RDMA VMM path is unchanged.
+static bool aclrt_malloc_low_segment(void **out, size_t size) {
+    constexpr uint32_t kMaxAttempts = 16;
+    constexpr uintptr_t kLowSegmentCeiling = UINT64_C(0x120000000000);
+    for (uint32_t attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        void *buf = nullptr;
+        if (aclrtMalloc(&buf, size, ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS || buf == nullptr) {
+            continue;
+        }
+        if (reinterpret_cast<uintptr_t>(buf) < kLowSegmentCeiling) {
+            *out = buf;
+            return true;
+        }
+        aclrtFree(buf);
+    }
+    return false;
+}
+
 static bool init_rdma_workspace(
     CommHandle h, uint32_t domain_rank, uint32_t rank_count, const RdmaBootstrapInfo &bootstrap,
     const std::vector<IpcAnnounceFile> &peers, void *symmetric_addr, uint64_t symmetric_size,
@@ -1235,6 +1287,7 @@ static int domain_alloc_via_ipc(
     const uint64_t run_token = h->run_token;
     const int subset_n = static_cast<int>(rank_count);
     const int my_dr = static_cast<int>(domain_rank);
+    aclError aret = ACL_SUCCESS;  // shared by both allocation branches and the ctx upload below
 
     int32_t myDevice = -1;
     if (aclrtGetDevice(&myDevice) != ACL_SUCCESS) {
@@ -1242,9 +1295,23 @@ static int domain_alloc_via_ipc(
         return -1;
     }
 
-    // VMM own-window allocation; see alloc_windows_via_ipc for step-by-step
-    // rationale. aligned_size is also stored in the DomainAllocation so the
-    // caller can zero the full mapped range.
+    // Own-window allocation.  The non-RDMA path uses the VMM shareable-handle
+    // dance (see alloc_windows_via_ipc for step-by-step rationale) so peers can
+    // import each other's VA.  The RDMA overlay instead aclrtMallocs a buffer
+    // in the low GM segment (0x1200...) that the HNS1825 NIC can DMA to — a VMM
+    // window reserved with hint=0 lands at 0x1240...000000, which the NIC never
+    // reaches (WQEs consumed, no CQE).  RDMA reaches peers via rkey+VA, so no
+    // shareable handle is exchanged.
+#ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
+    void *localBuf = nullptr;
+    if (!aclrt_malloc_low_segment(&localBuf, win_size)) {
+        LOG_ERROR("[comm rank %d] alloc_domain: low-segment aclrtMalloc failed", h->rank);
+        return -1;
+    }
+    const uint64_t aligned_size = win_size;
+    aclrtDrvMemHandle handle = nullptr;  // unused for aclrtMalloc (VMM-only)
+    uint64_t shareableHandle = 0;        // RDMA reaches peers via rkey; no shareable handle
+#else
     aclrtPhysicalMemProp prop{};
     prop.handleType = ACL_MEM_HANDLE_TYPE_NONE;
     prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
@@ -1252,7 +1319,7 @@ static int domain_alloc_via_ipc(
     prop.location.id = static_cast<uint32_t>(myDevice);
     prop.location.type = ACL_MEM_LOCATION_TYPE_DEVICE;
     size_t granularity = 0;
-    aclError aret = aclrtMemGetAllocationGranularity(&prop, ACL_RT_MEM_ALLOC_GRANULARITY_MINIMUM, &granularity);
+    aret = aclrtMemGetAllocationGranularity(&prop, ACL_RT_MEM_ALLOC_GRANULARITY_MINIMUM, &granularity);
     if (aret != ACL_SUCCESS) {
         LOG_ERROR("[comm rank %d] alloc_domain: GetAllocationGranularity -> %d", h->rank, static_cast<int>(aret));
         return -1;
@@ -1287,24 +1354,24 @@ static int domain_alloc_via_ipc(
     aret = aclrtMemSetAccess(localBuf, aligned_size, &accessDesc, 1);
     if (aret != ACL_SUCCESS) {
         LOG_ERROR("[comm rank %d] alloc_domain: MemSetAccess -> %d", h->rank, static_cast<int>(aret));
-        release_own_vmm_window(localBuf, handle);
+        release_domain_window_raw(localBuf, handle);
         return -1;
     }
-    uint64_t shareableHandle = 0;
     aret = aclrtMemExportToShareableHandle(
         handle, ACL_MEM_HANDLE_TYPE_NONE, ACL_RT_VMM_EXPORT_FLAG_DISABLE_PID_VALIDATION, &shareableHandle
     );
     if (aret != ACL_SUCCESS) {
         LOG_ERROR("[comm rank %d] alloc_domain: ExportToShareableHandle -> %d", h->rank, static_cast<int>(aret));
-        release_own_vmm_window(localBuf, handle);
+        release_domain_window_raw(localBuf, handle);
         return -1;
     }
+#endif
 
     const int32_t myPid = static_cast<int32_t>(getpid());
 #ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
     RdmaBootstrapInfo rdma_bootstrap{};
     if (!resolve_rdma_bootstrap(h, domain_rank, static_cast<uint32_t>(rank_count), myDevice, rdma_bootstrap)) {
-        release_own_vmm_window(localBuf, handle);
+        release_domain_window_raw(localBuf, handle);
         return -1;
     }
     if (!domain_write_announce(
@@ -1316,7 +1383,7 @@ static int domain_alloc_via_ipc(
     if (!domain_write_announce(rootinfo, allocation_id, domain_rank, run_token, myPid, myDevice, shareableHandle)) {
 #endif
         LOG_ERROR("[comm rank %d] alloc_domain: write_announce failed", h->rank);
-        release_own_vmm_window(localBuf, handle);
+        release_domain_window_raw(localBuf, handle);
         return -1;
     }
     std::vector<IpcAnnounceFile> peers(subset_n);
@@ -1337,7 +1404,7 @@ static int domain_alloc_via_ipc(
         }
         if (!domain_read_announce(rootinfo, allocation_id, static_cast<uint32_t>(p), run_token, &peers[p])) {
             LOG_ERROR("[comm rank %d] alloc_domain: read_announce(peer_dr=%d) timed out", h->rank, p);
-            release_own_vmm_window(localBuf, handle);
+            release_domain_window_raw(localBuf, handle);
             return -1;
         }
     }
@@ -1349,6 +1416,11 @@ static int domain_alloc_via_ipc(
     // and per device-pair; once any allocation opens a pair, later ones simply
     // observe it. The enable is the operative call (resolves the peer physical
     // id via the HCCL adapter and opens the HCCS route).
+    //
+    // The RDMA overlay reaches peers over RoCE (HCOMM channel), not HCCS, so
+    // the HCCS peer-access enable/confirm dance is skipped there; the
+    // file_barrier below still synchronizes the announce exchange.
+#ifndef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
     for (int p = 0; p < subset_n; ++p) {
         if (p == my_dr) continue;
         aclError r = aclrtDeviceEnablePeerAccess(peers[p].device_id, 0);
@@ -1376,7 +1448,7 @@ static int domain_alloc_via_ipc(
                     "[comm rank %d] alloc_domain: PeerAccessStatus(local_dev=%d peer_dev=%d) -> %d", h->rank, myDevice,
                     peers[p].device_id, static_cast<int>(r)
                 );
-                release_own_vmm_window(localBuf, handle);
+                release_domain_window_raw(localBuf, handle);
                 return -1;
             }
             if (status == 1) break;
@@ -1391,11 +1463,12 @@ static int domain_alloc_via_ipc(
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
+#endif
 
     // With DISABLE_PID_VALIDATION the import can proceed once peers have
     // published their shareable handles (read above) and P2P is up.
     if (!file_barrier(rootinfo, my_dr, subset_n, domain_barrier_tag(allocation_id, "p2p_ready"), run_token)) {
-        release_own_vmm_window(localBuf, handle);
+        release_domain_window_raw(localBuf, handle);
         return -1;
     }
 
@@ -1427,7 +1500,7 @@ static int domain_alloc_via_ipc(
             )) {
             reset_domain_async_workspace(*out);
             release_domain_peer_windows(*out);
-            release_own_vmm_window(localBuf, handle);
+            release_domain_window_raw(localBuf, handle);
             return -1;
         }
         domain_workspace_addr = reinterpret_cast<uint64_t>(out->urma_workspace->GetWorkspaceAddr());
@@ -1443,7 +1516,7 @@ static int domain_alloc_via_ipc(
         )) {
         reset_domain_async_workspace(*out);
         release_domain_peer_windows(*out);
-        release_own_vmm_window(localBuf, handle);
+        release_domain_window_raw(localBuf, handle);
         return -1;
     }
     domain_workspace_addr = reinterpret_cast<uint64_t>(out->rdma_workspace->GetWorkspaceAddr());
@@ -1459,6 +1532,11 @@ static int domain_alloc_via_ipc(
     ctx.windowsIn[my_dr] = reinterpret_cast<uint64_t>(localBuf);
     // Import each peer's shareable handle onto our device; see the symmetry
     // note in alloc_windows_via_ipc (one win_size, shared chip granularity).
+    //
+    // The RDMA overlay reaches peers over RoCE via rkey+VA (PeerMrBaseAddr),
+    // and the RDMA kernels only ever read windowsIn[own], so no peer VA import
+    // is needed there — the loop below is skipped and peer_windows stays empty.
+#ifndef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
     for (int p = 0; p < subset_n; ++p) {
         if (p == my_dr) continue;
         aclrtDrvMemHandle peerHandle = nullptr;
@@ -1470,7 +1548,7 @@ static int domain_alloc_via_ipc(
             );
             reset_domain_async_workspace(*out);
             release_domain_peer_windows(*out);
-            release_own_vmm_window(localBuf, handle);
+            release_domain_window_raw(localBuf, handle);
             return -1;
         }
         void *peerVa = nullptr;
@@ -1483,7 +1561,7 @@ static int domain_alloc_via_ipc(
             aclrtFreePhysical(peerHandle);
             reset_domain_async_workspace(*out);
             release_domain_peer_windows(*out);
-            release_own_vmm_window(localBuf, handle);
+            release_domain_window_raw(localBuf, handle);
             return -1;
         }
         aret = aclrtMapMem(peerVa, aligned_size, 0, peerHandle, 0);
@@ -1493,7 +1571,7 @@ static int domain_alloc_via_ipc(
             aclrtFreePhysical(peerHandle);
             reset_domain_async_workspace(*out);
             release_domain_peer_windows(*out);
-            release_own_vmm_window(localBuf, handle);
+            release_domain_window_raw(localBuf, handle);
             return -1;
         }
         aret = aclrtMemSetAccess(peerVa, aligned_size, &accessDesc, 1);
@@ -1506,12 +1584,13 @@ static int domain_alloc_via_ipc(
             aclrtFreePhysical(peerHandle);
             reset_domain_async_workspace(*out);
             release_domain_peer_windows(*out);
-            release_own_vmm_window(localBuf, handle);
+            release_domain_window_raw(localBuf, handle);
             return -1;
         }
         out->peer_windows.emplace_back(peerVa, peerHandle);
         ctx.windowsIn[p] = reinterpret_cast<uint64_t>(peerVa);
     }
+#endif
 
     void *newDevMem = nullptr;
     aret = aclrtMalloc(&newDevMem, sizeof(CommContext), ACL_MEM_MALLOC_HUGE_FIRST);
@@ -1519,7 +1598,7 @@ static int domain_alloc_via_ipc(
         LOG_ERROR("[comm rank %d] alloc_domain: ctx aclrtMalloc -> %d", h->rank, static_cast<int>(aret));
         reset_domain_async_workspace(*out);
         release_domain_peer_windows(*out);
-        release_own_vmm_window(localBuf, handle);
+        release_domain_window_raw(localBuf, handle);
         return -1;
     }
     aret = aclrtMemcpy(newDevMem, sizeof(CommContext), &ctx, sizeof(CommContext), ACL_MEMCPY_HOST_TO_DEVICE);
@@ -1528,7 +1607,7 @@ static int domain_alloc_via_ipc(
         aclrtFree(newDevMem);
         reset_domain_async_workspace(*out);
         release_domain_peer_windows(*out);
-        release_own_vmm_window(localBuf, handle);
+        release_domain_window_raw(localBuf, handle);
         return -1;
     }
     out->device_ctx = reinterpret_cast<CommContext *>(newDevMem);
@@ -1729,7 +1808,7 @@ extern "C" int comm_alloc_domain_windows(
         aclrtFree(alloc->device_ctx);
         reset_domain_async_workspace(*alloc);
         release_domain_peer_windows(*alloc);
-        release_own_vmm_window(alloc->local_buf, alloc->own_handle);
+        release_domain_local_buffer(*alloc);
         return -1;
     }
 
@@ -1787,7 +1866,7 @@ comm_release_domain_windows(CommHandle h, uint64_t allocation_id, size_t rank_co
     // handle.
     release_domain_peer_windows(*alloc);
     if (alloc->local_buf) {
-        release_own_vmm_window(alloc->local_buf, alloc->own_handle);
+        release_domain_local_buffer(*alloc);
         alloc->local_buf = nullptr;
         alloc->own_handle = nullptr;
     }
@@ -1829,7 +1908,7 @@ extern "C" int comm_destroy(CommHandle h) try {
         if (alloc->device_ctx) aclrtFree(alloc->device_ctx);
         reset_domain_async_workspace(*alloc);
         release_domain_peer_windows(*alloc);
-        if (alloc->local_buf) release_own_vmm_window(alloc->local_buf, alloc->own_handle);
+        if (alloc->local_buf) release_domain_local_buffer(*alloc);
     }
     h->domain_allocations.clear();
     reset_handle_async_workspace(h);
