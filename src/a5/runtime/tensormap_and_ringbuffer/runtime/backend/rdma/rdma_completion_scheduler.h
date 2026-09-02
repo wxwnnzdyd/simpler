@@ -64,7 +64,8 @@ struct RdmaWqCtx {
     uint32_t amo_lkey;
     uint64_t db_sw_addr;
     uint8_t mtu_shift;
-    uint8_t reserved[7];
+    uint8_t db_cos;
+    uint8_t reserved[6];
 };
 
 struct RdmaCqCtx {
@@ -104,6 +105,8 @@ static_assert(offsetof(RdmaInfo, sq_ptr) == 24, "RDMA info ABI drift");
 static_assert(sizeof(RdmaWqCtx) == 96, "RDMA WQ context ABI drift");
 static_assert(offsetof(RdmaWqCtx, db_addr) == 48, "RDMA WQ context ABI drift");
 static_assert(offsetof(RdmaWqCtx, db_sw_addr) == 80, "RDMA WQ context ABI drift");
+static_assert(offsetof(RdmaWqCtx, mtu_shift) == 88, "RDMA WQ context ABI drift");
+static_assert(offsetof(RdmaWqCtx, db_cos) == 89, "RDMA WQ context ABI drift");
 static_assert(sizeof(RdmaCqCtx) == 64, "RDMA CQ context ABI drift");
 static_assert(offsetof(RdmaCqCtx, db_addr) == 48, "RDMA CQ context ABI drift");
 static_assert(offsetof(RdmaCqCtx, db_sw_addr) == 56, "RDMA CQ context ABI drift");
@@ -168,6 +171,7 @@ inline RdmaWqCtx load_wq_ctx(uint64_t wq_ptr, uint64_t ctx_index) {
     wq_ctx.db_addr = __atomic_load_n(&wq_entry->db_addr, __ATOMIC_ACQUIRE);
     wq_ctx.db_sw_addr = __atomic_load_n(&wq_entry->db_sw_addr, __ATOMIC_ACQUIRE);
     wq_ctx.mtu_shift = __atomic_load_n(&wq_entry->mtu_shift, __ATOMIC_ACQUIRE);
+    wq_ctx.db_cos = __atomic_load_n(&wq_entry->db_cos, __ATOMIC_ACQUIRE);
     return wq_ctx;
 }
 
@@ -340,14 +344,13 @@ inline void ring_sq_doorbell_from_aicpu(const RdmaWqCtx &wq_ctx, uint32_t cur_he
     constexpr uint32_t kDbTypeSq = 21;
     constexpr uint32_t kSgidIdx = 1;
     constexpr uint32_t kCntxSize = 1;
-    constexpr uint8_t kDefaultDbCos = 0x7;
     // Bit layout mirrors pto-isa Hns1825SqDb: qpn[19:0] cntx_size[21:20]
     // rsvd0[22] c[23] cos[26:24] type[31:27] pi[39:32] rsvd1[47:40]
     // xrc_vld[48] rsvd2[49] mtu_shift[52:50] sgid_index[59:53] sub_type[63:60].
     uint64_t dbValue = 0;
     dbValue |= static_cast<uint64_t>(wq_ctx.wqn & 0xfffffULL);                       // qpn
     dbValue |= static_cast<uint64_t>(kCntxSize) << 20;                              // cntx_size
-    dbValue |= static_cast<uint64_t>(kDefaultDbCos) << 24;                          // cos
+    dbValue |= static_cast<uint64_t>(wq_ctx.db_cos & 0x7ULL) << 24;                 // cos (from workspace)
     dbValue |= static_cast<uint64_t>(kDbTypeSq) << 27;                              // type
     dbValue |= static_cast<uint64_t>(wq_ctx.mtu_shift & 0x7ULL) << 50;              // mtu_shift
     dbValue |= static_cast<uint64_t>(kSgidIdx & 0x7fULL) << 53;                     // sgid_index
@@ -356,9 +359,9 @@ inline void ring_sq_doorbell_from_aicpu(const RdmaWqCtx &wq_ctx, uint32_t cur_he
         auto *db = reinterpret_cast<volatile uint64_t *>(static_cast<uintptr_t>(wq_ctx.db_addr));
         __atomic_store_n(db, dbValue, __ATOMIC_RELEASE);
         LOG_INFO_V9(
-            "[ASYNC_WAIT RDMA] AICPU re-ring SQ doorbell db_addr=0x%llx head=%u dbValue=0x%llx",
+            "[ASYNC_WAIT RDMA] AICPU re-ring SQ doorbell db_addr=0x%llx head=%u db_cos=%u dbValue=0x%llx",
             static_cast<unsigned long long>(wq_ctx.db_addr), cur_head,
-            static_cast<unsigned long long>(dbValue)
+            static_cast<unsigned>(wq_ctx.db_cos), static_cast<unsigned long long>(dbValue)
         );
     }
 }
@@ -430,6 +433,7 @@ inline CompletionPollResult poll_rdma_event_handle(uint64_t event_handle, uint64
     wq_ctx.db_addr = __atomic_load_n(&wq_entry->db_addr, __ATOMIC_ACQUIRE);
     wq_ctx.db_sw_addr = __atomic_load_n(&wq_entry->db_sw_addr, __ATOMIC_ACQUIRE);
     wq_ctx.mtu_shift = __atomic_load_n(&wq_entry->mtu_shift, __ATOMIC_ACQUIRE);
+    wq_ctx.db_cos = __atomic_load_n(&wq_entry->db_cos, __ATOMIC_ACQUIRE);
     const uint32_t cqe_size = cq_ctx.cqe_size == 0 ? kCqeBytes : cq_ctx.cqe_size;
     const uint32_t cq_ring = cq_ctx.depth;
     if (cqe_size < sizeof(Hns1825Cqe) || cqe_size > kCqeBytes || cq_ctx.buf_addr == 0 || cq_ctx.tail_addr == 0 ||
