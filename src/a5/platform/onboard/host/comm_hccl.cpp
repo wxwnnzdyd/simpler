@@ -1191,22 +1191,23 @@ static uint64_t rdma_workspace_bytes(uint32_t rank_count) {
                (2ULL * sizeof(RoceSqCtx) * qp_num + 2ULL * sizeof(RoceCqCtx) * qp_num + sizeof(RdmaMemInfo));
 }
 
-// The HNS1825 RDMA NIC can only DMA to the low GM segment (native pto-isa
-// tests aclrtMalloc(HUGE_FIRST) into 0x1200..., and a VMM window reserved with
-// hint=0 lands at 0x1240...000000, which the NIC never reaches — WQEs are
-// consumed but no CQE ever appears). aclrtMalloc is not guaranteed to return
-// in the low segment, so retry a bounded number of times and verify the base
-// stays below the 0x1200... segment ceiling. Used only for the RDMA overlay's
-// symmetric buffer; the non-RDMA VMM path is unchanged.
+// The HNS1825 RDMA NIC can only DMA to the low GM segment. Native pto-isa
+// tests aclrtMalloc(HUGE_FIRST) into 0x1200... (e.g. 0x120000017000, 0x12004c600000)
+// and pass; a VMM window reserved with hint=0 lands at 0x1240...000000, which the
+// NIC never reaches — WQEs are consumed but no CQE ever appears. aclrtMalloc is
+// not guaranteed to avoid that high region, so retry a bounded number of times
+// and reject any buffer at or above the VMM region start (0x1240...000000).
+// Used only for the RDMA overlay's symmetric buffer; the non-RDMA VMM path is
+// unchanged.
 static bool aclrt_malloc_low_segment(void **out, size_t size) {
     constexpr uint32_t kMaxAttempts = 16;
-    constexpr uintptr_t kLowSegmentCeiling = UINT64_C(0x120000000000);
+    constexpr uintptr_t kVmmRegionStart = UINT64_C(0x124000000000);
     for (uint32_t attempt = 0; attempt < kMaxAttempts; ++attempt) {
         void *buf = nullptr;
         if (aclrtMalloc(&buf, size, ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS || buf == nullptr) {
             continue;
         }
-        if (reinterpret_cast<uintptr_t>(buf) < kLowSegmentCeiling) {
+        if (reinterpret_cast<uintptr_t>(buf) < kVmmRegionStart) {
             *out = buf;
             return true;
         }
