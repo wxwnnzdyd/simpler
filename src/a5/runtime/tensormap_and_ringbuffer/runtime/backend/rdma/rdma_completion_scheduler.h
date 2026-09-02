@@ -350,7 +350,10 @@ inline void ring_sq_doorbell_from_aicpu(const RdmaWqCtx &wq_ctx, uint32_t cur_he
     uint64_t dbValue = 0;
     dbValue |= static_cast<uint64_t>(wq_ctx.wqn & 0xfffffULL);                       // qpn
     dbValue |= static_cast<uint64_t>(kCntxSize) << 20;                              // cntx_size
-    dbValue |= static_cast<uint64_t>(wq_ctx.db_cos & 0x7ULL) << 24;                 // cos (from workspace)
+    // DIAG: workspace db_cos reads 0 (pto-isa pin 259ebcbf), but native pto-isa
+    // (7c9a4dda) configures 4. Force 4 to test whether cos mismatch is why the
+    // NIC ignores the doorbell. Remove the forced value once confirmed.
+    dbValue |= static_cast<uint64_t>(4 & 0x7ULL) << 24;                             // cos = 4 (forced)
     dbValue |= static_cast<uint64_t>(kDbTypeSq) << 27;                              // type
     dbValue |= static_cast<uint64_t>(wq_ctx.mtu_shift & 0x7ULL) << 50;              // mtu_shift
     dbValue |= static_cast<uint64_t>(kSgidIdx & 0x7fULL) << 53;                     // sgid_index
@@ -359,7 +362,7 @@ inline void ring_sq_doorbell_from_aicpu(const RdmaWqCtx &wq_ctx, uint32_t cur_he
         auto *db = reinterpret_cast<volatile uint64_t *>(static_cast<uintptr_t>(wq_ctx.db_addr));
         __atomic_store_n(db, dbValue, __ATOMIC_RELEASE);
         LOG_INFO_V9(
-            "[ASYNC_WAIT RDMA] AICPU re-ring SQ doorbell db_addr=0x%llx head=%u db_cos=%u dbValue=0x%llx",
+            "[ASYNC_WAIT RDMA] AICPU re-ring SQ doorbell db_addr=0x%llx head=%u db_cos=%u (forced=4) dbValue=0x%llx",
             static_cast<unsigned long long>(wq_ctx.db_addr), cur_head,
             static_cast<unsigned>(wq_ctx.db_cos), static_cast<unsigned long long>(dbValue)
         );
