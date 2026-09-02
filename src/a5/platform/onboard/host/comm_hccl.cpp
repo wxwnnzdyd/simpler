@@ -1234,7 +1234,7 @@ static void patch_rdma_workspace_db_cos(void *workspace_addr, uint32_t rank_coun
         return;
     }
     RdmaInfo *info = reinterpret_cast<RdmaInfo *>(buf.data());
-    const uint64_t sq_ptr = info->sq_ptr;
+    const uint64_t sq_ptr = info->sqPtr;
     if (sq_ptr == 0) return;
     bool patched = false;
     for (uint32_t rank = 0; rank < rank_count; ++rank) {
