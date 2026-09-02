@@ -7,7 +7,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 RDMA_BACKEND_KERNEL = (
     REPO_ROOT / "src/a5/runtime/tensormap_and_ringbuffer/runtime/backend/rdma/rdma_completion_kernel.h"
 )
-ASYNC_WAIT = REPO_ROOT / "src/a5/runtime/tensormap_and_ringbuffer/runtime/pto_async_wait.h"
+ASYNC_WAIT = REPO_ROOT / "src/a5/runtime/tensormap_and_ringbuffer/runtime/async_wait.h"
 MAILBOX_TYPES = REPO_ROOT / "src/a5/runtime/tensormap_and_ringbuffer/runtime/aicore_completion_mailbox_types.h"
 HOST_CMAKE = REPO_ROOT / "src/a5/platform/onboard/host/CMakeLists.txt"
 HOST_COMM = REPO_ROOT / "src/a5/platform/onboard/host/comm_hccl.cpp"
