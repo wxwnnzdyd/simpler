@@ -81,19 +81,19 @@ inline void sdma_event_record_retire_op(CompletionCondition &cond) {
     retire_sdma_post_done_record(cond.addr, cond.backend_cookie);
 }
 
-inline CompletionPollResult urma_event_handle_poll_op(const CompletionCondition &cond) {
-    return pto2::urma_backend::poll_urma_event_handle(cond.addr, cond.backend_cookie);
+inline CompletionPollResult urma_cqe_record_poll_op(const CompletionCondition &cond) {
+    return pto2::urma_backend::poll_urma_cqe_record(cond.addr, cond.expected_value);
 }
 
-inline void urma_event_handle_retire_op(CompletionCondition &cond) {
-    pto2::urma_backend::retire_urma_event_handle(cond.addr, cond.backend_cookie);
+inline void urma_cqe_record_retire_op(CompletionCondition &cond) {
+    pto2::urma_backend::retire_urma_cqe_record(cond.addr, cond.expected_value);
 }
 
 inline const CompletionBackendOps *completion_backend_ops_for(int completion_type) {
     static const CompletionBackendOps kOps[] = {
         {counter_poll_op, counter_retire_op},                      // COMPLETION_TYPE_COUNTER = 0
         {sdma_event_record_poll_op, sdma_event_record_retire_op},  // COMPLETION_TYPE_SDMA_EVENT_RECORD = 1
-        {urma_event_handle_poll_op, urma_event_handle_retire_op},  // COMPLETION_TYPE_URMA_EVENT_HANDLE = 2
+        {urma_cqe_record_poll_op, urma_cqe_record_retire_op},      // COMPLETION_TYPE_URMA_CQE_RECORD = 2
     };
     constexpr int kOpsCount = static_cast<int>(sizeof(kOps) / sizeof(kOps[0]));
     if (completion_type < 0 || completion_type >= kOpsCount) return nullptr;
