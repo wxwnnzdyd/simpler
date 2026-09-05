@@ -13,12 +13,16 @@
 
 #include "backend/urma/urma_completion_scheduler.h"
 
+using pto2::urma_backend::poll_urma_cqe_record;
+
 TEST(UrmaCompletionScheduler, PollsOneCqeDw0WithoutWritingIt)
 {
     alignas(CHIP_ALIGN_SIZE) uint32_t dw0 = 0;
 
     EXPECT_EQ(poll_urma_cqe_record(/*cqe_addr=*/0, /*expected_owner=*/0).state, CompletionPollState::FAILED);
-    EXPECT_EQ(poll_urma_cqe_record(reinterpret_cast<uint64_t>(&dw0), /*expected_owner=*/2).state, CompletionPollState::FAILED);
+    EXPECT_EQ(
+        poll_urma_cqe_record(reinterpret_cast<uint64_t>(&dw0), /*expected_owner=*/2).state, CompletionPollState::FAILED
+    );
 
     EXPECT_EQ(poll_urma_cqe_record(reinterpret_cast<uint64_t>(&dw0), /*expected_owner=*/1).state, CompletionPollState::PENDING);
     EXPECT_EQ(dw0, 0U);
