@@ -76,11 +76,7 @@ constexpr int SIM_AUTO_BLOCKDIM = 8;
 
 class SimDeviceRunnerBase {
 public:
-    SimDeviceRunnerBase() {
-        for (auto &bank : arena_banks_) {
-            bank = std::make_unique<ArenaBank>(&arena_alloc_trampoline, &arena_free_trampoline, &mem_alloc_);
-        }
-    }
+    SimDeviceRunnerBase();
 
     uint64_t arena_bank_gm_heap_base(uint32_t bank_id) const;
 

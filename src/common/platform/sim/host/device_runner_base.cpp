@@ -80,6 +80,12 @@ bool create_temp_so_file(const std::string &path_template, const uint8_t *data, 
 
 }  // namespace simpler::common::sim_host
 
+SimDeviceRunnerBase::SimDeviceRunnerBase() {
+    for (auto &bank : arena_banks_) {
+        bank = std::make_unique<ArenaBank>(&arena_alloc_trampoline, &arena_free_trampoline, &mem_alloc_);
+    }
+}
+
 // =============================================================================
 // SimDeviceRunnerBase Implementation
 // =============================================================================
