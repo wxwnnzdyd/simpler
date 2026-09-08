@@ -1341,6 +1341,7 @@ static int domain_alloc_via_ipc(
     const int subset_n = static_cast<int>(rank_count);
     const int my_dr = static_cast<int>(domain_rank);
     aclError aret = ACL_SUCCESS;  // shared by both allocation branches and the ctx upload below
+    uint64_t shareableHandle = 0; // VMM exports a shareable handle; RDMA reaches peers via rkey and leaves it 0
 
     int32_t myDevice = -1;
     if (aclrtGetDevice(&myDevice) != ACL_SUCCESS) {
@@ -1363,7 +1364,6 @@ static int domain_alloc_via_ipc(
     }
     const uint64_t aligned_size = win_size;
     aclrtDrvMemHandle handle = nullptr;  // unused for aclrtMalloc (VMM-only)
-    uint64_t shareableHandle = 0;        // RDMA reaches peers via rkey; no shareable handle
 #else
     aclrtPhysicalMemProp prop{};
     prop.handleType = ACL_MEM_HANDLE_TYPE_NONE;
