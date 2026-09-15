@@ -25,10 +25,13 @@ def test_a2a3_sdma_backend_uses_post_done_completion_flow() -> None:
     assert "GetEventRecord" not in kernel
     assert "session.sdmaSession" not in kernel
     assert "COMPLETION_TYPE_SDMA_EVENT_RECORD" in kernel
-    assert "LoadSdmaSession" in kernel
-    assert "runtimeCtx.postDoneBase" in kernel
-    assert "post_id" in kernel
+    assert "LoadSdmaSession" not in kernel
+    assert "runtimeCtx.postDoneBase" not in kernel
     assert "PTO2_ERROR" not in kernel
+    assert "CompletionRecordCount(session)" in kernel
+    assert "CompletionRecordAt(session, record_index)" in kernel
+    assert "CompletionKind::SDMA_POST_DONE" in kernel
+    assert "register_sdma_post_done_record(ctx, record.addr, record.expected)" in kernel
 
     assert "COMPLETION_TYPE_SDMA_EVENT_RECORD" in wait
     assert "COMPLETION_TYPE_SDMA_POST_DONE" not in wait
