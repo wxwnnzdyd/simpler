@@ -472,6 +472,31 @@ set_tests_properties(test_native_run_acceptance PROPERTIES LABELS "no_hardware")
 # callers invoke it from different host threads.
 add_common_utils_test(test_host_api common/test_host_api.cpp)
 
+# Runtime extension payloads are per-run state even though the collector's
+# shared-memory resources remain resident across runs.
+add_executable(test_chip_swimlane_collector
+    common/test_chip_swimlane_collector.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/host/chip_swimlane_collector.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/host/clock_correlation.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/sim/host/profiling_copy.cpp
+    ${CMAKE_SOURCE_DIR}/stubs/test_stubs.cpp
+)
+target_compile_definitions(test_chip_swimlane_collector PRIVATE SIMPLER_RUNTIME_NAME="test_runtime")
+target_include_directories(test_chip_swimlane_collector PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/include
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
+    ${CMAKE_SOURCE_DIR}/../../../src/common/log/include
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+)
+target_link_libraries(test_chip_swimlane_collector PRIVATE
+    ${GTEST_MAIN_LIB}
+    ${GTEST_LIB}
+    pthread
+)
+add_test(NAME test_chip_swimlane_collector COMMAND test_chip_swimlane_collector)
+set_tests_properties(test_chip_swimlane_collector PROPERTIES LABELS "no_hardware")
+
 # Sim kernel threads publish one sticky completion state. A gated unit test
 # proves submission and completion are separate without relying on kernel
 # duration or host scheduling.
@@ -910,6 +935,12 @@ add_a2a3_hbg_runtime_test(test_hbg_core_tracker common/test_hbg_core_tracker.cpp
 # shared init TU (and the orchestrator/SM members that TU refers to).
 add_a2a3_hbg_runtime_test(test_hbg_ready_queue_seed common/test_hbg_ready_queue_seed.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_mailbox_init common/test_hbg_mailbox_init.cpp)
+# Same reason as the seed test: it drives the real init_data_from_layout.
+add_a2a3_hbg_runtime_test(test_hbg_async_wait_init common/test_hbg_async_wait_init.cpp)
+target_sources(test_hbg_async_wait_init PRIVATE
+    ${HBG_ORCH_SHARED_SOURCES}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
+)
 add_a2a3_hbg_runtime_test(test_hbg_self_relative_ptr common/test_hbg_self_relative_ptr.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_sm_compaction common/test_hbg_sm_compaction.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_scheduler_drain common/test_hbg_scheduler_drain.cpp)
@@ -1007,6 +1038,11 @@ target_sources(test_a5_hbg_slot_claim PRIVATE
 add_a5_hbg_runtime_test(test_a5_hbg_core_tracker common/test_hbg_core_tracker.cpp)
 add_a5_hbg_runtime_test(test_a5_hbg_ready_queue_seed common/test_hbg_ready_queue_seed.cpp)
 add_a5_hbg_runtime_test(test_a5_hbg_mailbox_init common/test_hbg_mailbox_init.cpp)
+add_a5_hbg_runtime_test(test_a5_hbg_async_wait_init common/test_hbg_async_wait_init.cpp)
+target_sources(test_a5_hbg_async_wait_init PRIVATE
+    ${HBG_ORCH_SHARED_SOURCES}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/args_dump_aicpu.cpp
+)
 add_a5_hbg_runtime_test(test_a5_hbg_self_relative_ptr common/test_hbg_self_relative_ptr.cpp)
 add_a5_hbg_runtime_test(test_a5_hbg_sm_compaction common/test_hbg_sm_compaction.cpp)
 target_sources(test_a5_hbg_ready_queue_seed PRIVATE

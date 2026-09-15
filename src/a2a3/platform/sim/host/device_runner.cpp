@@ -32,6 +32,7 @@
 #include "aicpu/platform_aicpu_affinity.h"
 #include "call_config.h"
 #include "callable_protocol.h"
+#include "common/dma_workspace.h"
 #include "common/host_log_binding.h"
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
@@ -116,7 +117,8 @@ void DeviceRunner::cleanup_active_run() noexcept {
         mem_alloc_.free(active_run_->reg_blocks);
         active_run_->reg_blocks = nullptr;
     }
-    finalize_collectors();
+    // The collectors' device resources are not per-run: they are released in
+    // finalize(), which owns them for the worker's lifetime.
     active_run_.reset();
 }
 
@@ -203,6 +205,16 @@ int DeviceRunner::ensure_binaries_loaded() {
             return PTO_RUNTIME_ERR_INTERNAL;
         if (!load_sym("set_platform_scope_stats_base", reinterpret_cast<void **>(&set_platform_scope_stats_base_func_)))
             return PTO_RUNTIME_ERR_INTERNAL;
+
+        // Publish provisioned DMA workspace addresses into the resident AICPU SO.
+        using SetDmaWorkspaceAddrFunc = void (*)(int, unsigned long long);
+        SetDmaWorkspaceAddrFunc set_dma_workspace_addr_func = nullptr;
+        if (!load_sym("set_dma_workspace_addr", reinterpret_cast<void **>(&set_dma_workspace_addr_func))) {
+            return PTO_RUNTIME_ERR_INTERNAL;
+        }
+        for (int kind = 0; kind < DMA_WORKSPACE_KIND_COUNT; ++kind) {
+            set_dma_workspace_addr_func(kind, dma_workspace_addr_[kind]);
+        }
 
         // The AICPU sim SO binds its private HostLogger before the compatibility
         // level setter can emit a clock anchor.
@@ -395,6 +407,14 @@ int DeviceRunner::prepare_execution(
     }
 
     last_runtime_ = &runtime;
+
+    // Collectors stay initialized across runs, so pools built for an earlier
+    // run's core / AICPU-thread counts have to go before this run seeds pools
+    // and recycled lanes at different ones.
+    if (collector_shape_is_stale(num_aicore, runtime.get_aicpu_thread_num(), launch_aicpu_num)) {
+        finalize_collectors();
+    }
+    latch_collector_shape(num_aicore, runtime.get_aicpu_thread_num(), launch_aicpu_num);
 
     if (enable_chip_swimlane_) {
         rc = init_chip_swimlane(num_aicore, runtime.get_aicpu_thread_num(), device_id_);
@@ -691,7 +711,7 @@ int DeviceRunner::drain_execution(ActiveExecution &) {
     // order (mgmt's final-drain pass into L2 has poll as its consumer).
     finish_clock_correlation_session(true);
     if (enable_chip_swimlane_) {
-        chip_swimlane_collector_.stop();
+        chip_swimlane_collector_.quiesce();
         chip_swimlane_collector_.read_phase_header_metadata();
         chip_swimlane_collector_.reconcile_counters();
         publish_host_phase_records_to_swimlane();
@@ -699,33 +719,27 @@ int DeviceRunner::drain_execution(ActiveExecution &) {
     }
 
     if (enable_dump_args_) {
-        dump_collector_.stop();
+        dump_collector_.quiesce();
         dump_collector_.reconcile_counters();
         dump_collector_.export_dump_files();
     }
 
     if (enable_pmu_) {
-        pmu_collector_.stop();
+        pmu_collector_.quiesce();
         pmu_collector_.reconcile_counters();
     }
 
-    // Host-orch emits the graph its orchestration built on this same thread;
-    // device-orch stops the collector, reconciles the ring, and replays.
-    if (enable_dep_gen_) {
-        const std::string deps = make_deps_json_path(output_prefix_);
-        if (dep_gen_host_graph_active()) {
-            int rc = dep_gen_host_graph_emit(deps.c_str());
+    // Device-orch shape: the collector stops, the ring reconciles, and the
+    // records replay. The host-orch shape emits at the end of bind instead, where
+    // its capture window closes — see `emit_host_dep_gen_graph` in c_api_shared.cpp.
+    if (enable_dep_gen_ && !dep_gen_host_graph_active()) {
+        dep_gen_collector_.quiesce();
+        if (dep_gen_collector_.reconcile_counters()) {
+            const std::string deps = make_deps_json_path(output_prefix_);
+            const auto &records = dep_gen_collector_.records();
+            int rc = dep_gen_replay_emit_deps_json(records.data(), records.size(), deps.c_str());
             if (rc != 0) {
-                LOG_ERROR("dep_gen host graph emit failed (%d) — deps.json not produced", rc);
-            }
-        } else {
-            dep_gen_collector_.stop();
-            if (dep_gen_collector_.reconcile_counters()) {
-                const auto &records = dep_gen_collector_.records();
-                int rc = dep_gen_replay_emit_deps_json(records.data(), records.size(), deps.c_str());
-                if (rc != 0) {
-                    LOG_ERROR("dep_gen replay failed (%d) — deps.json not produced", rc);
-                }
+                LOG_ERROR("dep_gen replay failed (%d) — deps.json not produced", rc);
             }
         }
     }
@@ -739,7 +753,7 @@ int DeviceRunner::drain_execution(ActiveExecution &) {
     }
 
     if (enable_scope_stats_) {
-        scope_stats_collector_.stop();
+        scope_stats_collector_.quiesce();
         scope_stats_collector_.reconcile_counters();
         scope_stats_collector_.write_jsonl(output_prefix_);
     }
@@ -811,8 +825,9 @@ int DeviceRunner::finalize() {
         return 0;
     }
 
-    // cleanup_active_run() normally stops active collectors; this is the
-    // backstop for the initialized-but-never-enqueued case.
+    // Collectors outlive every run on this runner, so this is where their device
+    // resources are released — including for a runner that only ever initialized
+    // them and never enqueued.
     finalize_collectors();
 
     release_callable_state();
@@ -848,6 +863,14 @@ int DeviceRunner::finalize() {
         device_wall_dev_ptr_ = nullptr;
     }
 
+    if (dma_workspace_handle_ != nullptr) {
+        dma_workspace_release(dma_workspace_handle_);
+        dma_workspace_handle_ = nullptr;
+    }
+    for (int kind = 0; kind < DMA_WORKSPACE_KIND_COUNT; ++kind) {
+        dma_workspace_addr_[kind] = 0;
+    }
+
     mem_alloc_.finalize();
     clear_cpu_sim_shared_storage();
 
@@ -870,7 +893,7 @@ int DeviceRunner::init_chip_swimlane(int num_aicore, int aicpu_thread_num, int d
         return mem_alloc_.free(dev_ptr);
     };
 
-    chip_swimlane_collector_.set_run_output(output_prefix_, chip_swimlane_level_);
+    chip_swimlane_collector_.begin_run(output_prefix_, chip_swimlane_level_);
     int rc = chip_swimlane_collector_.initialize(num_aicore, aicpu_thread_num, device_id, alloc_cb, nullptr, free_cb);
     if (rc != 0) {
         return rc;
@@ -893,7 +916,7 @@ int DeviceRunner::init_args_dump(Runtime &runtime, int device_id) {
         return mem_alloc_.free(dev_ptr);
     };
 
-    dump_collector_.set_run_output(output_prefix_, dump_args_level_);
+    dump_collector_.begin_run(output_prefix_, dump_args_level_);
     int rc = dump_collector_.initialize(num_dump_threads, device_id, alloc_cb, nullptr, free_cb);
     if (rc != 0) {
         return rc;
@@ -913,7 +936,7 @@ int DeviceRunner::init_pmu(
         return mem_alloc_.free(dev_ptr);
     };
 
-    pmu_collector_.set_run_output(csv_path, event_type);
+    pmu_collector_.begin_run(csv_path, event_type);
     int rc = pmu_collector_.init(num_cores, num_threads, alloc_cb, nullptr, free_cb, -1);
     if (rc != 0) {
         return rc;
@@ -924,6 +947,7 @@ int DeviceRunner::init_pmu(
 }
 
 int DeviceRunner::init_dep_gen(int num_threads, int /*device_id*/) {
+    dep_gen_collector_.begin_run();
     auto alloc_cb = [this](size_t size) -> void * {
         return mem_alloc_.alloc(size);
     };
@@ -941,6 +965,7 @@ int DeviceRunner::init_dep_gen(int num_threads, int /*device_id*/) {
 }
 
 int DeviceRunner::init_scope_stats(int num_threads) {
+    scope_stats_collector_.begin_run();
     auto alloc_cb = [this](size_t size) -> void * {
         return mem_alloc_.alloc(size);
     };
@@ -959,6 +984,7 @@ int DeviceRunner::init_scope_stats(int num_threads) {
 }
 
 void DeviceRunner::finalize_collectors() {
+    clear_collector_shape();
     auto free_cb = [this](void *dev_ptr) -> int {
         return mem_alloc_.free(dev_ptr);
     };

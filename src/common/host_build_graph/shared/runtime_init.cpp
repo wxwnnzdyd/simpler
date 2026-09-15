@@ -65,7 +65,7 @@ bool SchedulerState::TaskHeaderView::init_data_from_layout(void *sm_dev_base) {
     tasks = sm_layout::task_header_addr(sm_dev_base);
 
     // Per-slot SM-side initialization (reset_for_reuse + active_mask, and clearing
-    // the completion flag) happens init-on-write in orch::prepare_task as each slot
+    // the progress state) happens init-on-write in orch::prepare_task as each slot
     // is claimed; host prebuilt-arena init skips SM access here.
 
     return true;
@@ -101,7 +101,7 @@ SchedulerLayout SchedulerState::reserve_layout(DeviceArena &arena) {
     layout.off_graph_ready_queue_slots = ready_queue_reserve_layout(arena, READY_QUEUE_CAPACITY_LIMIT);
     layout.off_graph_prepare_queue_slots = ready_queue_reserve_layout(arena, READY_QUEUE_CAPACITY_LIMIT);
     // Polling: no dep_pool arena region — producer dependencies are inline ids on
-    // the payload and readiness is via progress_flags.
+    // the payload and readiness is via the task_states array.
     return layout;
 }
 
@@ -131,6 +131,12 @@ bool SchedulerState::init_data_from_layout(const SchedulerLayout &layout, Device
     }
     ready_queue_init_data_from_layout(&sched->early_sync_start_queue, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
     ready_queue_init_data_from_layout(&sched->ed_publish_drain_queue, CHIP_EARLY_DISPATCH_QUEUE_SIZE);
+
+    // The wait list shares the queues' device-only zone, so its bytes are the
+    // pooled allocation's previous generation too. A residual `count` is what
+    // the resolution thread's poll walks entries[] by, so it has to be reset
+    // here even though nothing in the list travels with the image.
+    sched->async_wait_list.reset_for_reuse();
 
     // Polling: no dep_pool arena region to initialize.
     (void)arena;
