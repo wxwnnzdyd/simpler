@@ -8,217 +8,82 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
+
 #include <gtest/gtest.h>
 
-#include <cstring>
+#include <cstdint>
 
 #include "backend/rdma/rdma_completion_scheduler.h"
 
+using pto2::rdma_backend::kRdmaCqeOpcodeError;
+using pto2::rdma_backend::kRdmaCqeOpcodeInvalid;
+using pto2::rdma_backend::poll_rdma_hns1825_cqe_record;
+
 namespace {
 
-using pto2::rdma_backend::encode_rdma_event_handle;
-using pto2::rdma_backend::Hns1825Cqe;
-using pto2::rdma_backend::is_hns1825_cqe_owner_ready;
-using pto2::rdma_backend::is_rdma_error_handle;
-using pto2::rdma_backend::kCqeBytes;
-using pto2::rdma_backend::poll_rdma_event_handle;
-using pto2::rdma_backend::RdmaCqCtx;
-using pto2::rdma_backend::RdmaWqCtx;
+constexpr uint32_t kSendOpcode = 0U;
 
-constexpr uint32_t kTestCqDepth = 1024;
-
-struct alignas(kCqeBytes) TestRdmaCqe : Hns1825Cqe {};
-
-struct TestRdmaWorkspace {
-    pto2::rdma_backend::RdmaInfo info;
-    RdmaWqCtx sq[2];
-    RdmaCqCtx scq[2];
-    uint32_t sq_tail[2];
-    uint32_t cq_tail[2];
-    uint32_t cq_sw_doorbell[2];
-    TestRdmaCqe scq_entries[2][kTestCqDepth];
-};
-
-inline bool test_cqe_ready_owner(uint32_t cqe_seq) { return (cqe_seq & kTestCqDepth) != 0; }
-
-inline void encode_test_cqe(TestRdmaCqe &cqe, uint32_t cqe_seq, bool error) {
-    constexpr uint32_t kOwnerShift = 31;
-    constexpr uint32_t kCqeOpcodeShift = 27;
-    constexpr uint32_t kCqeOptypeSend = 0;
-    constexpr uint32_t kCqeOptypeError = 0x1e;
-    const uint32_t owner = test_cqe_ready_owner(cqe_seq) ? 1u : 0u;
-    cqe.owner_id_qpn = owner << kOwnerShift;
-    cqe.op_sr_wqebb = (error ? kCqeOptypeError : kCqeOptypeSend) << kCqeOpcodeShift;
-    cqe.syndrome = error ? 9 : 0;
+// The poll reads the CQE's first 8 bytes as one little-endian word: dw0 in the low half (owner at
+// bit 31) and dw1 in the high half (opcode at its own bit 27).
+uint64_t make_cqe_dw01(uint32_t owner, uint32_t opcode) {
+    const uint64_t dw0 = static_cast<uint64_t>(owner) << 31U;
+    const uint64_t dw1 = static_cast<uint64_t>(opcode) << 27U;
+    return dw0 | (dw1 << 32U);
 }
-
-inline void encode_test_pending_cqe(TestRdmaCqe &cqe, uint32_t cqe_seq) {
-    constexpr uint32_t kOwnerShift = 31;
-    constexpr uint32_t kCqeOpcodeShift = 27;
-    constexpr uint32_t kCqeOptypeSend = 0;
-    const uint32_t owner = test_cqe_ready_owner(cqe_seq) ? 0u : 1u;
-    cqe.owner_id_qpn = owner << kOwnerShift;
-    cqe.op_sr_wqebb = kCqeOptypeSend << kCqeOpcodeShift;
-}
-
-inline void encode_test_invalid_cqe(TestRdmaCqe &cqe, uint32_t cqe_seq) {
-    constexpr uint32_t kOwnerShift = 31;
-    constexpr uint32_t kCqeOpcodeShift = 27;
-    constexpr uint32_t kCqeOptypeInvalid = 0x1f;
-    const uint32_t owner = test_cqe_ready_owner(cqe_seq) ? 1u : 0u;
-    cqe.owner_id_qpn = owner << kOwnerShift;
-    cqe.op_sr_wqebb = kCqeOptypeInvalid << kCqeOpcodeShift;
-}
-
-struct SchedulerWorkspaceFixture {
-    TestRdmaWorkspace ws{};
-
-    SchedulerWorkspaceFixture() {
-        std::memset(&ws, 0, sizeof(ws));
-        ws.info.magic = pto2::rdma_backend::kRdmaWorkspaceMagic;
-        ws.info.version = pto2::rdma_backend::kRdmaWorkspaceVersion;
-        ws.info.backend = pto2::rdma_backend::kRdmaBackendHns1825;
-        ws.info.qp_num = 1;
-        ws.info.rank_count = 2;
-        ws.info.sq_ptr = reinterpret_cast<uint64_t>(&ws.sq[0]);
-        ws.info.scq_ptr = reinterpret_cast<uint64_t>(&ws.scq[0]);
-        for (uint32_t rank = 0; rank < ws.info.rank_count; ++rank) {
-            RdmaWqCtx &sq = ws.sq[rank];
-            sq.wqe_size = kCqeBytes;
-            sq.depth = kTestCqDepth;
-            sq.tail_addr = reinterpret_cast<uint64_t>(&ws.sq_tail[rank]);
-
-            RdmaCqCtx &cq = ws.scq[rank];
-            cq.buf_addr = reinterpret_cast<uint64_t>(&ws.scq_entries[rank][0]);
-            cq.cqe_size = kCqeBytes;
-            cq.depth = kTestCqDepth;
-            cq.tail_addr = reinterpret_cast<uint64_t>(&ws.cq_tail[rank]);
-            cq.db_sw_addr = reinterpret_cast<uint64_t>(&ws.cq_sw_doorbell[rank]);
-        }
-    }
-
-    uint64_t addr() { return reinterpret_cast<uint64_t>(&ws); }
-};
 
 }  // namespace
 
-TEST(A5RdmaCompletionScheduler, ErrorHandleIsDetected) {
-    EXPECT_TRUE(is_rdma_error_handle(encode_rdma_event_handle(0xffffffffu, 7)));
-    EXPECT_FALSE(is_rdma_error_handle(encode_rdma_event_handle(1, 7)));
+TEST(A5RdmaCompletionScheduler, PollsOneCqeOwnerAndOpcodeWithoutWritingIt) {
+    alignas(CHIP_ALIGN_SIZE) uint64_t cqe = 0;
+
+    EXPECT_EQ(
+        poll_rdma_hns1825_cqe_record(/*cqe_addr=*/0, /*expected_owner=*/0).state, CompletionPollState::FAILED
+    );
+    EXPECT_EQ(
+        poll_rdma_hns1825_cqe_record(reinterpret_cast<uint64_t>(&cqe), /*expected_owner=*/2).state,
+        CompletionPollState::FAILED
+    );
+
+    // An invalid opcode is a slot the NIC has not written yet, whatever the owner bit says.
+    cqe = make_cqe_dw01(1U, kRdmaCqeOpcodeInvalid);
+    EXPECT_EQ(
+        poll_rdma_hns1825_cqe_record(reinterpret_cast<uint64_t>(&cqe), /*expected_owner=*/1).state,
+        CompletionPollState::PENDING
+    );
+    EXPECT_EQ(cqe, make_cqe_dw01(1U, kRdmaCqeOpcodeInvalid));
+
+    // Owner still at the value the slot started the lap with: not done.
+    cqe = make_cqe_dw01(0U, kSendOpcode);
+    EXPECT_EQ(
+        poll_rdma_hns1825_cqe_record(reinterpret_cast<uint64_t>(&cqe), /*expected_owner=*/1).state,
+        CompletionPollState::PENDING
+    );
+
+    // Owner flipped to the expected value with a valid opcode: done.
+    cqe = make_cqe_dw01(1U, kSendOpcode);
+    EXPECT_EQ(
+        poll_rdma_hns1825_cqe_record(reinterpret_cast<uint64_t>(&cqe), /*expected_owner=*/1).state,
+        CompletionPollState::READY
+    );
+    EXPECT_EQ(cqe, make_cqe_dw01(1U, kSendOpcode));
+
+    // Expected owner 0 is the mirror case, and it must not accept a slot stamped 1.
+    cqe = make_cqe_dw01(1U, kSendOpcode);
+    EXPECT_EQ(
+        poll_rdma_hns1825_cqe_record(reinterpret_cast<uint64_t>(&cqe), /*expected_owner=*/0).state,
+        CompletionPollState::PENDING
+    );
+    cqe = make_cqe_dw01(0U, kSendOpcode);
+    EXPECT_EQ(
+        poll_rdma_hns1825_cqe_record(reinterpret_cast<uint64_t>(&cqe), /*expected_owner=*/0).state,
+        CompletionPollState::READY
+    );
+
+    // An error CQE is a completed-but-failed transfer, not a pending one.
+    cqe = make_cqe_dw01(1U, kRdmaCqeOpcodeError);
+    EXPECT_EQ(
+        poll_rdma_hns1825_cqe_record(reinterpret_cast<uint64_t>(&cqe), /*expected_owner=*/1).state,
+        CompletionPollState::FAILED
+    );
+    EXPECT_EQ(cqe, make_cqe_dw01(1U, kRdmaCqeOpcodeError));
 }
-
-TEST(A5RdmaCompletionScheduler, ZeroHandleIsReady) {
-    auto result = poll_rdma_event_handle(0, 0);
-    EXPECT_EQ(result.state, CompletionPollState::READY);
-    EXPECT_EQ(result.error_code, SIMPLER_ERROR_NONE);
-}
-
-TEST(A5RdmaCompletionScheduler, ErrorHandleFails) {
-    auto result = poll_rdma_event_handle(encode_rdma_event_handle(0xffffffffu, 9), 0);
-    EXPECT_EQ(result.state, CompletionPollState::FAILED);
-    EXPECT_EQ(result.error_code, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
-}
-
-TEST(A5RdmaCompletionScheduler, NullWorkspaceFails) {
-    auto result = poll_rdma_event_handle(encode_rdma_event_handle(1, 1), 0);
-    EXPECT_EQ(result.state, CompletionPollState::FAILED);
-    EXPECT_EQ(result.error_code, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
-}
-
-TEST(A5RdmaCompletionScheduler, OwnerReadyMatchesHns1825Backend) {
-    EXPECT_TRUE(is_hns1825_cqe_owner_ready(false, 0, kTestCqDepth));
-    EXPECT_FALSE(is_hns1825_cqe_owner_ready(true, 0, kTestCqDepth));
-    EXPECT_TRUE(is_hns1825_cqe_owner_ready(true, kTestCqDepth, kTestCqDepth));
-    EXPECT_FALSE(is_hns1825_cqe_owner_ready(false, kTestCqDepth, kTestCqDepth));
-}
-
-TEST(A5RdmaCompletionScheduler, InvalidWorkspaceMagicFails) {
-    SchedulerWorkspaceFixture fixture;
-    fixture.ws.info.magic = 0;
-
-    auto result = poll_rdma_event_handle(encode_rdma_event_handle(1, 1), fixture.addr());
-    EXPECT_EQ(result.state, CompletionPollState::FAILED);
-    EXPECT_EQ(result.error_code, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
-}
-
-TEST(A5RdmaCompletionScheduler, InvalidRankFails) {
-    SchedulerWorkspaceFixture fixture;
-    auto result = poll_rdma_event_handle(encode_rdma_event_handle(3, 1), fixture.addr());
-    EXPECT_EQ(result.state, CompletionPollState::FAILED);
-    EXPECT_EQ(result.error_code, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
-}
-
-TEST(A5RdmaCompletionScheduler, TailAlreadyAtTargetIsReady) {
-    SchedulerWorkspaceFixture fixture;
-    fixture.ws.cq_tail[1] = 7;
-
-    auto result = poll_rdma_event_handle(encode_rdma_event_handle(1, 7), fixture.addr());
-    EXPECT_EQ(result.state, CompletionPollState::READY);
-    EXPECT_EQ(result.error_code, SIMPLER_ERROR_NONE);
-    EXPECT_EQ(fixture.ws.cq_sw_doorbell[1], 0u);
-    EXPECT_EQ(fixture.ws.sq_tail[1], 0u);
-}
-
-TEST(A5RdmaCompletionScheduler, OwnerNotReadyReturnsPending) {
-    SchedulerWorkspaceFixture fixture;
-    encode_test_pending_cqe(fixture.ws.scq_entries[1][0], 0);
-
-    auto result = poll_rdma_event_handle(encode_rdma_event_handle(1, 1), fixture.addr());
-    EXPECT_EQ(result.state, CompletionPollState::PENDING);
-    EXPECT_EQ(result.error_code, SIMPLER_ERROR_NONE);
-    EXPECT_EQ(fixture.ws.cq_tail[1], 0u);
-    EXPECT_EQ(fixture.ws.cq_sw_doorbell[1], 0u);
-    EXPECT_EQ(fixture.ws.sq_tail[1], 0u);
-}
-
-TEST(A5RdmaCompletionScheduler, InvalidOpcodeReturnsPending) {
-    SchedulerWorkspaceFixture fixture;
-    encode_test_invalid_cqe(fixture.ws.scq_entries[1][0], 0);
-
-    auto result = poll_rdma_event_handle(encode_rdma_event_handle(1, 1), fixture.addr());
-    EXPECT_EQ(result.state, CompletionPollState::PENDING);
-    EXPECT_EQ(result.error_code, SIMPLER_ERROR_NONE);
-    EXPECT_EQ(fixture.ws.cq_tail[1], 0u);
-    EXPECT_EQ(fixture.ws.cq_sw_doorbell[1], 0u);
-    EXPECT_EQ(fixture.ws.sq_tail[1], 0u);
-}
-
-TEST(A5RdmaCompletionScheduler, ReadyCqeAdvancesCqDoorbellAndSqTail) {
-    SchedulerWorkspaceFixture fixture;
-    encode_test_cqe(fixture.ws.scq_entries[1][0], 0, false);
-
-    auto result = poll_rdma_event_handle(encode_rdma_event_handle(1, 1), fixture.addr());
-    EXPECT_EQ(result.state, CompletionPollState::READY);
-    EXPECT_EQ(result.error_code, SIMPLER_ERROR_NONE);
-    EXPECT_EQ(fixture.ws.cq_tail[1], 1u);
-    EXPECT_EQ(fixture.ws.cq_sw_doorbell[1], __builtin_bswap32(1u));
-    EXPECT_EQ(fixture.ws.sq_tail[1], 0u);
-}
-
-TEST(A5RdmaCompletionScheduler, ReadyCqeAfterWrapAdvancesCqDoorbellAndSqTail) {
-    SchedulerWorkspaceFixture fixture;
-    fixture.ws.cq_tail[1] = kTestCqDepth;
-    fixture.ws.sq_tail[1] = kTestCqDepth;
-    encode_test_cqe(fixture.ws.scq_entries[1][0], kTestCqDepth, false);
-
-    auto result = poll_rdma_event_handle(encode_rdma_event_handle(1, kTestCqDepth + 1), fixture.addr());
-    EXPECT_EQ(result.state, CompletionPollState::READY);
-    EXPECT_EQ(result.error_code, SIMPLER_ERROR_NONE);
-    EXPECT_EQ(fixture.ws.cq_tail[1], kTestCqDepth + 1);
-    EXPECT_EQ(fixture.ws.cq_sw_doorbell[1], __builtin_bswap32(kTestCqDepth + 1));
-    EXPECT_EQ(fixture.ws.sq_tail[1], kTestCqDepth);
-}
-
-TEST(A5RdmaCompletionScheduler, CqeErrorFailsAfterRetiringCqe) {
-    SchedulerWorkspaceFixture fixture;
-    encode_test_cqe(fixture.ws.scq_entries[1][0], 0, true);
-
-    auto result = poll_rdma_event_handle(encode_rdma_event_handle(1, 1), fixture.addr());
-    EXPECT_EQ(result.state, CompletionPollState::FAILED);
-    EXPECT_EQ(result.error_code, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
-    EXPECT_EQ(fixture.ws.cq_tail[1], 1u);
-    EXPECT_EQ(fixture.ws.cq_sw_doorbell[1], __builtin_bswap32(1u));
-    EXPECT_EQ(fixture.ws.sq_tail[1], 0u);
-}
-
-static_assert(sizeof(TestRdmaCqe) == kCqeBytes);

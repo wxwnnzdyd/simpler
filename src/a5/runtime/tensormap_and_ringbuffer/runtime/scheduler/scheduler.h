@@ -1493,9 +1493,6 @@ inline void AsyncWaitList::log_diagnostics(AICoreCompletionMailbox *aicore_mailb
                 static_cast<unsigned>(cond.retired), static_cast<unsigned long long>(cond.addr),
                 static_cast<unsigned long long>(cond.backend_cookie), cond.expected_value
             );
-            if (cond.completion_type == COMPLETION_TYPE_RDMA_EVENT_HANDLE) {
-                pto2::rdma_backend::log_rdma_event_handle_snapshot(cond.addr, cond.backend_cookie, i, c);
-            }
         }
     }
 

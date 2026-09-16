@@ -93,12 +93,12 @@ enum class RdmaEventRegistrationResult : int32_t {
 
 template <typename PtoAsyncEvent, typename PtoAsyncSession>
 inline __aicore__ RdmaEventRegistrationResult register_rdma_async_event_status(
-    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session, __gm__ uint8_t *workspace
+    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session
 );
 
 template <typename PtoAsyncEvent, typename PtoAsyncSession>
 inline __aicore__ bool register_rdma_async_event(
-    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session, __gm__ uint8_t *workspace
+    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session
 );
 
 }  // namespace pto2::detail
@@ -147,7 +147,7 @@ submit_rdma_request_status(AsyncCtx &ctx, RdmaRequestDescriptor<DstTensor, SrcTe
         event = pto::comm::TPUT_ASYNC<pto::comm::DmaEngine::RDMA>(desc.dst, desc.src, session, desc.peer_rank);
     }
     const pto2::detail::RdmaEventRegistrationResult reg_result =
-        pto2::detail::register_rdma_async_event_status(ctx, event, session, desc.workspace);
+        pto2::detail::register_rdma_async_event_status(ctx, event, session);
     if (reg_result != pto2::detail::RdmaEventRegistrationResult::OK) {
         return reg_result == pto2::detail::RdmaEventRegistrationResult::INVALID_EVENT ?
                    RdmaSubmitStatus::INVALID_EVENT :
@@ -174,7 +174,7 @@ namespace pto2::detail {
 
 template <typename PtoAsyncEvent, typename PtoAsyncSession>
 inline __aicore__ RdmaEventRegistrationResult register_rdma_async_event_status(
-    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session, __gm__ uint8_t *workspace
+    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session
 ) {
     if (!ctx.task_token.is_valid() || ctx.completion_count == nullptr || ctx.completion_entries == nullptr) {
         (void)event.Wait(session);
@@ -185,18 +185,30 @@ inline __aicore__ RdmaEventRegistrationResult register_rdma_async_event_status(
     }
 
     const uint32_t engine = static_cast<uint32_t>(event.engine);
-    if (engine != static_cast<uint32_t>(::pto::comm::DmaEngine::RDMA) || workspace == nullptr) {
+    // A submit that failed validation (bad peer, MR out of range, backend unavailable) encodes an
+    // error handle; the record lookup rejects it, so it lands here as count 0 rather than being
+    // registered as a completion that will never arrive.
+    const uint32_t record_count = event.CompletionRecordCount(session);
+    if (engine != static_cast<uint32_t>(::pto::comm::DmaEngine::RDMA) || record_count != 1U) {
+        defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
+        (void)event.Wait(session);
+        return RdmaEventRegistrationResult::INVALID_EVENT;
+    }
+
+    const auto record = event.CompletionRecordAt(session, 0U);
+    if (record.kind != ::pto::comm::CompletionKind::RDMA_HNS1825_CQE || record.addr == nullptr ||
+        record.expected > 1ULL) {
         defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
         (void)event.Wait(session);
         return RdmaEventRegistrationResult::INVALID_EVENT;
     }
 
     CompletionToken token{
-        event.handle,
-        0,
+        reinterpret_cast<uint64_t>(record.addr),
+        static_cast<uint32_t>(record.expected),
         COMPLETION_ENGINE_ROCE,
-        COMPLETION_TYPE_RDMA_EVENT_HANDLE,
-        reinterpret_cast<uint64_t>(workspace),
+        COMPLETION_TYPE_RDMA_HNS1825_CQE,
+        0,
     };
     if (!register_completion_condition(ctx, token)) {
         defer_error(ctx, SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED);
@@ -208,9 +220,9 @@ inline __aicore__ RdmaEventRegistrationResult register_rdma_async_event_status(
 
 template <typename PtoAsyncEvent, typename PtoAsyncSession>
 inline __aicore__ bool register_rdma_async_event(
-    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session, __gm__ uint8_t *workspace
+    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session
 ) {
-    return register_rdma_async_event_status(ctx, event, session, workspace) == RdmaEventRegistrationResult::OK;
+    return register_rdma_async_event_status(ctx, event, session) == RdmaEventRegistrationResult::OK;
 }
 
 }  // namespace pto2::detail

@@ -92,12 +92,12 @@ inline void urma_cqe_record_retire_op(CompletionCondition &cond) {
     pto2::urma_backend::retire_urma_cqe_record(cond.addr, cond.expected_value);
 }
 
-inline CompletionPollResult rdma_event_handle_poll_op(const CompletionCondition &cond) {
-    return pto2::rdma_backend::poll_rdma_event_handle(cond.addr, cond.backend_cookie);
+inline CompletionPollResult rdma_hns1825_cqe_poll_op(const CompletionCondition &cond) {
+    return pto2::rdma_backend::poll_rdma_hns1825_cqe_record(cond.addr, cond.expected_value);
 }
 
-inline void rdma_event_handle_retire_op(CompletionCondition &cond) {
-    pto2::rdma_backend::retire_rdma_event_handle(cond.addr, cond.backend_cookie);
+inline void rdma_hns1825_cqe_retire_op(CompletionCondition &cond) {
+    pto2::rdma_backend::retire_rdma_hns1825_cqe_record(cond.addr, cond.expected_value);
 }
 
 inline const CompletionBackendOps *completion_backend_ops_for(int completion_type) {
