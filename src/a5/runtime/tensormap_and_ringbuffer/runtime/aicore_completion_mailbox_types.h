@@ -36,6 +36,9 @@ inline constexpr int32_t MAX_COMPLETIONS_PER_TASK = 64;
 #define COMPLETION_TYPE_COUNTER 0
 #define COMPLETION_TYPE_SDMA_EVENT_RECORD 1
 #define COMPLETION_TYPE_URMA_CQE_RECORD 2
+// One id per NIC backend, not one per engine: each backend owns its CQE layout and ready predicate,
+// so a shared id would need one hard-coded layout and silently mis-read on a different NIC.
+#define COMPLETION_TYPE_RDMA_HNS1825_CQE 3
 
 // DeferredCompletionEntry / DeferredCompletionSlab back the per-task scratch
 // area that AICore writes into to record "this completion has to be observed
