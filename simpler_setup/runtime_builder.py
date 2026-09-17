@@ -60,6 +60,40 @@ def _get_git_head(repo_root: Path) -> str:
         return ""
 
 
+def _normalize_overlay_env(name: str) -> Optional[str]:
+    """Return "ON"/"OFF" for a CMake-style bool env var, or None if unset/invalid."""
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    normalized = value.strip().upper()
+    if normalized in {"1", "ON", "TRUE", "YES", "Y"}:
+        return "ON"
+    if normalized in {"0", "OFF", "FALSE", "NO", "N"}:
+        return "OFF"
+    return None
+
+
+def _a5_async_workspace_overlay_defines() -> dict[str, str]:
+    """Full a5 host backend selection, one explicit value per overlay.
+
+    Every overlay is emitted with an explicit ON/OFF so a value left in the
+    CMake cache by an earlier build cannot survive a reconfigure: building once
+    with RDMA=ON and then unsetting it must reconfigure RDMA=OFF, not keep the
+    stale cached option. URMA stays the default overlay unless SDMA or RDMA is
+    enabled explicitly.
+    """
+    sdma = _normalize_overlay_env("SIMPLER_ENABLE_PTO_SDMA_WORKSPACE") or "OFF"
+    rdma = _normalize_overlay_env("SIMPLER_ENABLE_PTO_RDMA_WORKSPACE") or "OFF"
+    urma = _normalize_overlay_env("SIMPLER_ENABLE_PTO_URMA_WORKSPACE")
+    if urma is None:
+        urma = "OFF" if (sdma == "ON" or rdma == "ON") else "ON"
+    return {
+        "SIMPLER_ENABLE_PTO_SDMA_WORKSPACE": sdma,
+        "SIMPLER_ENABLE_PTO_URMA_WORKSPACE": urma,
+        "SIMPLER_ENABLE_PTO_RDMA_WORKSPACE": rdma,
+    }
+
+
 def _abbrev_stamp(stamp: str) -> str:
     """Abbreviate each commit in a (possibly composite) cache stamp for logging.
 
@@ -399,24 +433,14 @@ class RuntimeBuilder:
                 defines["SIMPLER_RUNTIME_NAME"] = name
                 if build_pto_isa_commit:
                     defines["SIMPLER_PTO_ISA_BUILD_COMMIT"] = build_pto_isa_commit
-                # Forward the async-workspace overlay env selects to host CMake.
-                # URMA is the default overlay; an explicit SDMA or RDMA overlay
-                # turns it off so the CMake mutual-exclusion check stays clear.
-                overlay_defines = {}
-                for opt_in_define in (
-                    "SIMPLER_ENABLE_PTO_SDMA_WORKSPACE",
-                    "SIMPLER_ENABLE_PTO_URMA_WORKSPACE",
-                    "SIMPLER_ENABLE_PTO_RDMA_WORKSPACE",
-                ):
-                    if os.environ.get(opt_in_define, "").upper() in {"1", "ON", "TRUE", "YES"}:
-                        overlay_defines[opt_in_define] = "ON"
-                if overlay_defines:
-                    defines.update(overlay_defines)
-                    if (
-                        "SIMPLER_ENABLE_PTO_SDMA_WORKSPACE" in overlay_defines
-                        or "SIMPLER_ENABLE_PTO_RDMA_WORKSPACE" in overlay_defines
-                    ) and "SIMPLER_ENABLE_PTO_URMA_WORKSPACE" not in overlay_defines:
-                        defines["SIMPLER_ENABLE_PTO_URMA_WORKSPACE"] = "OFF"
+                # Forward the full a5 backend selection — one explicit value per
+                # overlay — so a value left in the CMake cache by an earlier
+                # build cannot survive a reconfigure (see
+                # _a5_async_workspace_overlay_defines). Only a5 onboard has
+                # these CMake options; forwarding them for another platform
+                # would put an unknown define on its host compile line.
+                if self._arch == "a5" and self._variant == "onboard":
+                    defines.update(_a5_async_workspace_overlay_defines())
             cmake_defines = defines or None
             # compile() adds a {target}/ subdirectory inside build_dir
             cache_dir = self._CACHE_DIR / arch / variant / name
