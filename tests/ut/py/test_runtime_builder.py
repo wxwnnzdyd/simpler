@@ -717,6 +717,7 @@ class TestBuildCacheStamp:
         import simpler_setup.runtime_builder as rb_module  # noqa: PLC0415
         from simpler_setup import pto_isa  # noqa: PLC0415
 
+        monkeypatch.delenv("ASCEND_HOME_PATH", raising=False)
         monkeypatch.setattr(rb_module, "_get_git_head", lambda _root: "runtime_sha")
         monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: "isa_sha")
 
@@ -729,6 +730,7 @@ class TestBuildCacheStamp:
         from simpler_setup import pto_isa  # noqa: PLC0415
 
         monkeypatch.delenv("SIMPLER_ENABLE_PTO_URMA_WORKSPACE", raising=False)
+        monkeypatch.delenv("ASCEND_HOME_PATH", raising=False)
         monkeypatch.setattr(rb_module, "_get_git_head", lambda _root: "runtime_sha")
         monkeypatch.setattr(pto_isa, "read_pto_isa_pin", lambda: "isa_sha")
 
