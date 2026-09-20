@@ -314,30 +314,34 @@ inline __aicore__ bool register_urma_async_event(
 
     const uint32_t engine = static_cast<uint32_t>(event.engine);
     const uint32_t record_count = event.CompletionRecordCount(session);
-    if (engine != static_cast<uint32_t>(::pto::comm::DmaEngine::URMA) || record_count != 1U) {
+    if (engine != static_cast<uint32_t>(::pto::comm::DmaEngine::URMA) || record_count == 0U ||
+        record_count > ctx.completion_capacity) {
         defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
         (void)event.Wait(session);
         return false;
     }
 
-    const auto record = event.CompletionRecordAt(session, 0U);
-    if (record.kind != ::pto::comm::CompletionKind::URMA_CQE_DW0 || record.addr == nullptr || record.expected > 1ULL) {
-        defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
-        (void)event.Wait(session);
-        return false;
-    }
+    for (uint32_t record_index = 0U; record_index < record_count; ++record_index) {
+        const auto record = event.CompletionRecordAt(session, record_index);
+        if (record.kind != ::pto::comm::CompletionKind::URMA_CQE_DW0 || record.addr == nullptr ||
+            record.expected > 1ULL) {
+            defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
+            (void)event.Wait(session);
+            return false;
+        }
 
-    CompletionToken token{
-        reinterpret_cast<uint64_t>(record.addr),
-        static_cast<uint32_t>(record.expected),
-        COMPLETION_ENGINE_URMA,
-        COMPLETION_TYPE_URMA_CQE_RECORD,
-        0,
-    };
-    if (!register_completion_condition(ctx, token)) {
-        defer_error(ctx, SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED);
-        (void)event.Wait(session);
-        return false;
+        CompletionToken token{
+            reinterpret_cast<uint64_t>(record.addr),
+            static_cast<uint32_t>(record.expected),
+            COMPLETION_ENGINE_URMA,
+            COMPLETION_TYPE_URMA_CQE_RECORD,
+            0,
+        };
+        if (!register_completion_condition(ctx, token)) {
+            defer_error(ctx, SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED);
+            (void)event.Wait(session);
+            return false;
+        }
     }
     return true;
 }

@@ -784,14 +784,6 @@ extern "C" int dma_workspace_provision(uint32_t required_mask, uint64_t *addr_ou
 extern "C" void dma_workspace_release(void *handle) { (void)handle; }
 
 #ifdef SIMPLER_ENABLE_PTO_URMA_WORKSPACE
-static uint64_t urma_workspace_bytes(uint32_t rank_count) {
-    using namespace pto::comm::urma;
-    constexpr uint32_t qp_num = 1;
-    return sizeof(UrmaInfo) +
-           static_cast<uint64_t>(rank_count) *
-               (2ULL * sizeof(UrmaWQCtx) * qp_num + 2ULL * sizeof(UrmaCqCtx) * qp_num + sizeof(UrmaMemInfo) * qp_num);
-}
-
 static bool rank_ids_are_dense_prefix(const uint32_t *rank_ids, size_t rank_count) {
     if (rank_ids == nullptr) return false;
     for (size_t i = 0; i < rank_count; ++i) {
