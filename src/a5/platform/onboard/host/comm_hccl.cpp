@@ -1798,10 +1798,7 @@ extern "C" int comm_derive_context(
     ctx.workSpace = h->host_ctx.workSpace;
     ctx.workSpaceSize = h->host_ctx.workSpaceSize;
 #if defined(SIMPLER_ENABLE_PTO_URMA_WORKSPACE) || defined(SIMPLER_ENABLE_PTO_RDMA_WORKSPACE)
-    if (rank_ids_are_dense_prefix(rank_ids, rank_count)) {
-        ctx.workSpace = h->host_ctx.workSpace;
-        ctx.workSpaceSize = h->host_ctx.workSpaceSize;
-    } else {
+    if (!rank_ids_are_dense_prefix(rank_ids, rank_count)) {
         ctx.workSpace = 0;
         ctx.workSpaceSize = 0;
     }
