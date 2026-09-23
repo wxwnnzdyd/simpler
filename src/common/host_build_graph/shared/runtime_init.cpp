@@ -252,7 +252,7 @@ RuntimeContext *runtime_init_data_from_layout(
     DeviceArena &arena, const RuntimeArenaLayout &layout, RuntimeMode mode, void *sm_dev_base, uint64_t /*sm_size*/
 ) {
     RuntimeContext *rt = static_cast<RuntimeContext *>(arena.region_ptr(layout.off_runtime));
-    memset(rt, 0, sizeof(*rt));
+    memset(static_cast<void *>(rt), 0, sizeof(*rt));
 
     // rt->ops is filled by the AICPU at boot.
     rt->mode = mode;
