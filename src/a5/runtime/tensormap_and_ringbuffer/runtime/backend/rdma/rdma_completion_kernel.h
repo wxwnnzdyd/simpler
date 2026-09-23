@@ -93,12 +93,12 @@ enum class RdmaEventRegistrationResult : int32_t {
 
 template <typename PtoAsyncEvent, typename PtoAsyncSession>
 inline __aicore__ RdmaEventRegistrationResult register_rdma_async_event_status(
-    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session, __gm__ uint8_t *workspace
+    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session
 );
 
 template <typename PtoAsyncEvent, typename PtoAsyncSession>
 inline __aicore__ bool register_rdma_async_event(
-    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session, __gm__ uint8_t *workspace
+    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session
 );
 
 }  // namespace pto2::detail
