@@ -19,15 +19,9 @@
 #include "call_config.h"
 #include "common/host_api.h"
 #include "native_run_execution.h"
+#include "native_run_phase.h"
 #include "runtime_c_api.h"
 #include "runtime.h"
-
-/** Internal phase of the caller-owned opaque native-run storage. */
-enum class NativeRunPhase : uint8_t {
-    Prepared,
-    Running,
-    Complete,
-};
 
 /**
  * The single placement-owned carrier for one progressable native lifecycle.
@@ -46,7 +40,9 @@ struct NativeRunContext {
         runner(runner_in),
         config(config_in),
         descriptor(descriptor_in),
-        host_api(runner_in, descriptor_in.pipeline_slot, descriptor_in.arena_bank, host_api_ops),
+        host_api(
+            runner_in, descriptor_in.pipeline_slot, descriptor_in.arena_bank, descriptor_in.run_epoch, host_api_ops
+        ),
         trace_hid(trace_hid_in) {
         // Publish the storage tag only after every potentially-throwing member
         // has been constructed. A failed placement construction must leave the
@@ -78,6 +74,7 @@ struct NativeRunContext {
     uint64_t trace_inv{0};
     long long trace_start_ns{0};
     long long runner_trace_start_ns{0};
+    uint64_t clock_log_offset{0};
     int completion_rc{-1};
     std::atomic<NativeRunPhase> phase{NativeRunPhase::Prepared};
     std::unique_ptr<typename Runner::PreparedExecution> prepared_execution{};

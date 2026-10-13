@@ -94,9 +94,8 @@ UrmaTput(const DstTensor &dst, const SrcTensor &src, __gm__ uint8_t *workspace, 
 namespace pto2::detail {
 
 template <typename PtoAsyncEvent, typename PtoAsyncSession>
-inline __aicore__ bool register_urma_async_event(
-    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session
-);
+inline __aicore__ bool
+register_urma_async_event(AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session);
 
 }  // namespace pto2::detail
 
@@ -257,7 +256,7 @@ inline __aicore__ AsyncCtx get_async_ctx(__gm__ int64_t *args) {
     ctx.completion_error_code = lc->async_ctx.completion_error_code;
     ctx.completion_entries = lc->async_ctx.completion_entries;
     ctx.completion_capacity = lc->async_ctx.completion_capacity;
-    ctx.task_token.raw = lc->async_ctx.task_token.raw;
+    TaskId::assign(ctx.task_token, lc->async_ctx.task_token);
     return ctx;
 }
 
@@ -301,9 +300,8 @@ inline __aicore__ void defer_flush(AsyncCtx & /*ctx*/) { __asm__ __volatile__(""
 #endif
 
 template <typename PtoAsyncEvent, typename PtoAsyncSession>
-inline __aicore__ bool register_urma_async_event(
-    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session
-) {
+inline __aicore__ bool
+register_urma_async_event(AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session) {
     if (!ctx.task_token.is_valid() || ctx.completion_count == nullptr || ctx.completion_entries == nullptr) {
         (void)event.Wait(session);
         return true;

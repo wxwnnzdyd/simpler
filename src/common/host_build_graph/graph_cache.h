@@ -29,6 +29,20 @@ struct GraphScopeResult {
     // mean traversing the in-flight map under its mutex on a path whose whole
     // purpose is to not contend with the submitting thread.
     void *recording_handle{nullptr};
+    // The formal parameters the recorded body must read: the entry's own deep copy, not
+    // the caller's arguments, which are only lent for the duration of the submit call.
+    // Set exactly when `recording` is, and valid until graph_commit drains the entry --
+    // which is after every job that could read it has finished.
+    //
+    // Const because the boundary is written once, by the submitting thread in graph_begin,
+    // and only read after that -- by the recorder, and by later same-key submissions
+    // comparing against it. Nothing may write it once it is handed out here.
+    //
+    // The body must read these and not the caller's arguments even on the synchronous
+    // fallback path: recording resolves a task slot's origin against this object's slot
+    // array, so an origin from any other object falls outside it and the parameter is
+    // recorded as static.
+    const GraphTaskArgs *params{nullptr};
 };
 
 using GraphSubmitResult = GraphScopeResult;
@@ -63,16 +77,30 @@ constexpr uint64_t graph_const_hash_impl(const char *s, uint64_t h) {
     return (*s == '\0') ? h : graph_const_hash_impl(s + 1, graph_hash_byte(h, static_cast<uint8_t>(*s)));
 }
 
+// Compile-time FNV-1a of a name, for the rt_submit_graph overload that takes an
+// explicit identity instead of deriving one from the Graph function's address.
+//
+// What the explicit form gives is a caller-chosen identity, not a stable one. The
+// cache looks a Graph up by graph_full_key(callable_hash, graph_key), and
+// callable_hash is the orchestration entry's own address, so no key outlives a
+// process -- and none needs to: a Definition cache lives inside one orchestration
+// run and is never persisted. What the caller gains is deciding what counts as the
+// same Graph: the overload drops the function pointer from the identity, so two
+// distinct Graph functions given one key share a single recorded Definition.
+//
+// That is the same sentence as its hazard, and the hazard is silent. Two functions
+// that are not the same Graph, given one key within one orchestration callable,
+// replay whichever recorded first. A key must be unique per distinct Graph function
+// in a callable.
+//
+// A caller that emits one C++ function per Graph wants rt_submit_graph(function,
+// args) instead: the function's address is already the identity, which is why every
+// call site in this repository uses that overload.
 constexpr uint64_t GRAPH_KEY(const char *s) { return graph_const_hash_impl(s, 1469598103934665603ULL); }
 
 inline bool rt_graph_args_cacheable(const GraphTaskArgs &args) {
-    if (args.has_error || args.tensor_count() <= 0 || args.tensor_count() > GRAPH_MAX_TENSOR_ARGS) {
+    if (args.has_error() || args.tensor_count() <= 0 || args.tensor_count() > GRAPH_MAX_TENSOR_ARGS) {
         return false;
-    }
-    for (int32_t i = 0; i < args.tensor_count(); ++i) {
-        // A Graph boundary is caller-owned storage. Runtime-allocated
-        // TensorCreateInfo outputs remain on the ordinary submit path.
-        if (args.tag(i) == TensorArgType::OUTPUT) return false;
     }
     return true;
 }

@@ -25,7 +25,6 @@
 #include "platform_comm/comm.h"
 #include "platform_comm/comm_context.h"
 
-#include "common/acl_hal_device.h"
 #include "common/unified_log.h"
 #include "host/file_marker_handshake.h"
 
@@ -59,6 +58,12 @@
 #if defined(SIMPLER_ENABLE_PTO_SDMA_WORKSPACE) || defined(SIMPLER_ENABLE_PTO_URMA_WORKSPACE) || \
     defined(SIMPLER_ENABLE_PTO_RDMA_WORKSPACE)
 #include "pto/comm/workspace.hpp"
+#endif
+#ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
+#ifndef __gm__
+#define __gm__
+#endif
+#include "pto/comm/async/rdma/rdma_workspace_manager.hpp"
 #endif
 
 // Thin wrappers around the HCCL public APIs we use. Kept as a translation
@@ -535,15 +540,11 @@ static int alloc_windows_via_ipc(CommHandle h, uint64_t win_size) {
         aclrtFreePhysical(handle);
         return -1;
     }
-    // aclrtMemAccessDesc::location.id is consumed in the driver-visible space, unlike
-    // aclrtPhysicalMemProp::location.id above, which takes the ACL-logical id. Under
-    // ASCEND_RT_VISIBLE_DEVICES the logical id here names the wrong card and aclrtMemSetAccess
-    // fails with 507899 (ACL_ERROR_RT_DRV_INTERNAL_ERROR). See common/acl_hal_device.h. The same
-    // descriptor is reused for the peer mappings below, so it carries the translation with it.
+    // The A5 ACL runtime validates access IDs in the ACL-logical space, including peer mappings.
     aclrtMemAccessDesc accessDesc{};
     accessDesc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
     accessDesc.location.type = ACL_MEM_LOCATION_TYPE_DEVICE;
-    accessDesc.location.id = static_cast<uint32_t>(pto::acl_to_hal_device_id(myDevice));
+    accessDesc.location.id = static_cast<uint32_t>(myDevice);
     aret = aclrtMemSetAccess(localBuf, aligned_size, &accessDesc, 1);
     if (aret != ACL_SUCCESS) {
         LOG_ERROR("[comm rank %d] ipc: MemSetAccess -> %d", rank, static_cast<int>(aret));
@@ -1323,9 +1324,9 @@ static bool init_rdma_workspace(
             "[comm rank %d] RDMA workspace init failed (status=%d rank_id=%u rank_count=%u phy_id=%u ip=%s "
             "base_port=%u peer0_phy=%u peer0_ip=%s peer0_addr=0x%llx peer1_phy=%u peer1_ip=%s "
             "peer1_addr=0x%llx size=%llu)",
-            h->rank, static_cast<int>(status), domain_rank, rank_count, bootstrap.phy_id,
-            bootstrap.local_ip.c_str(), static_cast<unsigned>(bootstrap.base_port),
-            rank_count > 0 ? peers[0].phy_id : 0, rank_count > 0 ? peers[0].roce_ip : "",
+            h->rank, static_cast<int>(status), domain_rank, rank_count, bootstrap.phy_id, bootstrap.local_ip.c_str(),
+            static_cast<unsigned>(bootstrap.base_port), rank_count > 0 ? peers[0].phy_id : 0,
+            rank_count > 0 ? peers[0].roce_ip : "",
             static_cast<unsigned long long>(rank_count > 0 ? peers[0].symmetric_addr : 0),
             rank_count > 1 ? peers[1].phy_id : 0, rank_count > 1 ? peers[1].roce_ip : "",
             static_cast<unsigned long long>(rank_count > 1 ? peers[1].symmetric_addr : 0),
@@ -1428,11 +1429,11 @@ static int domain_alloc_via_ipc(
         aclrtFreePhysical(handle);
         return -1;
     }
-    // Driver-visible id, as in alloc_windows_via_ipc above; the peer mappings reuse this descriptor.
+    // The peer mappings reuse this descriptor's ACL-logical device ID.
     aclrtMemAccessDesc accessDesc{};
     accessDesc.flags = ACL_RT_MEM_ACCESS_FLAGS_READWRITE;
     accessDesc.location.type = ACL_MEM_LOCATION_TYPE_DEVICE;
-    accessDesc.location.id = static_cast<uint32_t>(pto::acl_to_hal_device_id(myDevice));
+    accessDesc.location.id = static_cast<uint32_t>(myDevice);
     aret = aclrtMemSetAccess(localBuf, aligned_size, &accessDesc, 1);
     if (aret != ACL_SUCCESS) {
         LOG_ERROR("[comm rank %d] alloc_domain: MemSetAccess -> %d", h->rank, static_cast<int>(aret));

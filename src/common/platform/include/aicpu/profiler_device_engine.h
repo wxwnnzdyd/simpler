@@ -123,7 +123,32 @@ struct DeviceProfilerEngine {
         return false;
     }
 
-    static int enqueue_ready(Context ctx, uint64_t buffer_ptr, uint32_t buffer_seq) {
+    // Optional Module hook: write the hand-off's record count alongside the
+    // rest of the ready entry. A Module whose entry carries no count gets the
+    // `long` overload and its existing four-argument `write_ready_entry`, so
+    // the other profilers on this engine are untouched — the same overload-rank
+    // trick `report_committed` uses below.
+    //
+    // `record_count` is the producer's own count, captured by the caller while
+    // it still owned the buffer. It is passed rather than re-read because after
+    // the tail advance below the host owns those bytes.
+    template <typename M = Module>
+    static auto
+    write_entry(Context ctx, uint32_t tail, uint64_t buffer_ptr, uint32_t buffer_seq, uint32_t record_count, int)
+        -> decltype(M::write_ready_entry(ctx, tail, buffer_ptr, buffer_seq, record_count), void()) {
+        M::write_ready_entry(ctx, tail, buffer_ptr, buffer_seq, record_count);
+    }
+    template <typename M = Module>
+    static void write_entry(Context ctx, uint32_t tail, uint64_t buffer_ptr, uint32_t buffer_seq, uint32_t, long) {
+        M::write_ready_entry(ctx, tail, buffer_ptr, buffer_seq);
+    }
+
+    // `record_count` defaults to zero for the profilers whose ready entry has
+    // no count field: their `write_ready_entry` takes the `long` overload above
+    // and the argument is dropped, so those call sites are unchanged. A module
+    // whose entry does carry a count supplies it through its own wrapper, which
+    // has no default, so no producer of such a module can forget it.
+    static int enqueue_ready(Context ctx, uint64_t buffer_ptr, uint32_t buffer_seq, uint32_t record_count = 0) {
         DataHeader *header = Module::header(ctx);
         int q = Module::ready_thread(ctx);
         uint32_t current_tail = 0;
@@ -133,7 +158,7 @@ struct DeviceProfilerEngine {
         }
 
         uint32_t next_tail = (current_tail + 1) % Module::kReadyQueueSize;
-        Module::write_ready_entry(ctx, current_tail, buffer_ptr, buffer_seq);
+        write_entry(ctx, current_tail, buffer_ptr, buffer_seq, record_count, 0);
         wmb();  // publish: entry fields visible before the tail advance
         header->queue_tails[q] = next_tail;
         return 0;
@@ -194,6 +219,18 @@ struct DeviceProfilerEngine {
         return claim_free(ctx, state, free_queue, head, next_seq);
     }
 
+    // Optional Module hook, reported once per successful commit with the count
+    // read before publication. A Module that does not define it gets the
+    // `long` overload and no behaviour change: the overload-rank trick keeps
+    // the five other profilers on this engine untouched.
+    template <typename M = Module>
+    static auto report_committed(Context ctx, State *state, uint32_t saved_count, int)
+        -> decltype(M::on_publish_committed(ctx, state, saved_count), void()) {
+        M::on_publish_committed(ctx, state, saved_count);
+    }
+    template <typename M = Module>
+    static void report_committed(Context, State *, uint32_t, long) {}
+
     static void switch_buffer(Context ctx, State *state) {
         if (state == nullptr) {
             return;
@@ -205,14 +242,21 @@ struct DeviceProfilerEngine {
         }
 
         uint32_t seq = Module::current_seq(state);
-        int rc = enqueue_ready(ctx, Module::current_ptr(state), seq);
+        // Read before publication: a successful enqueue advances the ready
+        // queue tail, after which the host owns the buffer and may recycle it.
+        // The same snapshot travels in the entry, so a host that later cannot
+        // read this buffer still knows how many records it is missing.
+        const uint32_t saved_count = Module::count(full_buf);
+        int rc = enqueue_ready(ctx, Module::current_ptr(state), seq, saved_count);
         if (rc != 0) {
-            Module::account_dropped(ctx, state, Module::count(full_buf));
+            Module::account_dropped(ctx, state, saved_count);
             Module::on_enqueue_failed(ctx, state, full_buf);
             Module::set_count(full_buf, 0);
             wmb();
             return;
         }
+
+        report_committed(ctx, state, saved_count, 0);
 
         uint32_t next_seq = seq + 1;
         Module::set_current_ptr(state, 0);

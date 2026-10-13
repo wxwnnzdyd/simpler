@@ -152,6 +152,20 @@ struct OrchestratorState {
     bool init(void *sm_base, void *gm_heap, uint64_t heap_size, uint64_t max_tasks);
 
     void report_fatal(int32_t error_code, const char *func, const char *fmt, ...);
+
+    /**
+     * The same report, and whether this call is the one that latched the field.
+     *
+     * For a caller whose next decision depends on *whose* failure the run will be judged by — a
+     * refused access that must not describe a run that had already failed for a reason of its own.
+     * The answer comes from this call's own exchange: a load taken before it can be overtaken by
+     * another reporter, and the latched code cannot stand in for it, since two reporters may
+     * carry the same code.
+     *
+     * @return true when this report latched the field; false when an earlier one owns it, in which
+     *         case this code is logged and dropped exactly as `report_fatal` would.
+     */
+    bool report_fatal_owned(int32_t error_code, const char *func, const char *fmt, ...);
     void begin_scope(ScopeMode mode = ScopeMode::AUTO);
     void end_scope();
     TaskOutputTensors submit_task(const MixedKernels &mixed_kernels, const CoreTaskArgs &args);
@@ -190,10 +204,6 @@ struct OrchProfilingData {
     uint64_t insert_ns;
     uint64_t fanin_ns;
     int64_t submit_count;
-    // Wait time tracking for blocking phases
-    uint64_t fanin_wait_ns;  // Legacy (wiring): fanout_lock wait; polling has no such lock
-    // Atomic operation counts per phase
-    uint64_t args_atomic_count;
 };
 
 OrchProfilingData orchestrator_get_profiling();

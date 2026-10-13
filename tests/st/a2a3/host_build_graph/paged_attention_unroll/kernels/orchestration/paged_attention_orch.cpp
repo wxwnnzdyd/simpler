@@ -101,17 +101,17 @@ static void process_qtile_scope(const CoreTaskArgs &ctx) {
     const simpler::hbg::Tensor &value_cache = ctx.tensor(2).ref();
     const simpler::hbg::Tensor &block_table = ctx.tensor(3).ref();
     const simpler::hbg::Tensor &out = ctx.tensor(4).ref();
-    uint64_t b_idx = ctx.scalar(0);
-    uint64_t q_idx = ctx.scalar(1);
-    uint64_t q_head_num = ctx.scalar(2);
-    uint64_t q_tile = ctx.scalar(3);
-    uint64_t head_dim = ctx.scalar(4);
-    uint64_t block_size = ctx.scalar(5);
-    uint64_t block_num = ctx.scalar(6);
-    uint64_t scale_value = ctx.scalar(7);
-    uint64_t bn_this_batch = ctx.scalar(8);
-    uint64_t cur_seq = ctx.scalar(9);
-    DataType data_type = static_cast<DataType>(ctx.scalar(10));
+    uint64_t b_idx = ctx.scalar<uint64_t>(0);
+    uint64_t q_idx = ctx.scalar<uint64_t>(1);
+    uint64_t q_head_num = ctx.scalar<uint64_t>(2);
+    uint64_t q_tile = ctx.scalar<uint64_t>(3);
+    uint64_t head_dim = ctx.scalar<uint64_t>(4);
+    uint64_t block_size = ctx.scalar<uint64_t>(5);
+    uint64_t block_num = ctx.scalar<uint64_t>(6);
+    uint64_t scale_value = ctx.scalar<uint64_t>(7);
+    uint64_t bn_this_batch = ctx.scalar<uint64_t>(8);
+    uint64_t cur_seq = ctx.scalar<uint64_t>(9);
+    DataType data_type = ctx.scalar<DataType>(10);
 
     CYCLE_COUNT_START();
 
@@ -241,11 +241,12 @@ extern "C" {
 __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
     (void)orch_args;
     return OrchestrationConfig{
-        .expected_arg_count = 7,
+        .expected_arg_count = 8,
     };
 }
 
 __attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipTaskArgs &orch_args) {
+    const auto &host_context_lens = orch_args.tensor(6).ref();
 #ifdef ENABLE_PROFILING
     g_prof = ProfCounters{};  // reset per entry — single-threaded orchestration
 #endif
@@ -266,7 +267,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     uint64_t block_num = orch_args.tensor(3).ref().shapes[1];
 
     // scale from scalar arg
-    uint64_t scale_value = orch_args.scalar(0);
+    uint64_t scale_value = orch_args.scalar<uint64_t>(0);
     uint64_t q_head_num = num_heads;
     uint64_t q_tile = std::min(num_heads, static_cast<uint64_t>(128));
     uint64_t q_loop = (q_head_num + q_tile - 1) / q_tile;
@@ -315,7 +316,7 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
 
     for (uint64_t b_idx = 0; b_idx < batch; b_idx++) {
         uint32_t cl_idx[1] = {static_cast<uint32_t>(b_idx)};
-        uint64_t cur_seq = static_cast<uint64_t>(get_tensor_data<int32_t>(context_lens, 1, cl_idx));
+        uint64_t cur_seq = static_cast<uint64_t>(get_tensor_data<int32_t>(host_context_lens, 1, cl_idx));
         uint64_t bn_this_batch = (cur_seq + block_size - 1) / block_size;
 
         for (uint64_t q_idx = 0; q_idx < q_loop; q_idx++) {
@@ -324,7 +325,11 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
             ctx.reset();
             ctx.add_input(query, key_cache, value_cache, block_table);
             ctx.add_output(out);
-            ctx.add_scalar(
+            // Static because process_qtile_scope reads every one of them back as a value.
+            // No slot here follows a parameter -- this Arg is never submitted, so an lvalue
+            // in the list is a plain host local rather than something a later invocation
+            // refreshes, which is what add_scalar would otherwise infer from it.
+            ctx.add_static_scalar(
                 b_idx, q_idx, q_head_num, q_tile, head_dim, block_size, block_num, scale_value, bn_this_batch, cur_seq,
                 static_cast<uint64_t>(data_type)
             );

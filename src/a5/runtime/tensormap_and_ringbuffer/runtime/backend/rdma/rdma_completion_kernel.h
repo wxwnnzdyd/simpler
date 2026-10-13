@@ -92,14 +92,12 @@ enum class RdmaEventRegistrationResult : int32_t {
 };
 
 template <typename PtoAsyncEvent, typename PtoAsyncSession>
-inline __aicore__ RdmaEventRegistrationResult register_rdma_async_event_status(
-    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session
-);
+inline __aicore__ RdmaEventRegistrationResult
+register_rdma_async_event_status(AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session);
 
 template <typename PtoAsyncEvent, typename PtoAsyncSession>
-inline __aicore__ bool register_rdma_async_event(
-    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session
-);
+inline __aicore__ bool
+register_rdma_async_event(AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session);
 
 }  // namespace pto2::detail
 
@@ -173,9 +171,8 @@ submit_rdma_request(AsyncCtx &ctx, RdmaRequestDescriptor<DstTensor, SrcTensor, S
 namespace pto2::detail {
 
 template <typename PtoAsyncEvent, typename PtoAsyncSession>
-inline __aicore__ RdmaEventRegistrationResult register_rdma_async_event_status(
-    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session
-) {
+inline __aicore__ RdmaEventRegistrationResult
+register_rdma_async_event_status(AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session) {
     if (!ctx.task_token.is_valid() || ctx.completion_count == nullptr || ctx.completion_entries == nullptr) {
         (void)event.Wait(session);
         return RdmaEventRegistrationResult::OK;
@@ -216,9 +213,8 @@ inline __aicore__ RdmaEventRegistrationResult register_rdma_async_event_status(
 }
 
 template <typename PtoAsyncEvent, typename PtoAsyncSession>
-inline __aicore__ bool register_rdma_async_event(
-    AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session
-) {
+inline __aicore__ bool
+register_rdma_async_event(AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAsyncSession &session) {
     return register_rdma_async_event_status(ctx, event, session) == RdmaEventRegistrationResult::OK;
 }
 

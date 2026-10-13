@@ -13,6 +13,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import warnings
 from functools import cache
 from pathlib import Path
 from typing import Optional, Union
@@ -30,6 +32,7 @@ from .toolchain import (
 )
 
 logger = logging.getLogger(__name__)
+_ascend_include_search_lock = threading.Lock()
 
 # Covers the part of the persistent scene-test cache key that nothing else
 # fingerprints: how ``scene_test.compile_chip_callable_spec`` assembles
@@ -43,6 +46,11 @@ _COMPILE_CACHE_SCHEMA = 1
 # invocation and flags, toolchain selection, and the ELF section extraction
 # applied to every onboard incore.
 _ARTIFACT_LOGIC_MODULES = ("kernel_compiler.py", "toolchain.py", "compile_paths.py", "elf_parser.py")
+
+_CPU_SIM_TARGET_FLAGS = {
+    "a2a3sim": "-DPTO_CPU_SIM_TARGET_A2A3",
+    "a5sim": "-DPTO_CPU_SIM_TARGET_A5",
+}
 
 
 @cache
@@ -93,6 +101,44 @@ def _cmake_bool_env_enabled(name: str, default: bool = False) -> bool:
     return default
 
 
+@cache
+def _ascend_incore_include_dirs(ascend_home: str) -> tuple[str, ...]:
+    """Find CANN header roots once per toolchain installation in this process."""
+    roots = [Path(ascend_home)]
+    roots += [Path(ascend_home) / arch for arch in ("aarch64-linux", "x86_64-linux")]
+
+    candidates: list[Path] = []
+    for root in roots:
+        candidates.extend(
+            [
+                root / "include",
+                root / "include" / "external",
+                root / "include" / "c_api",
+                root / "include" / "c_api" / "internal",
+                root / "asc" / "include",
+                root / "asc" / "include" / "interface",
+                root / "asc" / "include" / "basic_api",
+                root / "asc" / "include" / "basic_api" / "interface",
+                root / "ascendc" / "include",
+                root / "ascendc" / "include" / "basic_api",
+                root / "ascendc" / "include" / "basic_api" / "interface",
+            ]
+        )
+    for header in ("kernel_operator_sys_var_intf.h", "kernel_operator_sys_var_intf_impl.h"):
+        try:
+            candidates.extend(path.parent for path in Path(ascend_home).rglob(header))
+        except OSError:
+            continue
+
+    include_dirs = []
+    seen = set()
+    for path in candidates:
+        if path.is_dir() and path not in seen:
+            include_dirs.append(str(path))
+            seen.add(path)
+    return tuple(include_dirs)
+
+
 class KernelCompiler:
     """
     Compiler for PTO kernels and orchestration functions.
@@ -101,9 +147,15 @@ class KernelCompiler:
     - compile_incore(): Compile a kernel source file for AICore/AIVector
     - compile_orchestration(): Compile an orchestration function for a given runtime
 
-    Toolchain selection is determined by C++ via get_incore_compiler() and
-    get_orchestration_compiler() (defined in runtime_compile_info.cpp).
-    Falls back to platform-based logic if the library is not yet loaded.
+    Toolchain selection happens here, not in C++. `_orchestration_toolchain()`
+    picks by runtime name — host_build_graph always compiles host-side, while
+    tensormap_and_ringbuffer cross-compiles for the AICPU unless the platform is
+    a sim — and `compile_incore()` picks by platform. The `get_incore_compiler()`
+    / `get_orchestration_compiler()` functions in the three
+    runtime_compile_info.cpp files (a2a3 and a5 host_build_graph, which are
+    identical, plus common/tensormap_and_ringbuffer, which draws the same
+    host-vs-AICPU line this method does) describe the same intent but have no
+    caller; nothing reads them over ctypes or from C++.
 
     Available toolchains:
     - CCEC: ccec compiler for AICore kernels (real hardware)
@@ -164,6 +216,18 @@ class KernelCompiler:
         if not self._sanitizers or not toolchain.is_host:
             return []
         return [f"-fsanitize={self._sanitizers}", "-fno-omit-frame-pointer", "-O1"]
+
+    def _sim_incore_compile_flags(self, core_type: str) -> list[str]:
+        """Return the complete compiler flags for one CPU-sim kernel."""
+        try:
+            target_flag = _CPU_SIM_TARGET_FLAGS[self.platform]
+        except KeyError as error:
+            raise ValueError(f"Unsupported CPU simulator platform: {self.platform}") from error
+        return [
+            *self.gxx15.get_compile_flags(core_type=core_type),
+            target_flag,
+            *self._sanitizer_flags(self.gxx15),
+        ]
 
     def get_platform_include_dirs(self) -> list[str]:
         """
@@ -248,39 +312,8 @@ class KernelCompiler:
         ascend_home = env_manager.get("ASCEND_HOME_PATH")
         if not ascend_home:
             return []
-        roots = [Path(ascend_home)]
-        roots += [Path(ascend_home) / arch for arch in ("aarch64-linux", "x86_64-linux")]
-
-        candidates: list[Path] = []
-        for root in roots:
-            candidates.extend(
-                [
-                    root / "include",
-                    root / "include" / "external",
-                    root / "include" / "c_api",
-                    root / "include" / "c_api" / "internal",
-                    root / "asc" / "include",
-                    root / "asc" / "include" / "interface",
-                    root / "asc" / "include" / "basic_api",
-                    root / "asc" / "include" / "basic_api" / "interface",
-                    root / "ascendc" / "include",
-                    root / "ascendc" / "include" / "basic_api",
-                    root / "ascendc" / "include" / "basic_api" / "interface",
-                ]
-            )
-        for header in ("kernel_operator_sys_var_intf.h", "kernel_operator_sys_var_intf_impl.h"):
-            try:
-                candidates.extend(path.parent for path in Path(ascend_home).rglob(header))
-            except OSError:
-                continue
-
-        include_dirs = []
-        seen = set()
-        for path in candidates:
-            if path.is_dir() and path not in seen:
-                include_dirs.append(str(path))
-                seen.add(path)
-        return include_dirs
+        with _ascend_include_search_lock:
+            return list(_ascend_incore_include_dirs(str(ascend_home)))
 
     def _get_orchestration_config(self, runtime_name: str) -> tuple[list[str], list[str]]:
         """
@@ -410,7 +443,7 @@ class KernelCompiler:
         """Describe the compiler inputs shared by identical incore sources."""
         if self.platform.endswith("sim"):
             incore = self.gxx15
-            flags = [*incore.get_compile_flags(core_type=core_type), *self._sanitizer_flags(incore)]
+            flags = self._sim_incore_compile_flags(core_type)
             linker = None
         else:
             assert self.ccec is not None, "ccec toolchain is only available for hardware platforms"
@@ -430,9 +463,24 @@ class KernelCompiler:
         }
 
     def _run_subprocess(
-        self, cmd: list[str], label: str, error_hint: str = "Compiler not found"
+        self,
+        cmd: list[str],
+        label: str,
+        error_hint: str = "Compiler not found",
+        surface_diagnostics: bool = False,
     ) -> subprocess.CompletedProcess:
-        """Run a subprocess command with standardized logging and error handling."""
+        """Run a subprocess command with standardized logging and error handling.
+
+        surface_diagnostics reports a successful compile's stderr as a warning. It goes
+        through `warnings` rather than `logger`: pytest shows its warnings summary with no
+        flag at all, while logger output below ERROR is swallowed unless the run passes
+        --log-cli-level, and child pytest processes do not inherit that option (conftest's
+        _resource_child_command forwards only --manual). A diagnostic nobody sees by
+        default is a diagnostic that does not exist.
+
+        It is opt-in per call site rather than global because the kernel toolchains carry
+        pre-existing warnings that would bury the ones a caller turned this on to see.
+        """
         logger.debug(f"[{label}] Command: {' '.join(cmd)}")
         try:
             result = subprocess.run(cmd, check=False, capture_output=True, text=True, cwd=self.project_root)
@@ -441,6 +489,8 @@ class KernelCompiler:
                 logger.debug(f"[{label}] stdout:\n{result.stdout}")
             if result.stderr and logger.isEnabledFor(10):
                 logger.debug(f"[{label}] stderr:\n{result.stderr}")
+            if result.stderr and result.returncode == 0 and surface_diagnostics:
+                warnings.warn(f"[{label}] compiler diagnostics:\n{result.stderr}", stacklevel=2)
 
             if result.returncode != 0:
                 logger.error(f"[{label}] Compilation failed: {result.stderr}")
@@ -458,6 +508,7 @@ class KernelCompiler:
         label: str,
         error_hint: str = "Compiler not found",
         delete_output: bool = True,
+        surface_diagnostics: bool = False,
     ) -> bytes:
         """Run compilation command, read output file, clean up, return bytes.
 
@@ -466,6 +517,8 @@ class KernelCompiler:
             output_path: Path to expected output file
             label: Label for log messages
             error_hint: Message for FileNotFoundError
+            surface_diagnostics: Report a successful compile's stderr as a warning
+                (see _run_subprocess)
 
         Returns:
             Binary contents of the compiled output file
@@ -473,16 +526,20 @@ class KernelCompiler:
         Raises:
             RuntimeError: If compilation fails or output file not found
         """
-        self._run_subprocess(cmd, label, error_hint)
+        # The cleanup is a finally because _run_subprocess reports diagnostics through
+        # warnings.warn, which raises under an error-level warning filter -- a compile
+        # that produced its output would otherwise leave the file behind.
+        try:
+            self._run_subprocess(cmd, label, error_hint, surface_diagnostics=surface_diagnostics)
 
-        if not os.path.isfile(output_path):
-            raise RuntimeError(f"Compilation succeeded but output file not found: {output_path}")
+            if not os.path.isfile(output_path):
+                raise RuntimeError(f"Compilation succeeded but output file not found: {output_path}")
 
-        with open(output_path, "rb") as f:
-            binary_data = f.read()
-
-        if delete_output:
-            os.remove(output_path)
+            with open(output_path, "rb") as f:
+                binary_data = f.read()
+        finally:
+            if delete_output and os.path.isfile(output_path):
+                os.remove(output_path)
         logger.info(f"[{label}] Compilation {output_path} successful: {len(binary_data)} bytes")
         return binary_data
 
@@ -790,8 +847,7 @@ class KernelCompiler:
         )
 
         # Build command from toolchain
-        cmd = [self.gxx15.cxx_path, *self.gxx15.get_compile_flags(core_type=core_type)]
-        cmd += self._sanitizer_flags(self.gxx15)
+        cmd = [self.gxx15.cxx_path, *self._sim_incore_compile_flags(core_type)]
 
         # Add PTO ISA header paths if provided. The path always comes from
         # ensure_pto_isa_root(), which has already verified HEAD == pto_isa.pin,

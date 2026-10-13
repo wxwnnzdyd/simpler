@@ -8,7 +8,10 @@
 # -----------------------------------------------------------------------------------------------------------
 """Tests for KernelCompiler host toolchain selection."""
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
+from time import sleep
 from types import SimpleNamespace
 
 import pytest
@@ -101,6 +104,83 @@ def test_direct_compiler_command_uses_checkout_relative_paths(monkeypatch, tmp_p
     assert compiler._compile_incore_sim(str(source), core_type="aiv") == b"compiled"
     assert captured["cmd"][-1] == str(Path("simpler_setup") / "incore" / "pipe_sync.h")
     assert f"-I{Path('simpler_setup') / 'incore'}" in captured["cmd"]
+
+
+def test_ascend_incore_include_search_runs_once_per_install(monkeypatch, tmp_path):
+    from simpler_setup import kernel_compiler  # noqa: PLC0415
+
+    ascend_home = tmp_path / "cann"
+    (ascend_home / "include").mkdir(parents=True)
+    header_dir = ascend_home / "custom"
+    header_dir.mkdir()
+    (header_dir / "kernel_operator_sys_var_intf.h").write_text("// header\n")
+    monkeypatch.setattr(kernel_compiler.env_manager, "get", lambda _name: str(ascend_home))
+
+    original_rglob = Path.rglob
+    searches = []
+
+    def count_searches(path, pattern):
+        if path == ascend_home:
+            searches.append(pattern)
+            sleep(0.01)
+        return original_rglob(path, pattern)
+
+    monkeypatch.setattr(Path, "rglob", count_searches)
+    compiler = kernel_compiler.KernelCompiler.__new__(kernel_compiler.KernelCompiler)
+
+    start = Barrier(8)
+
+    def search(_index):
+        start.wait(timeout=2)
+        return compiler.get_ascend_incore_include_dirs()
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(search, range(8)))
+
+    first = results[0]
+    second = compiler.get_ascend_incore_include_dirs()
+
+    assert first == second
+    assert all(result == first for result in results)
+    assert str(ascend_home / "include") in first
+    assert str(header_dir) in first
+    assert searches == ["kernel_operator_sys_var_intf.h", "kernel_operator_sys_var_intf_impl.h"]
+
+
+@pytest.mark.parametrize("core_type", ["aic", "aiv"])
+@pytest.mark.parametrize(
+    ("platform", "expected_target", "other_target"),
+    [
+        ("a2a3sim", "-DPTO_CPU_SIM_TARGET_A2A3", "-DPTO_CPU_SIM_TARGET_A5"),
+        ("a5sim", "-DPTO_CPU_SIM_TARGET_A5", "-DPTO_CPU_SIM_TARGET_A2A3"),
+    ],
+)
+def test_sim_target_flag_matches_platform_in_command_and_cache(
+    monkeypatch, tmp_path, core_type, platform, expected_target, other_target
+):
+    from simpler_setup import kernel_compiler  # noqa: PLC0415
+    from simpler_setup.environment import PROJECT_ROOT  # noqa: PLC0415
+
+    compiler = kernel_compiler.KernelCompiler(platform)
+    source = PROJECT_ROOT / "simpler_setup" / "incore" / "pipe_sync.h"
+    captured = {}
+    monkeypatch.setattr(compiler, "_make_temp_path", lambda **_kwargs: str(tmp_path / "kernel.so"))
+    monkeypatch.setattr(kernel_compiler, "_executable_cache_identity", lambda path: {"name": path})
+
+    def capture_compile(cmd, *_args, **_kwargs):
+        captured["cmd"] = cmd
+        return b"compiled"
+
+    monkeypatch.setattr(compiler, "_compile_to_bytes", capture_compile)
+
+    assert compiler._compile_incore_sim(str(source), core_type=core_type) == b"compiled"
+    cache_flags = compiler.incore_compile_cache_token(core_type)["flags"]
+    assert isinstance(cache_flags, list)
+    command_flags = captured["cmd"][1 : 1 + len(cache_flags)]
+
+    assert command_flags == cache_flags
+    assert cache_flags.count(expected_target) == 1
+    assert other_target not in cache_flags
 
 
 def test_compiler_subprocess_runs_from_checkout_root(monkeypatch):

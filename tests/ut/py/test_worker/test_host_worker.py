@@ -218,19 +218,47 @@ def test_chip_process_loop_inits_runs_and_finalizes(monkeypatch):
 
     class FakeChipWorker:
         pipeline_depth = 2
+        # a2a3 stages a successor frame on the strength of its granted sets, so this
+        # route negotiates two frames without joining native launches.
+        supports_joined_native_launch = False
 
-        def init(self, device_id, bins, *, log_level, prewarm_config=None, enable_sdma=False):
-            events.append(("init", device_id, bins, log_level, prewarm_config, enable_sdma))
+        def init(
+            self,
+            device_id,
+            bins,
+            *,
+            log_level,
+            prewarm_config=None,
+            enable_sdma=False,
+            collect_across_runs=False,
+            requested_pipeline_depth=0,
+        ):
+            events.append(
+                (
+                    "init",
+                    device_id,
+                    bins,
+                    log_level,
+                    prewarm_config,
+                    enable_sdma,
+                    collect_across_runs,
+                    requested_pipeline_depth,
+                )
+            )
 
         def finalize(self) -> None:
             events.append(("finalize",))
 
     def fake_run_chip_main_loop(
-        cw, *_args, chip_platform, chip_runtime, prepared=None, task_frame_count=1, chip_rank=None
+        cw, *_args, chip_platform, chip_runtime, prepared=None, task_frame_count=1, chip_rank=None, **_kwargs
     ):
         assert chip_rank is None
-        published_depths.append(worker_mod._PIPELINE_LEASE_FMT.unpack_from(_args[0], worker_mod._OFF_PIPELINE_LEASE)[0])
+        depth, frames, _spare = worker_mod._PIPELINE_LEASE_FMT.unpack_from(_args[0], worker_mod._OFF_PIPELINE_LEASE)
+        published_depths.append(depth)
         published_frame_counts.append(task_frame_count)
+        # The parent registers the endpoint from this word, so the count the loop polls and the
+        # count published for the parent are the same number.
+        assert frames == task_frame_count
         events.append(("main_loop", cw, chip_platform, chip_runtime))
 
     monkeypatch.setattr(worker_mod, "ChipWorker", FakeChipWorker)
@@ -247,6 +275,8 @@ def test_chip_process_loop_inits_runs_and_finalizes(monkeypatch):
             {},
             {},
             worker_mod.mint_owner_instance_id(),
+            worker_mod.mint_owner_instance_id(),
+            worker_mod.mint_owner_instance_id(),
             platform="a2a3",
             runtime="tensormap_and_ringbuffer",
         )
@@ -254,12 +284,86 @@ def test_chip_process_loop_inits_runs_and_finalizes(monkeypatch):
         shm.close()
         shm.unlink()
 
-    assert events[0] == ("init", 7, "bins", 25, None, False)
+    # A chip child asked for no particular capacity passes zero through, which is what makes the
+    # grant the runtime's standing default rather than its published maximum.
+    assert events[0] == ("init", 7, "bins", 25, None, False, False, 0)
     assert events[1][0] == "main_loop"
     assert events[1][2:] == ("a2a3", "tensormap_and_ringbuffer")
     assert events[2] == ("finalize",)
     assert published_depths == [2]
     assert published_frame_counts == [2]
+
+
+@pytest.mark.parametrize(
+    ("launch_depth", "configured", "expected_frames"),
+    [
+        # The native entry is reached only above depth one, so the default route configures
+        # nothing on the ChipWorker and publishes the single-frame serial contract.
+        (1, [], 1),
+        # At depth two the child configures its own ChipWorker before init — the only place the
+        # request and the runtime's resolved capability meet — and publishes the second frame.
+        (2, [2], 2),
+    ],
+)
+def test_chip_child_configures_its_launch_depth_through_the_native_entry(
+    monkeypatch, launch_depth, configured, expected_frames
+):
+    """a5 TMR's frame count follows the capability the child resolved, through the native entry.
+
+    ``ChipWorker.configure_launch_depth`` is the only configuration route below the public
+    Worker — it is bound for direct callers as well — so this covers both: the public route's
+    child arrives here, and a caller driving a ``ChipWorker`` itself reaches the same entry with
+    the same effect on the negotiated frame count.
+    """
+    configured_depths: list[int] = []
+    published_frame_counts: list[int] = []
+
+    class FakeChipWorker:
+        pipeline_depth = 2
+        supports_joined_native_launch = launch_depth > 1
+
+        def configure_launch_depth(self, depth: int) -> None:
+            configured_depths.append(int(depth))
+
+        def init(self, device_id, bins, **_kwargs):
+            del device_id, bins
+
+        def finalize(self) -> None:
+            pass
+
+    def fake_run_chip_main_loop(cw, *_args, task_frame_count=1, **_kwargs):
+        del cw
+        depth, frames, _spare = worker_mod._PIPELINE_LEASE_FMT.unpack_from(_args[0], worker_mod._OFF_PIPELINE_LEASE)
+        del depth
+        published_frame_counts.append(task_frame_count)
+        assert frames == task_frame_count
+
+    monkeypatch.setattr(worker_mod, "ChipWorker", FakeChipWorker)
+    monkeypatch.setattr(worker_mod, "_run_chip_main_loop", fake_run_chip_main_loop)
+
+    shm = SharedMemory(create=True, size=MAILBOX_SIZE)
+    try:
+        assert shm.buf is not None
+        worker_mod._chip_process_loop(
+            shm.buf,
+            "bins",
+            0,
+            {},
+            {},
+            {},
+            worker_mod.mint_owner_instance_id(),
+            worker_mod.mint_owner_instance_id(),
+            worker_mod.mint_owner_instance_id(),
+            platform="a5",
+            runtime="tensormap_and_ringbuffer",
+            launch_depth=launch_depth,
+        )
+    finally:
+        shm.close()
+        shm.unlink()
+
+    assert configured_depths == configured
+    assert published_frame_counts == [expected_frames]
 
 
 def _dummy_l2_domain(domain_id: int):
@@ -298,6 +402,31 @@ class _RecordingDomainImpl:
             raise error
 
 
+def _teardown_identity_allocator():
+    from simpler.buffer import LocalEndpointBufferIdentityAllocator
+
+    return LocalEndpointBufferIdentityAllocator(b"\x11\x22\x33\x44\x55\x66\x77\x88")
+
+
+def _chip_loop_provider_region_store(*, device_id: int = 0, chip_platform: str = ""):
+    from simpler.buffer import LocalEndpointBufferIdentityAllocator
+    from simpler.comm_provider import (
+        DeviceAllocationTarget,
+        ProviderRegionStore,
+        RegionAllocationContext,
+        RegionEnvironmentKind,
+    )
+
+    environment = RegionEnvironmentKind.SIM if str(chip_platform).endswith("sim") else RegionEnvironmentKind.ONBOARD
+    return ProviderRegionStore(
+        RegionAllocationContext(
+            environment_kind=environment,
+            target=DeviceAllocationTarget(int(device_id)),
+        ),
+        identity_allocator=LocalEndpointBufferIdentityAllocator(worker_mod.mint_owner_instance_id()),
+    )
+
+
 class _TeardownPartShell:
     def __init__(self, part, spec) -> None:
         self.part = part
@@ -306,19 +435,23 @@ class _TeardownPartShell:
         self.release_step_failures = []
         self._local_base = 0x1000 if part.name == "PAYLOAD" else 0x2000
 
-    def materialize(self) -> None:
-        return None
+    def materialize(self, identity, diagnostics=None):
+        from _task_interface import AccessMode, AddressSpace, BackendKind
+        from simpler.buffer import Buffer, intern_worker_path
 
-    def mapping_bytes(self) -> int:
-        return self.spec.logical_bytes
-
-    def import_capability(self):
-        from simpler.comm_provider import PosixShmImport
-
-        return PosixShmImport(shm_name=f"smp_{self.part.name.lower()}{id(self):016x}"[:32])
-
-    def local_base(self) -> int:
-        return self._local_base
+        del diagnostics
+        token = f"smp_{self.part.name.lower()}{id(self):016x}"[:32]
+        return Buffer(
+            identity=identity,
+            owner_worker_path_id=intern_worker_path(""),
+            address_space=AddressSpace.HOST,
+            access=AccessMode.READWRITE,
+            backend_kind=BackendKind.POSIX_SHM,
+            nbytes=int(self.spec.logical_bytes),
+            body=token.encode("ascii"),
+            shm=None,
+            base=int(self._local_base),
+        )
 
     def zero_bytes(self, offset: int, nbytes: int) -> None:
         del offset, nbytes
@@ -394,12 +527,13 @@ def test_teardown_chip_process_resources_continues_and_aggregates_in_order():
             environment_kind=RegionEnvironmentKind.SIM,
             target=DeviceAllocationTarget(device_id=0),
         ),
+        _teardown_identity_allocator(),
         _shell_factory=factory,
     )
     result = store.allocate_and_export(
         RegionAllocationSpec(
-            payload=RegionPartAllocationSpec(planned_backing_kind=BackendKind.POSIX_SHM, logical_bytes=64),
-            counter=RegionPartAllocationSpec(planned_backing_kind=BackendKind.POSIX_SHM, logical_bytes=8),
+            payload=RegionPartAllocationSpec(planned_backing_kind=BackendKind.VMM_SHAREABLE, logical_bytes=64),
+            counter=RegionPartAllocationSpec(planned_backing_kind=BackendKind.VMM_SHAREABLE, logical_bytes=8),
         )
     )
     factory.payloads[0].release_step_failures = [
@@ -450,11 +584,12 @@ def test_teardown_chip_process_resources_lists_every_retained_resource():
             environment_kind=RegionEnvironmentKind.SIM,
             target=DeviceAllocationTarget(device_id=0),
         ),
+        _teardown_identity_allocator(),
         _shell_factory=factory,
     )
     spec = RegionAllocationSpec(
-        payload=RegionPartAllocationSpec(planned_backing_kind=BackendKind.POSIX_SHM, logical_bytes=64),
-        counter=RegionPartAllocationSpec(planned_backing_kind=BackendKind.POSIX_SHM, logical_bytes=8),
+        payload=RegionPartAllocationSpec(planned_backing_kind=BackendKind.VMM_SHAREABLE, logical_bytes=64),
+        counter=RegionPartAllocationSpec(planned_backing_kind=BackendKind.VMM_SHAREABLE, logical_bytes=8),
     )
     first = store.allocate_and_export(spec)
     second = store.allocate_and_export(spec)
@@ -511,12 +646,13 @@ def test_teardown_chip_process_resources_ignores_released_and_keeps_each_step_on
             environment_kind=RegionEnvironmentKind.SIM,
             target=DeviceAllocationTarget(device_id=0),
         ),
+        _teardown_identity_allocator(),
         _shell_factory=factory,
     )
     store.allocate_and_export(
         RegionAllocationSpec(
-            payload=RegionPartAllocationSpec(planned_backing_kind=BackendKind.POSIX_SHM, logical_bytes=64),
-            counter=RegionPartAllocationSpec(planned_backing_kind=BackendKind.POSIX_SHM, logical_bytes=8),
+            payload=RegionPartAllocationSpec(planned_backing_kind=BackendKind.VMM_SHAREABLE, logical_bytes=64),
+            counter=RegionPartAllocationSpec(planned_backing_kind=BackendKind.VMM_SHAREABLE, logical_bytes=8),
         )
     )
     worker_mod._teardown_chip_process_resources(
@@ -533,30 +669,103 @@ def test_teardown_chip_process_resources_ignores_released_and_keeps_each_step_on
 
 
 @pytest.mark.parametrize(
-    ("platform", "runtime", "depth", "expected"),
+    ("platform", "runtime", "depth", "joins", "expected"),
     [
-        ("a2a3", "host_build_graph", 2, 2),
-        ("a2a3", "host_build_graph", 1, 1),
-        ("a2a3", "tensormap_and_ringbuffer", 2, 2),
-        ("a5", "host_build_graph", 2, 1),
-        ("a5", "tensormap_and_ringbuffer", 2, 1),
-        ("a5sim", "tensormap_and_ringbuffer", 2, 1),
-        ("a2a3sim", "host_build_graph", 2, 1),
+        ("a2a3", "host_build_graph", 2, False, 2),
+        ("a2a3", "host_build_graph", 1, False, 1),
+        ("a2a3", "tensormap_and_ringbuffer", 2, False, 2),
+        # Every other route negotiates a successor frame only where the child resolved that it
+        # can order one native submission behind another. Depth alone does not, and the runtime
+        # name does not either: both a5 runtimes grant two resource sets and both now join, so
+        # the same runtime appears here under each answer.
+        ("a5", "host_build_graph", 2, True, 2),
+        ("a5", "host_build_graph", 2, False, 1),
+        ("a5", "tensormap_and_ringbuffer", 2, True, 2),
+        ("a5", "tensormap_and_ringbuffer", 2, False, 1),
+        ("a5sim", "tensormap_and_ringbuffer", 2, False, 1),
+        ("a2a3sim", "host_build_graph", 2, False, 1),
+        # A joining route still cannot use a frame the granted sets do not back.
+        ("a5", "host_build_graph", 1, True, 1),
+        ("a5", "tensormap_and_ringbuffer", 1, True, 1),
     ],
 )
-def test_local_task_frame_count_uses_direct_a2a3_pipeline_depth(platform, runtime, depth, expected):
-    assert worker_mod._local_task_frame_count(platform, runtime, depth) == expected
+def test_local_task_frame_count_follows_a2a3_depth_or_a_resolved_join(platform, runtime, depth, joins, expected):
+    assert worker_mod._local_task_frame_count(platform, runtime, depth, joins) == expected
+
+
+@pytest.mark.parametrize("level", [1, 2])
+def test_launch_depth_is_refused_below_the_admission_fifo(level):
+    """The runs being ordered are a chip child's, and a Worker below the FIFO owns neither.
+
+    The public L2 Worker therefore cannot reach the capability through configuration at all: the
+    key is refused with an error rather than accepted and ignored, which is what keeps the native
+    ``ChipWorker.configure_launch_depth`` entry the only other way in.
+    """
+    with pytest.raises(ValueError, match="requires a level >= 3 Worker"):
+        worker_mod._validated_launch_depth({"launch_depth": 2}, level)
+
+
+def test_launch_depth_comes_from_each_workers_own_config():
+    """Nothing is inherited: a nested Worker's depth is read from its own config or defaults to one.
+
+    ``_init_level3`` passes the *forking* Worker's resolved depth to that Worker's own chip
+    children, and a next-level child is a separate ``Worker`` whose budgets come from its own
+    config — so an inner Worker left unconfigured keeps the serial path even under a parent that
+    asked for two.
+    """
+    assert worker_mod._validated_launch_depth({"launch_depth": 2}, 3) == 2
+    assert worker_mod._validated_launch_depth({}, 3) == 1
+    assert worker_mod._validated_launch_depth({"pipeline_depth": 2}, 4) == 1
+
+
+@pytest.mark.parametrize(
+    ("frame_counts", "depths"),
+    [
+        # Below one: no frame at all to publish a dispatch into.
+        ([0], [2]),
+        # Above the sets that child granted, so the extra frame has no resources behind it.
+        ([3], [2]),
+        # Above the frames the mailbox is laid out for, so the extra frame is past the region.
+        ([worker_mod._TASK_FRAME_COUNT + 1], [worker_mod._TASK_FRAME_COUNT + 1]),
+        # One child's answer missing entirely.
+        ([2], [2, 2]),
+    ],
+)
+def test_a_chip_published_frame_count_the_parent_cannot_honour_fails_startup(frame_counts, depths):
+    """A frame count that does not reconcile is a startup error, not a quietly clamped one.
+
+    The parent publishes dispatches into exactly the frames its child polls, so a disagreement
+    about how many exist is a dispatch written where nothing reads it — which presents as a run
+    that never completes rather than as an error. Refusing at startup is what keeps that from
+    being the symptom.
+    """
+    worker = Worker(level=3, device_ids=[0], num_sub_workers=0, platform="a5", runtime="host_build_graph")
+    with pytest.raises(RuntimeError, match="task frame counts|frame counts for"):
+        worker._granted_chip_task_frame_counts(frame_counts, depths)
+
+
+def test_a_reconciled_chip_frame_count_is_taken_as_published():
+    """Each child's own count, in its own order: two children may negotiate differently."""
+    worker = Worker(level=3, device_ids=[0, 1], num_sub_workers=0, platform="a5", runtime="host_build_graph")
+    assert worker._granted_chip_task_frame_counts([2, 1], [2, 2]) == [2, 1]
 
 
 def test_start_hierarchical_passes_each_chip_its_negotiated_frame_count(monkeypatch):
     class FakeParentWorker:
         def __init__(self) -> None:
             self.configured_depths: list[int] = []
+            self.configured_pending_depths: list[int] = []
+            self.configured_launch_depths: list[int] = []
             self.next_level_calls: list[tuple[int, int, int]] = []
             self.initialized = False
 
-        def configure_pipeline_depth(self, depth: int) -> None:
+        def configure_pipeline_depth(self, depth: int, pending_depth: int = 0, launch_depth: int = 1) -> None:
+            # Three budgets: the negotiated native pipeline-slot depth, the
+            # logical admission cap that defaults to deriving from it, and how
+            # many of those runs may have device work launched at once.
             self.configured_depths.append(int(depth))
+            self.configured_pending_depths.append(int(pending_depth))
+            self.configured_launch_depths.append(int(launch_depth))
 
         def add_next_level_worker(self, mailbox_addr: int, pid: int, task_frame_count: int) -> None:
             self.next_level_calls.append((int(mailbox_addr), int(pid), int(task_frame_count)))
@@ -585,9 +794,12 @@ def test_start_hierarchical_passes_each_chip_its_negotiated_frame_count(monkeypa
     def fake_await_children_ready(shms, _pids, kind: str, _deadline: float) -> None:
         if kind != "chip":
             return
-        for shm, depth in zip(shms, (2, 1)):
+        # What the child publishes at INIT_READY: the sets it granted, and the task frames it
+        # will poll. The parent takes the frame count from here rather than deriving it, so a
+        # child that negotiated one frame is registered with one.
+        for shm, depth, frames in zip(shms, (2, 1), (2, 1)):
             assert shm.buf is not None
-            worker_mod._PIPELINE_LEASE_FMT.pack_into(shm.buf, worker_mod._OFF_PIPELINE_LEASE, depth, 0, 0)
+            worker_mod._PIPELINE_LEASE_FMT.pack_into(shm.buf, worker_mod._OFF_PIPELINE_LEASE, depth, frames, 0)
 
     def fake_fork() -> int:
         startup_events.append(("fork",))
@@ -612,6 +824,10 @@ def test_start_hierarchical_passes_each_chip_its_negotiated_frame_count(monkeypa
             shm.unlink()
 
     assert fake_parent.configured_depths == [1]
+    assert fake_parent.configured_pending_depths == [0]
+    # One launched run: the default launch depth, and no more than the frames the narrower
+    # child negotiated could carry anyway.
+    assert fake_parent.configured_launch_depths == [1]
     assert [call[1:] for call in fake_parent.next_level_calls] == [(12001, 2), (12002, 1)]
     assert fake_parent.initialized
     assert startup_events[0] == ("log", 60, True)
@@ -631,7 +847,7 @@ def test_start_hierarchical_seeds_the_logger_when_the_process_owns_no_chips(monk
             self.initialized = False
             self.sub_workers: list[int] = []
 
-        def configure_pipeline_depth(self, depth: int) -> None:
+        def configure_pipeline_depth(self, depth: int, pending_depth: int = 0, launch_depth: int = 1) -> None:
             pass
 
         def add_sub_worker(self, _mailbox_addr: int, pid: int) -> None:
@@ -732,6 +948,8 @@ class _FakeChipRun:
 class _FakeNativeRunImpl:
     def __init__(self, *, supports_concurrent_native_prepare: bool = False) -> None:
         self.supports_concurrent_native_prepare = supports_concurrent_native_prepare
+        # Reached only when the control loop could not establish resource ownership.
+        self.admission_stopped = False
         self.events: list[tuple] = []
         self.completed = [threading.Event(), threading.Event()]
         self.prepared = [threading.Event(), threading.Event()]
@@ -751,6 +969,14 @@ class _FakeNativeRunImpl:
         self._polled_slots: set[int] = set()
         self._runs: list[_FakeChipRun] = []
         self._lane_poisoned = False
+
+    def _stop_chip_run_lane_admission(self) -> None:
+        """The control loop reaches this through ``cw._impl`` when ownership is unknown.
+
+        Stopping admission is not a recovery: whatever poisoned the lane stays poisoned, so a
+        `close` that follows still reports it.
+        """
+        self.admission_stopped = True
 
     def register_callable_from_blob(self, cid: int, blob_addr: int) -> None:
         self.register_calls.append((int(cid), int(blob_addr)))
@@ -993,6 +1219,7 @@ class _FakeTwoFrameChipWorker:
     """
 
     pipeline_depth = 2
+    launch_depth = 1
 
     def __init__(self, *, supports_concurrent_native_prepare: bool = False) -> None:
         self._impl = _FakeNativeRunImpl(supports_concurrent_native_prepare=supports_concurrent_native_prepare)
@@ -1000,6 +1227,13 @@ class _FakeTwoFrameChipWorker:
         self.unregister_calls: list[int] = []
         self.unregister_called = threading.Event()
         self.unregister_error: Optional[BaseException] = None
+        self.exported_device_regions_live: Optional[bool] = None
+
+    # The loop synchronizes exported-region ownership after every control
+    # command, including a failed one: a command that failed can still have
+    # left a region live, and a stale flag would say otherwise.
+    def set_exported_device_regions_live(self, live: bool) -> None:
+        self.exported_device_regions_live = bool(live)
 
     def malloc(self, size: int) -> int:
         self._impl.events.append(("malloc", int(size)))
@@ -1060,6 +1294,7 @@ class _TwoFrameLoopHarness:
                 "chip_runtime": chip_runtime,
                 "prepared": self.prepared,
                 "task_frame_count": 2,
+                "provider_region_store": _chip_loop_provider_region_store(chip_platform="a2a3"),
             },
         )
         self._mailbox_load_patch = patch.object(worker_mod, "_mailbox_load_i32", observed_mailbox_load)
@@ -1087,6 +1322,7 @@ class _TwoFrameLoopHarness:
         state: int = worker_mod._TASK_READY,
         generation: int = 11,
         diagnostics: bool = False,
+        chip_swimlane: int = 0,
         task_slot: Optional[int] = None,
         group_index: int = 0,
         group_size: int = 1,
@@ -1096,9 +1332,10 @@ class _TwoFrameLoopHarness:
         try:
             frame[worker_mod._OFF_TASK_CALLABLE_HASH : worker_mod._OFF_TASK_ARGS_BLOB] = self.digest
             struct.pack_into("=ii", frame, worker_mod._OFF_TASK_ARGS_BLOB, 0, 0)
-            cfg_values = [0] * (7 + 3 * worker_mod.RUNTIME_ENV_RING_COUNT)
+            cfg_values = [0] * (6 + 3 * worker_mod.RUNTIME_ENV_RING_COUNT)
+            cfg_values[1] = chip_swimlane
             cfg_values[3] = int(diagnostics)
-            output_prefix = b"/tmp/simpler-test" if diagnostics else b""
+            output_prefix = b"/tmp/simpler-test" if diagnostics or chip_swimlane else b""
             worker_mod._CFG_FMT.pack_into(frame, worker_mod._OFF_CONFIG, *cfg_values, output_prefix)
             worker_mod._PIPELINE_LEASE_FMT.pack_into(frame, worker_mod._OFF_PIPELINE_LEASE, index, 0, generation)
             struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_PROTOCOL, worker_mod._TASK_PROTOCOL_VERSION)
@@ -1208,6 +1445,68 @@ def test_two_frame_stages_b_without_native_prepare_until_a_finalizes():
             ("launch_enter", 0, 0, worker_mod._FRAME_STAGED),
             ("launch_enter", 1, 0, worker_mod._FRAME_STAGED),
         ]
+    finally:
+        harness.close()
+
+
+@pytest.mark.parametrize("chip_swimlane,flushed", [(4, True), (4, False), (0, False)])
+def test_two_frame_swimlane_log_flush_before_completion(monkeypatch, chip_swimlane, flushed):
+    entered = threading.Event()
+    release = threading.Event()
+
+    def flush(context):
+        entered.set()
+        if chip_swimlane:
+            assert release.wait(5.0)
+        return flushed
+
+    monkeypatch.setattr(worker_mod, "_flush_host_log_or_warn", flush)
+    harness = _TwoFrameLoopHarness(chip_runtime="host_build_graph")
+    try:
+        harness.publish(0, 1, diagnostics=True, chip_swimlane=chip_swimlane)
+        harness.start()
+        assert harness.cw._impl.launched[0].wait(5.0)
+        harness.cw._impl.completed[0].set()
+        if not chip_swimlane:
+            harness.wait_state(0, worker_mod._TASK_DONE)
+            assert not entered.is_set(), "PMU-only completion must not flush the Host log"
+            return
+        assert entered.wait(5.0), "completion did not flush the swimlane Host log"
+        assert _mailbox_load_i32(harness.state_addr(0)) == worker_mod._TASK_LAUNCHED
+        release.set()
+        expected = worker_mod._TASK_DONE if flushed else worker_mod._TASK_FAILED
+        harness.wait_state(0, expected)
+    finally:
+        release.set()
+        harness.close()
+
+
+def test_two_frame_success_survives_successor_poison_during_recursive_progress(monkeypatch):
+    harness = _TwoFrameLoopHarness()
+    lane = harness.cw._impl
+    progress = lane._progress
+
+    def recursive_progress(target):
+        # Native progress of a successor may also retire its FIFO predecessor.
+        if not target.terminal and target.submission.slot_id == 1 and len(lane._runs) == 2:
+            lane.completed[0].set()
+            assert progress(lane._runs[0])
+            lane.completed[1].set()
+        return progress(target)
+
+    monkeypatch.setattr(lane, "_progress", recursive_progress)
+    lane.finalize_errors[(1, 11)] = RuntimeError("successor finalize failed")
+    try:
+        harness.publish(0, 1)
+        harness.publish(1, 2)
+        harness.start()
+        harness.thread.join(5.0)
+        assert not harness.thread.is_alive()
+        assert _mailbox_load_i32(harness.state_addr(0)) == worker_mod._TASK_DONE
+        assert _mailbox_load_i32(harness.state_addr(1)) == worker_mod._TASK_FAILED
+        offset = harness._frame_offset(1) + MAILBOX_OFF_ERROR_MSG
+        message = bytes(harness.buf[offset : offset + worker_mod.MAILBOX_ERROR_MSG_SIZE])
+        assert b"successor finalize failed" in message
     finally:
         harness.close()
 
@@ -3182,35 +3481,29 @@ class TestRunHandle:
         with pytest.raises(ValueError, match="bad graph"):
             worker._submit_l3_locked(bad_graph, None, cast(Any, object()))
 
-    def test_submit_seeds_the_log_directory_from_the_run_output_prefix(self, monkeypatch):
-        """This process's log lands beside the run's other diagnostic artifacts.
-
-        `CallConfig.output_prefix` is the directory every diagnostic artifact
-        already goes under, and its contract is that the runtime never derives a
-        path itself — so the submit path hands that directory to the log layer
-        rather than the log layer reading one from the environment.
-        """
+    def test_submit_enables_the_process_log_only_for_output_runs(self, monkeypatch):
+        """An output run enables the stable process log before it builds the graph."""
         worker, _events = self._submission_failure_worker(failures=0)
-        seeded: list[str] = []
-        monkeypatch.setattr(worker_mod, "_native_set_host_log_directory", seeded.append)
+        bindings: list[None] = []
+        monkeypatch.setattr(worker_mod, "_bind_host_log_session_directory", lambda: bindings.append(None))
 
         def bad_graph(*_args):
             raise ValueError("bad graph")
 
         with pytest.raises(ValueError, match="bad graph"):
-            worker._submit_l3_locked(bad_graph, None, cast(Any, SimpleNamespace(output_prefix="/tmp/run-artifacts")))
-        assert seeded == ["/tmp/run-artifacts"]
+            worker._submit_locked(bad_graph, None, cast(Any, SimpleNamespace(output_prefix="/tmp/run-artifacts")))
+        assert bindings == [None]
 
-        # No prefix means no directory to seed, and spans stay on stderr.
-        seeded.clear()
+        # An empty prefix leaves the logger on stderr.
+        bindings.clear()
         with pytest.raises(ValueError, match="bad graph"):
-            worker._submit_l3_locked(bad_graph, None, cast(Any, SimpleNamespace(output_prefix="")))
-        assert seeded == []
+            worker._submit_locked(bad_graph, None, cast(Any, SimpleNamespace(output_prefix="")))
+        assert bindings == []
 
         # A config without the field at all must not be what fails a submit.
         with pytest.raises(ValueError, match="bad graph"):
-            worker._submit_l3_locked(bad_graph, None, cast(Any, object()))
-        assert seeded == []
+            worker._submit_locked(bad_graph, None, cast(Any, object()))
+        assert bindings == []
 
     def test_unsettled_graph_cancellation_abandons_the_handle_before_close(self):
         worker, events = self._submission_failure_worker(failures=2)
@@ -7964,7 +8257,10 @@ class TestChipMainLoopDigestRegister:
         t = threading.Thread(
             target=_run_chip_main_loop,
             args=(cw, buf, 0, state_addr, 0, registry, identity_table, identity_refs, mint_owner_instance_id()),
-            kwargs={"chip_platform": ""},
+            kwargs={
+                "chip_platform": "",
+                "provider_region_store": _chip_loop_provider_region_store(chip_platform=""),
+            },
             daemon=True,
         )
         t.start()
@@ -8210,7 +8506,7 @@ def test_a_failed_diagnostic_sidecar_write_fails_the_task_not_the_loop(tmp_path)
     try:
         frame[worker_mod._OFF_TASK_CALLABLE_HASH : worker_mod._OFF_TASK_ARGS_BLOB] = digest
         struct.pack_into("=ii", frame, worker_mod._OFF_TASK_ARGS_BLOB, 0, 0)
-        cfg_values = [0] * (7 + 3 * worker_mod.RUNTIME_ENV_RING_COUNT)
+        cfg_values = [0] * (6 + 3 * worker_mod.RUNTIME_ENV_RING_COUNT)
         cfg_values[1] = 4  # enable_chip_swimlane
         worker_mod._CFG_FMT.pack_into(frame, worker_mod._OFF_CONFIG, *cfg_values, str(tmp_path).encode())
         worker_mod._PIPELINE_LEASE_FMT.pack_into(frame, worker_mod._OFF_PIPELINE_LEASE, 0, 0, 11)
@@ -8238,7 +8534,13 @@ def test_a_failed_diagnostic_sidecar_write_fails_the_task_not_the_loop(tmp_path)
             {digest: 1},
             worker_mod.mint_owner_instance_id(),
         ),
-        kwargs={"chip_platform": "a2a3", "chip_runtime": "", "prepared": {7}, "chip_rank": 0},
+        kwargs={
+            "chip_platform": "a2a3",
+            "chip_runtime": "",
+            "prepared": {7},
+            "chip_rank": 0,
+            "provider_region_store": _chip_loop_provider_region_store(chip_platform="a2a3"),
+        },
         daemon=True,
     )
     try:

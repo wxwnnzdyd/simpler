@@ -26,19 +26,17 @@ inline constexpr uint32_t kUrmaCqeSubstatusShift = 16U;
 inline constexpr uint32_t kUrmaCqeStatusShift = 24U;
 inline constexpr uint32_t kUrmaCqeStatusMask = 0xFFU;
 
-inline uintptr_t cache_line(const volatile void* addr)
-{
+inline uintptr_t cache_line(const volatile void *addr) {
     return reinterpret_cast<uintptr_t>(addr) & ~(uintptr_t(CHIP_ALIGN_SIZE) - 1U);
 }
 
-inline CompletionPollResult poll_urma_cqe_record(uint64_t cqe_addr, uint32_t expected_owner)
-{
+inline CompletionPollResult poll_urma_cqe_record(uint64_t cqe_addr, uint32_t expected_owner) {
     if (cqe_addr == 0U || expected_owner > 1U) {
         return {CompletionPollState::FAILED, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID};
     }
 
-    auto* dw0_addr = reinterpret_cast<volatile uint32_t*>(static_cast<uintptr_t>(cqe_addr));
-    cache_invalidate_range(reinterpret_cast<const void*>(cache_line(dw0_addr)), CHIP_ALIGN_SIZE);
+    auto *dw0_addr = reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(cqe_addr));
+    cache_invalidate_range(reinterpret_cast<const void *>(cache_line(dw0_addr)), CHIP_ALIGN_SIZE);
     const uint32_t dw0 = __atomic_load_n(dw0_addr, __ATOMIC_ACQUIRE);
     if (((dw0 >> kUrmaCqeOwnerBit) & 1U) != expected_owner) {
         return {CompletionPollState::PENDING, SIMPLER_ERROR_NONE};

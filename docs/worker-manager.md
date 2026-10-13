@@ -195,13 +195,32 @@ The region currently consists of three equal `MAILBOX_FRAME_SIZE` frames:
 | Task 1 (2) | Pipeline lease slot 1 | Unused |
 
 `task_frame_count` is an endpoint contract, not a count inferred from the
-allocation size. Parent registration uses each direct chip child's own
-published depth, while whole-run admission uses the minimum depth across the
-chip set. The current Python facade selects two frames only for a direct A2/A3
-onboard chip child whose published pipeline depth is at least two. SUB,
-nested-Worker, A5, simulation, and depth-one local endpoints use one task frame
-and do not advertise successor staging. Remote endpoints have capacity one and
-advance their framed transport incrementally.
+allocation size. Each direct chip child decides its own count after `init` and
+publishes it with its granted depth; parent registration uses that published
+number, while whole-run admission uses the minimum depth across the chip set.
+The count crosses rather than being derived on both sides because only an
+initialized `ChipWorker` can answer the capability it depends on, and the parent
+must publish to exactly the frames its child polls.
+
+The Python facade's rule has two branches. A direct A2/A3 onboard chip child
+whose published pipeline depth is at least two takes two frames — that endpoint
+stages a successor behind an active run at any launch depth. Every other route
+takes a second frame only where the child resolved that it may order one native
+submission behind another, which is its runtime's published joined-launch
+capability met with the requested launch depth and the granted set count: both
+A5 runtimes, `host_build_graph` and `tensormap_and_ringbuffer`, publish that
+capability at `launch_depth >= 2`. SUB, nested-Worker, simulation (whose backend
+answers that capability with a flat no), and every depth-one local endpoint use
+one task frame and do not advertise successor staging. A launched successor
+occupies a frame of its own, so a Worker's configured launch depth is bounded by
+the frames its endpoints negotiated as well as by the granted slot depth. Remote
+endpoints have capacity one and advance their framed transport incrementally.
+
+The capability is answered per device context, so a level-3 Worker configured at
+`launch_depth >= 2` passes that request to every one of its local device
+children and each endpoint negotiates its own count. A nested Worker inherits
+nothing: its budgets come from its own configuration. Remote and mpirun
+manifests carry no launch depth, so those subtrees keep the default.
 
 ### 3.1 Single-frame progress path
 
@@ -317,6 +336,7 @@ MAILBOX_OFF_PIPELINE_LEASE:       PipelineSlotLease
 MAILBOX_OFF_TASK_CALLABLE_HASH:   uint8[32] callable digest
 MAILBOX_OFF_TASK_ARGS_BLOB:       bytes [int32 T][int32 S]
                                         [Tensor x T][uint64_t x S]
+MAILBOX_OFF_TEARDOWN_REPORT:      SimplerTeardownReport (40 B)
 MAILBOX_OFF_SHUTDOWN:             int32 sticky shutdown request
 task-frame trailer:               protocol, run id, lease slot,
                                   lease generation, dispatch id
@@ -326,8 +346,9 @@ frame tail:                       fixed-size NUL-terminated error message
 
 The C++ `MAILBOX_FRAME_SIZE` and `MAILBOX_SIZE` constants are exported through
 the nanobind module. Python derives frame slicing and offsets from those
-bindings where possible. `MAILBOX_ARGS_CAPACITY` ends before the shutdown word,
-protocol trailer, acceptance word, and error-message tail.
+bindings where possible. `MAILBOX_ARGS_CAPACITY` ends before the teardown
+record, shutdown word, protocol trailer, acceptance word, and error-message
+tail.
 
 `MAILBOX_OFF_SHUTDOWN` carries the termination request on the control base
 frame. The state word has three writers — the parent's `CONTROL_REQUEST`, the
@@ -337,6 +358,33 @@ state store is erasable. Only a terminating parent writes the shutdown word,
 request after an in-flight control command completes over it. Both sides write
 it before the `SHUTDOWN` state store and read it at the top of every serve-loop
 iteration alongside the state word.
+
+`MAILBOX_OFF_TEARDOWN_REPORT` carries the chip child's observation of its own
+device teardown, published once on the control base frame after the child's
+`ChipWorker::finalize()` returns or raises. It is a record rather than a state
+word because its fields only mean anything together: which reset entry ran,
+what that call returned, what the recovery wrapper and its post-reset probe
+returned, and what the teardown returned, each kept separate so a single error
+code cannot conflate "no reset ran", "the reset failed" and "the reset
+returned 0 but nothing confirmed it". `schema` at offset 0 is the commit
+marker — the child fills the payload first and releases `schema` last, so a
+parent that acquire-loads it has the whole record and a parent that finds
+anything else has none of it. The parent copies it out in its child-reap loop,
+after the child is reaped and before the shared memory is closed, and exposes
+it through `Worker.teardown_reports()`.
+
+It is observation only: no field asserts that device work has stopped, and a
+confirmed reset invalidates that device generation's allocations rather than
+making an old device pointer reusable. The onboard platform runner is shared
+by every runtime built on it, so publishing is gated on the runtime's own
+`teardown_report_supported_impl` — a2a3 `host_build_graph` opts in, and every
+other runtime answers "no observation", which reads back as an uncommitted
+record. Remote endpoints have no local mailbox and produce no entry at all.
+
+A chip child that outlives the close deadline is handed to the cleanup
+journal, and its record is read there instead: inside the same retry closure,
+after the reap succeeds and before the shm is closed. So a late publication is
+still collected, and a missing key keeps meaning "never reaped".
 
 ### 3.5 Stop and child shutdown
 

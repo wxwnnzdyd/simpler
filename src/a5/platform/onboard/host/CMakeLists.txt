@@ -94,6 +94,7 @@ set(HOST_RUNTIME_SOURCES "")
 list(APPEND HOST_RUNTIME_SOURCES ${SIMPLER_HOST_LOG_SOURCES})
 list(APPEND HOST_RUNTIME_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/aicpu_topology_probe.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/aicpu_affinity_select.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/device_runner.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/memory_allocator.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/profiling_copy.cpp"
@@ -102,11 +103,15 @@ list(APPEND HOST_RUNTIME_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/host_regs.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/chip_swimlane_collector.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/host_phase_records.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/clock_correlation.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/kernel_execution_state.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/host/pmu_collector.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/dep_gen_collector.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/dep_gen_retained_runs.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/host_graph_exporter.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/scope_stats_collector.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/args_dump_collector.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/args_dump_retained_runs.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/scope_stats_retained_runs.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/comm_hccl.cpp"
 )
 # Add common/aicpu_loader/host sources (LoadAicpuOp)
@@ -116,9 +121,12 @@ list(APPEND HOST_RUNTIME_SOURCES
 # Add common/platform/onboard/host sources (shared between a2a3 / a5 onboard).
 list(APPEND HOST_RUNTIME_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/onboard/host/device_runner_helpers.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/onboard/host/kernel_platform_ops.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/onboard/host/kernel_persistent_args.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/onboard/host/device_phase_capture.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/onboard/host/clock_correlation.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/shared/host/device_fault_monitor_binding.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/onboard/host/device_runner_base.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/onboard/host/run_retention_probe.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/onboard/host/c_api_shared.cpp"
 )
 if(DEFINED CUSTOM_SOURCE_DIRS)
@@ -135,6 +143,8 @@ list(LENGTH HOST_RUNTIME_SOURCES NUM_HOST_RUNTIME_SOURCES)
 message(STATUS "Host runtime: ${NUM_HOST_RUNTIME_SOURCES} source files")
 message(VERBOSE "Host runtime sources: ${HOST_RUNTIME_SOURCES}")
 add_library(host_runtime SHARED ${HOST_RUNTIME_SOURCES})
+include("${SIMPLER_CMAKE_DIR}/aicpu_topology_driver.cmake")
+simpler_configure_aicpu_topology_driver(host_runtime)
 include("${SIMPLER_CMAKE_DIR}/profiling_config.cmake")
 simpler_configure_profiling(host_runtime)
 add_custom_command(TARGET host_runtime POST_BUILD

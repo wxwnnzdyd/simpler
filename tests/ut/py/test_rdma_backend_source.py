@@ -143,46 +143,36 @@ def test_kernel_compiler_adds_ascend_device_headers_for_rdma_backend_headers() -
     assert "for inc_dir in self.get_ascend_incore_include_dirs():" in source
 
 
-def test_rdma_scheduler_abi_matches_mr1374_workspace_and_hns1825_contexts() -> None:
+def test_rdma_scheduler_consumes_the_exported_completion_record() -> None:
     source = RDMA_SCHEDULER.read_text(encoding="utf-8")
 
-    assert "uint32_t rank_count;" in source
-    assert "uint32_t reserved;" in source
-    assert "uint32_t local_token_id" not in source
-    assert "static_assert(sizeof(RdmaWqCtx) == 96" in source
-    assert "static_assert(sizeof(RdmaCqCtx) == 64" in source
-    assert "struct Hns1825Cqe" in source
-    assert "static_assert(sizeof(Hns1825Cqe) == 32" in source
-    assert "struct RdmaMemInfo" in source
-    assert "static_assert(sizeof(RdmaMemInfo) == 24" in source
-    assert "uint32_t cqe_size;" in source
-    assert "1u << cq_ctx.cqe" not in source
-    assert "db_sw_addr" in source
-    assert "is_hns1825_cqe_owner_ready" in source
-    assert "const uint32_t cq_ring = cq_ctx.depth;" in source
-    assert "kHns1825CqeMaxGenNum" not in source
-    assert "owner_id_qpn" in source
-    assert "op_sr_wqebb" in source
+    assert "poll_rdma_hns1825_cqe_record(uint64_t cqe_addr, uint32_t expected_owner)" in source
+    assert "kRdmaCqeOwnerBit" in source
+    assert "retire_rdma_hns1825_cqe_record" in source
+
+    # The record carries the CQE address and the owner value that marks it done, so the scheduler
+    # holds no copy of the RDMA queue layout and no ABI-drift guard for one.
+    assert "struct RdmaInfo" not in source
+    assert "struct RdmaWqCtx" not in source
+    assert "struct RdmaCqCtx" not in source
+    assert "struct Hns1825Cqe" not in source
+    assert "struct RdmaMemInfo" not in source
+    assert "load_wq_ctx" not in source
+    assert "load_cq_ctx" not in source
+    assert "load_mem_info" not in source
+    assert "poll_rdma_event_handle" not in source
+    assert "ABI drift" not in source
 
 
-def test_rdma_scheduler_stall_snapshot_reports_sq_and_cq_progress() -> None:
+def test_rdma_scheduler_stall_snapshot_reads_the_record() -> None:
     source = RDMA_SCHEDULER.read_text(encoding="utf-8")
 
-    assert "load_device_u32_or_zero" in source
-    assert "load_wq_ctx" in source
-    assert "load_cq_ctx" in source
-    assert "load_mem_info" in source
-    assert "sq=0x%llx rq=0x%llx scq=0x%llx rcq=0x%llx mem=0x%llx" in source
-    assert "%s wqn=%u depth=%u wqe_size=%u head=%u tail=%u db_sw_be=0x%x" in source
-    assert "head_addr=0x%llx " in source
-    assert "tail_addr=0x%llx db_hw=0x%llx db_sw=0x%llx" in source
-    assert "%s cqn=%u depth=%u cqe_size=%u cur_head=%u cur_tail=%u target_head=%u" in source
-    assert "db_sw_be=0x%x cq_buf=0x%llx" in source
-    assert "log_rdma_mem_snapshot" in source
-    assert "log_rdma_wqe_snapshot" in source
-    assert "%s wqe index=%u addr=0x%llx raw64=" in source
-    assert 'log_rdma_wq_snapshot("rq"' in source
-    assert 'log_rdma_cq_snapshot("rcq"' in source
+    assert "log_rdma_hns1825_cqe_record_snapshot" in source
+    assert "op_sr_wqebb=0x%x" in source
+    assert "log_rdma_wq_snapshot" not in source
+    assert "log_rdma_cq_snapshot" not in source
+    assert "log_rdma_mem_snapshot" not in source
+    assert "log_rdma_wqe_snapshot" not in source
 
 
 def test_rdma_domain_bootstrap_resolves_env_arrays_by_domain_rank() -> None:

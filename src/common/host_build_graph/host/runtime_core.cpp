@@ -20,6 +20,7 @@
 #include "host_build_graph/host_phase_trace.h"
 #include "host_build_graph/runtime_core.h"
 
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -110,52 +111,29 @@ void rt_report_fatal(RuntimeContext *rt, int32_t error_code, const char *func, c
     va_end(args);
 }
 
-// Scalar access is confined to tensors no task produces. This runtime completes
-// orchestration before the device scheduler starts, so a producer submitted here
-// has not run and a runtime allocation holds no initialized content: there is no
-// value to read and no write that survives the producer. Both accessors reject
-// such a tensor rather than wait on state that cannot change during the call.
-//
-// A producer reaches a tensor two ways: it created the buffer (owner_task_id), or
-// it wrote a region overlapping this one (a TensorMap entry). Either one rejects.
-static bool require_no_producer(RuntimeContext *rt, const simpler::hbg::Tensor &tensor, const char *caller) {
-    OrchestratorState &orch = *rt->orchestrator;
-
-    TaskId producer = tensor.owner_task_id;
-    if (!producer.is_valid()) {
-        orch.tensor_map.lookup(tensor, [&](ChipTensorMapEntry &entry, OverlapStatus) -> bool {
-            if (!entry.producer_task_id.is_valid()) {
-                return true;
-            }
-            producer = entry.producer_task_id;
-            return false;  // the first overlapping writer already decides the call
-        });
-    }
-    if (!producer.is_valid()) {
-        return true;
-    }
-
-    orch.report_fatal(
+static bool require_host_tensor(RuntimeContext *rt, const simpler::hbg::Tensor &tensor, const char *caller) {
+    if (tensor.address_space == AddressSpace::HOST && !tensor.owner_task_id.is_valid()) return true;
+    rt->orchestrator->report_fatal(
         SIMPLER_ERROR_INVALID_ARGS, caller,
-        "tensor is produced by task %#llx (id space %u); host_build_graph finishes orchestration before the "
-        "device starts, so a submitted kernel has not written this buffer and a runtime allocation is "
-        "uninitialized -- pass the value as an orchestration argument, or have a task write it",
-        static_cast<unsigned long long>(producer.raw), static_cast<unsigned int>(producer.space())
+        "host tensor access requires an explicit HOST/NONE argument; DEVICE values need an explicit copy before submit"
     );
     return false;
 }
 
 uint64_t
 get_tensor_data(RuntimeContext *rt, const simpler::hbg::Tensor &tensor, uint32_t ndims, const uint32_t indices[]) {
+    // A refused access cannot replace an earlier orchestration failure.
+    if (rt->orchestrator->is_fatal()) {
+        return 0;
+    }
     if (tensor.buffer.addr == 0) {
-        unified_log_error(
-            __FUNCTION__, "get_tensor_data: buffer not allocated (addr=0). "
-                          "Use the simpler::hbg::Tensor returned by add_output(TensorCreateInfo) after submit returns."
+        rt->orchestrator->report_fatal(
+            SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__, "get_tensor_data requires a nonempty allocated HOST view"
         );
         return 0;
     }
 
-    if (!require_no_producer(rt, tensor, __FUNCTION__)) {
+    if (!require_host_tensor(rt, tensor, __FUNCTION__)) {
         return 0;
     }
 
@@ -166,9 +144,7 @@ get_tensor_data(RuntimeContext *rt, const simpler::hbg::Tensor &tensor, uint32_t
     if (!host_tensor_read(rt->tensor_access, elem_addr, &result, elem_size)) {
         rt->orchestrator->report_fatal(
             SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__,
-            "no host view for device address %#llx (%llu bytes): during host orchestration only tensors the "
-            "runtime staged are readable, not runtime-created or child-memory buffers",
-            (unsigned long long)elem_addr, (unsigned long long)elem_size
+            "HOST argument read is outside the bound view or violates its declared direction"
         );
         return 0;
     }
@@ -178,15 +154,18 @@ get_tensor_data(RuntimeContext *rt, const simpler::hbg::Tensor &tensor, uint32_t
 void set_tensor_data(
     RuntimeContext *rt, const simpler::hbg::Tensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
 ) {
+    // Preserve the first orchestration failure.
+    if (rt->orchestrator->is_fatal()) {
+        return;
+    }
     if (tensor.buffer.addr == 0) {
-        unified_log_error(
-            __FUNCTION__, "set_tensor_data: buffer not allocated (addr=0). "
-                          "Use the simpler::hbg::Tensor returned by add_output(TensorCreateInfo) after submit returns."
+        rt->orchestrator->report_fatal(
+            SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__, "set_tensor_data requires a nonempty allocated HOST view"
         );
         return;
     }
 
-    if (!require_no_producer(rt, tensor, __FUNCTION__)) {
+    if (!require_host_tensor(rt, tensor, __FUNCTION__)) {
         return;
     }
 
@@ -196,10 +175,9 @@ void set_tensor_data(
     if (!host_tensor_write(rt->tensor_access, elem_addr, &value, elem_size)) {
         rt->orchestrator->report_fatal(
             SIMPLER_ERROR_INVALID_ARGS, __FUNCTION__,
-            "no writable host view for device address %#llx (%llu bytes): during host orchestration only tensors "
-            "the runtime staged are writable, not runtime-created or child-memory buffers",
-            (unsigned long long)elem_addr, (unsigned long long)elem_size
+            "HOST argument write is outside the bound view or violates its declared direction"
         );
+        return;
     }
 }
 
