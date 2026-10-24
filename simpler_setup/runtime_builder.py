@@ -90,6 +90,13 @@ def _a5_async_workspace_overlay_defines() -> dict[str, str]:
     }
 
 
+def _a5_test_defines() -> dict[str, str]:
+    """Explicit test-only build switches for a5 onboard."""
+    return {
+        "SIMPLER_TEST_URMA_CQ_OVERWRITE": _normalize_overlay_env("SIMPLER_TEST_URMA_CQ_OVERWRITE") or "OFF",
+    }
+
+
 def _abbrev_stamp(stamp: str) -> str:
     """Abbreviate each commit in a (possibly composite) cache stamp for logging.
 
@@ -435,6 +442,8 @@ class RuntimeBuilder:
                 # _a5_async_workspace_overlay_defines).
                 if self._arch == "a5" and self._variant == "onboard":
                     defines.update(_a5_async_workspace_overlay_defines())
+            if self._arch == "a5" and self._variant == "onboard":
+                defines.update(_a5_test_defines())
             cmake_defines = defines or None
             # compile() adds a {target}/ subdirectory inside build_dir
             cache_dir = self._CACHE_DIR / arch / variant / name

@@ -65,6 +65,10 @@ add_library(aicpu_kernel SHARED ${AICPU_KERNEL_SOURCES})
 include("${SIMPLER_CMAKE_DIR}/profiling_config.cmake")
 simpler_configure_profiling(aicpu_kernel)
 
+if(SIMPLER_TEST_URMA_CQ_OVERWRITE)
+    target_compile_definitions(aicpu_kernel PRIVATE SIMPLER_TEST_URMA_CQ_OVERWRITE=1)
+endif()
+
 option(WERROR "Treat compiler warnings as errors" ON)
 if(DEFINED ENV{SIMPLER_DISABLE_WARNINGS_AS_ERRORS})
     set(WERROR OFF)

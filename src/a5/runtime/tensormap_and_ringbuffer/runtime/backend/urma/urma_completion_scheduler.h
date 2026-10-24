@@ -14,6 +14,7 @@
 
 #include <cstdint>
 
+#include "aicpu/device_time.h"
 #include "aicpu/platform_regs.h"
 #include "aicore_completion_mailbox.h"
 #include "completion_token.h"
@@ -30,10 +31,30 @@ inline uintptr_t cache_line(const volatile void *addr) {
     return reinterpret_cast<uintptr_t>(addr) & ~(uintptr_t(CHIP_ALIGN_SIZE) - 1U);
 }
 
+#if defined(SIMPLER_TEST_URMA_CQ_OVERWRITE)
+// Test-only: hold the first URMA CQE poll for 2 s so the filler can wrap the
+// CQ before the victim record is read. Later polls are not delayed, so a
+// pending completion does not starve the dispatch loop.
+inline void test_urma_cq_overwrite_poll_delay() {
+    static bool delayed = false;
+    if (delayed) {
+        return;
+    }
+    delayed = true;
+    const uint64_t start = get_sys_cnt_aicpu();
+    constexpr uint64_t kDelayTicks = 2'000'000'000ULL;
+    while (get_sys_cnt_aicpu() - start < kDelayTicks) {}
+}
+#endif
+
 inline CompletionPollResult poll_urma_cqe_record(uint64_t cqe_addr, uint32_t expected_owner) {
     if (cqe_addr == 0U || expected_owner > 1U) {
         return {CompletionPollState::FAILED, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID};
     }
+
+#if defined(SIMPLER_TEST_URMA_CQ_OVERWRITE)
+    test_urma_cq_overwrite_poll_delay();
+#endif
 
     auto *dw0_addr = reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(cqe_addr));
     cache_invalidate_range(reinterpret_cast<const void *>(cache_line(dw0_addr)), CHIP_ALIGN_SIZE);
