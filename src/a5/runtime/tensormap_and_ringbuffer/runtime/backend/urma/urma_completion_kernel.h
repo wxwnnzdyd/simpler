@@ -279,7 +279,8 @@ inline __aicore__ bool register_completion_condition(AsyncCtx &ctx, const Comple
     slot->expected_value = token.expected_value;
     slot->engine = token.engine;
     slot->completion_type = token.completion_type;
-    slot->_pad = 0;
+    slot->sequence = token.sequence;
+    slot->ack_addr = token.ack_addr;
     *ctx.completion_count = idx + 1;
     return true;
 }
@@ -322,7 +323,7 @@ register_urma_async_event(AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAs
     for (uint32_t record_index = 0U; record_index < record_count; ++record_index) {
         const auto record = event.CompletionRecordAt(session, record_index);
         if (record.kind != ::pto::comm::CompletionKind::URMA_CQE_DW0 || record.addr == nullptr ||
-            record.expected > 1ULL) {
+            record.expected > 1ULL || record.sequence == 0U || record.ack_addr == nullptr) {
             defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
             (void)event.Wait(session);
             return false;
@@ -334,6 +335,9 @@ register_urma_async_event(AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAs
             COMPLETION_ENGINE_URMA,
             COMPLETION_TYPE_URMA_CQE_RECORD,
             0,
+            record.sequence,
+            0,
+            reinterpret_cast<uint64_t>(record.ack_addr),
         };
         if (!register_completion_condition(ctx, token)) {
             defer_error(ctx, SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED);

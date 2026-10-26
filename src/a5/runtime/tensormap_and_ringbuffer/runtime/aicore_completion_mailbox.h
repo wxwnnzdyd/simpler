@@ -61,7 +61,11 @@ struct AICoreCompletionMailboxMessage {
     uint32_t engine;
     int32_t completion_type;
     uint32_t kind;
-    uint32_t _pad[3];
+    // URMA CQ-slot ack payload. Fits in the former _pad[3] slack without
+    // growing the 64-byte message.
+    uint32_t sequence;
+    uint32_t _pad0;
+    uint64_t ack_addr;
 };
 
 static_assert(sizeof(AICoreCompletionMailboxMessage) == CHIP_ALIGN_SIZE, "AICoreCompletionMailboxMessage layout drift");
@@ -85,6 +89,8 @@ struct AICoreCompletionMsgView {
     uint32_t engine{0};
     int32_t completion_type{0};
     uint32_t kind{0};
+    uint32_t sequence{0};
+    uint64_t ack_addr{0};
 };
 
 struct AICoreCompletionMailbox {
@@ -118,12 +124,19 @@ struct AICoreCompletionMailbox {
     bool try_push_condition(
         TaskId task_token, uint64_t addr, uint32_t expected_value, uint32_t engine, int32_t completion_type
     ) {
-        return try_push_condition(task_token, addr, 0, expected_value, engine, completion_type);
+        return try_push_condition(task_token, addr, 0, expected_value, engine, completion_type, 0, 0);
     }
 
     bool try_push_condition(
         TaskId task_token, uint64_t addr, uint64_t backend_cookie, uint32_t expected_value, uint32_t engine,
         int32_t completion_type
+    ) {
+        return try_push_condition(task_token, addr, backend_cookie, expected_value, engine, completion_type, 0, 0);
+    }
+
+    bool try_push_condition(
+        TaskId task_token, uint64_t addr, uint64_t backend_cookie, uint32_t expected_value, uint32_t engine,
+        int32_t completion_type, uint64_t ack_addr, uint32_t sequence
     ) {
         while (true) {
             uint64_t h = head.load(std::memory_order_relaxed);
@@ -139,6 +152,8 @@ struct AICoreCompletionMailbox {
                 slot->engine = engine;
                 slot->completion_type = completion_type;
                 slot->kind = MSG_KIND_CONDITION;
+                slot->sequence = sequence;
+                slot->ack_addr = ack_addr;
                 slot->seq.store(new_head, std::memory_order_release);
                 return true;
             }
@@ -164,6 +179,8 @@ struct AICoreCompletionMailbox {
                 slot->engine = 0;
                 slot->completion_type = 0;
                 slot->kind = MSG_KIND_TASK_NORMAL_DONE;
+                slot->sequence = 0;
+                slot->ack_addr = 0;
                 slot->seq.store(new_head, std::memory_order_release);
                 return true;
             }
@@ -189,6 +206,8 @@ struct AICoreCompletionMailbox {
         out.engine = slot->engine;
         out.completion_type = slot->completion_type;
         out.kind = slot->kind;
+        out.sequence = slot->sequence;
+        out.ack_addr = slot->ack_addr;
         tail.store(t + 1, std::memory_order_release);
         return true;
     }

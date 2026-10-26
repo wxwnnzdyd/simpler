@@ -69,7 +69,22 @@ inline CompletionPollResult poll_urma_cqe_record(uint64_t cqe_addr, uint32_t exp
     return {CompletionPollState::READY, SIMPLER_ERROR_NONE};
 }
 
-inline void retire_urma_cqe_record(uint64_t /*cqe_addr*/, uint32_t /*expected_owner*/) {}
+// Publish "this CQE sequence has been observed" into the CQ ack ring. The
+// producer scans the ring for the contiguous acked prefix and only then reuses
+// the slot, so a PENDING record must not be acked and a FAILED one still must
+// be (otherwise the slot leaks and the producer spins forever).
+inline void retire_urma_cqe_record(uint64_t ack_addr, uint32_t sequence) {
+    if (ack_addr == 0U || sequence == 0U) {
+        return;
+    }
+    auto *slot = reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(ack_addr));
+    const auto *line = reinterpret_cast<const void *>(cache_line(slot));
+    // Invalidate first so the store's read-for-ownership pulls in the current
+    // line: the flush then writes back sibling slots unchanged, not stale.
+    cache_invalidate_range(line, CHIP_ALIGN_SIZE);
+    __atomic_store_n(slot, sequence, __ATOMIC_RELEASE);
+    cache_flush_range(line, CHIP_ALIGN_SIZE);
+}
 
 }  // namespace pto2::urma_backend
 

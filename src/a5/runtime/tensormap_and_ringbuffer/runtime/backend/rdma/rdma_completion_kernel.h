@@ -203,6 +203,9 @@ register_rdma_async_event_status(AsyncCtx &ctx, const PtoAsyncEvent &event, cons
         COMPLETION_ENGINE_ROCE,
         COMPLETION_TYPE_RDMA_HNS1825_CQE,
         0,
+        0,
+        0,
+        0,
     };
     if (!register_completion_condition(ctx, token)) {
         defer_error(ctx, SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED);

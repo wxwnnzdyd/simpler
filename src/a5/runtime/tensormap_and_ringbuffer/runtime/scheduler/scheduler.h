@@ -1423,6 +1423,11 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
             if (cond.satisfied) continue;
             CompletionPollResult poll = cond.test();
             if (poll.state == CompletionPollState::FAILED) {
+                // Release the completion slot even on failure: the producer
+                // only reuses a CQ slot after the consumer acks it, and a
+                // leaked ack turns the abort path into a hang.
+                cond.retire();
+                entry.waiting_completion_count--;
                 result.error_code = poll.error_code;
                 result.failed_slot_state = entry.slot_state;
                 unlock();

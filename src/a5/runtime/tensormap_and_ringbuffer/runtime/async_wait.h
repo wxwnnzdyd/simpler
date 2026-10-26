@@ -54,6 +54,10 @@ struct CompletionCondition {
     uint64_t addr{0};
     uint64_t backend_cookie{0};
     uint32_t expected_value{0};
+    // URMA CQ-slot ack: the sequence this record covers and the slot word the
+    // consumer stores it into once the CQE has been observed.
+    uint64_t ack_addr{0};
+    uint32_t sequence{0};
 
     CompletionPollResult test() const;
     void retire();
@@ -89,7 +93,7 @@ inline CompletionPollResult urma_cqe_record_poll_op(const CompletionCondition &c
 }
 
 inline void urma_cqe_record_retire_op(CompletionCondition &cond) {
-    pto2::urma_backend::retire_urma_cqe_record(cond.addr, cond.expected_value);
+    pto2::urma_backend::retire_urma_cqe_record(cond.ack_addr, cond.sequence);
 }
 
 inline CompletionPollResult rdma_hns1825_cqe_poll_op(const CompletionCondition &cond) {
@@ -248,7 +252,7 @@ struct AsyncWaitList {
                 }
                 if (!append_condition_locked(
                         *entry, msg.addr, msg.backend_cookie, msg.expected_value, static_cast<AsyncEngine>(msg.engine),
-                        msg.completion_type, error_code
+                        msg.completion_type, msg.ack_addr, msg.sequence, error_code
                     )) {
                     return drained;
                 }
@@ -293,7 +297,7 @@ struct AsyncWaitList {
 
     bool append_condition_locked(
         AsyncWaitEntry &entry, uint64_t addr, uint64_t backend_cookie, uint32_t expected_value, AsyncEngine engine,
-        int32_t completion_type, int32_t &error_code
+        int32_t completion_type, uint64_t ack_addr, uint32_t sequence, int32_t &error_code
     ) {
         if (entry.condition_count >= MAX_COMPLETIONS_PER_TASK) {
             error_code = SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED;
@@ -310,6 +314,8 @@ struct AsyncWaitList {
                                 reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(addr)) :
                                 nullptr;
         cond.expected_value = expected_value;
+        cond.ack_addr = ack_addr;
+        cond.sequence = sequence;
         entry.waiting_completion_count++;
         return true;
     }
