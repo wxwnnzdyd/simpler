@@ -219,31 +219,9 @@ inline __aicore__ bool submit_chunked_urma_request(AsyncCtx &ctx, UrmaRequestDes
         return false;
     }
 
-    const uint64_t total_bytes = elem_count * sizeof(RawDType);
-    const uint64_t max_bytes = kUrmaMaxTransferBytes;
-    if (total_bytes <= max_bytes) {
-        return submit_urma_request_once(ctx, desc);
-    }
-
-    const uint64_t chunk_elems = max_bytes / sizeof(RawDType);
-    if (chunk_elems == 0 || (max_bytes % sizeof(RawDType)) != 0) {
-        pto2::detail::defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
-        return false;
-    }
-
-    uint64_t offset = 0;
-    while (offset < elem_count) {
-        const uint64_t remaining = elem_count - offset;
-        const uint64_t current_elems = (remaining < chunk_elems) ? remaining : chunk_elems;
-        auto chunk_desc = desc;
-        chunk_desc.dst = make_tensor_slice(desc.dst, offset, current_elems);
-        chunk_desc.src = make_tensor_slice(desc.src, offset, current_elems);
-        if (!submit_urma_request_once(ctx, chunk_desc)) {
-            return false;
-        }
-        offset += current_elems;
-    }
-    return true;
+    // One TGET_ASYNC per slice: pto-isa splits it into WQEs and the completion
+    // record carries ack_begin/ack_mask for the whole range.
+    return submit_urma_request_once(ctx, desc);
 }
 
 }  // namespace pto2::urma_backend
