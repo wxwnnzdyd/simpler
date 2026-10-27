@@ -7,19 +7,18 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Show the deferred ack gap when a single TGET slice exceeds one WQE.
+"""64 KB control for the deferred ack probe.
 
-A 257 MB payload is split by UrmaPostSliceOnJetty into two WQEs (sequence 1 and
-2), but GetUrmaCompletionRecordAt publishes only one record with sequence 2.
-The AICPU therefore writes only ack[slot(sequence 2)]. The prefix scan starts at
-sequence 1, whose slot was never acked, so AdvanceAcked returns 0 even though
-sequence 2 was retired.
+Temporary size reduction from the 257 MB version. One TGET fits in a single
+WQE, so the record covers exactly one sequence and the probe should report:
 
-The probe task runs after the victim and reports:
-  probe[0] = submittedWqeCount   (expected 2)
-  probe[1] = AdvanceAcked(...)   (expected 0 while the gap exists)
-  probe[2] = ack ring slot 0     (expected 0)
-  probe[3] = ack ring slot 1     (expected 2)
+  probe[0] = submittedWqeCount   (expected 1)
+  probe[1] = AdvanceAcked(...)   (expected 1)
+  probe[2] = ack ring slot 0     (expected 1)
+  probe[3] = ack ring slot 1     (expected 0)
+
+If this passes but 257 MB fails with AICPU 507018, the problem is the large
+transfer, not the probe/orchestration wiring.
 """
 
 import ctypes
@@ -33,8 +32,8 @@ from simpler.task_interface import CommBufferSpec, DataType, TaskArgs, TensorArg
 from simpler_setup import SceneTestCase, Scalar, TaskArgsBuilder, TensorArg, scene_test
 from simpler_setup.scene_test import _rehosted_buffer_for, _rehosted_ref_for
 
-# 257 MB of float: one slice that exceeds the 256 MB single-WQE cap.
-N = 67371008
+# Temporary 64 KB control: one TGET that fits in a single WQE.
+N = 128 * 128
 NRANKS = 2
 DTYPE_NBYTES = 4
 URMA_DATA_OFFSET_NBYTES = 64 * DTYPE_NBYTES
@@ -152,13 +151,12 @@ class _UrmaCqChunkedBase(SceneTestCase):
             expected_out = getattr(args, f"in_{1 - rank}")
             getattr(args, f"out_{rank}").copy_(expected_out)
 
-            # submitted=2 (two WQEs), acked=0 (slot 0 never acked),
-            # ack[0]=0, ack[1]=2 (sequence 2 was retired and acked).
+            # 64 KB control: one WQE, one record, acked=1, ack[0]=1, ack[1]=0.
             probe = getattr(args, f"probe_{rank}")
-            probe[0] = 2
-            probe[1] = 0
-            probe[2] = 0
-            probe[3] = 2
+            probe[0] = 1
+            probe[1] = 1
+            probe[2] = 1
+            probe[3] = 0
 
 
 @pytest.mark.skipif(

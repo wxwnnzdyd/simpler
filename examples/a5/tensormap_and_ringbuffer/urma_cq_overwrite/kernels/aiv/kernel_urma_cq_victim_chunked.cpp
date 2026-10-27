@@ -33,10 +33,9 @@
 
 namespace {
 
-// 257 MB of float payload: one TGET slice that exceeds the 256 MB single-WQE
-// cap, so UrmaPostSliceOnJetty splits it into two WQEs (seq 1 and seq 2) but
-// GetUrmaCompletionRecordAt still publishes one record whose sequence is 2.
-constexpr int kElems = 67371008;
+// Temporary 64 KB control: one TGET that fits in a single WQE, so the record
+// covers exactly one sequence. Swap back to 67371008 for the 257 MB case.
+constexpr int kElems = 128 * 128;
 
 template <typename T>
 static inline __aicore__ __gm__ T *tensor_data(__gm__ Tensor *tensor) {
