@@ -33,10 +33,10 @@
 
 namespace {
 
-// Exactly 256 MB of float payload: total_bytes == kUrmaMaxWqeTransferBytes, so
-// send_request_entry takes the single-request path (no chunk split) and one
-// WQE covers the whole transfer. The probe expects submitted=1, acked=1.
-constexpr int kElems = 67108864;
+// 257 MB of float payload. send_request_entry splits it into 256 MB + 1 MB as
+// two independent requests (submit_chunked_urma_request), so each chunk gets
+// its own record and its own ack slot. The probe expects acked=2.
+constexpr int kElems = 67371008;
 
 template <typename T>
 static inline __aicore__ __gm__ T *tensor_data(__gm__ Tensor *tensor) {
