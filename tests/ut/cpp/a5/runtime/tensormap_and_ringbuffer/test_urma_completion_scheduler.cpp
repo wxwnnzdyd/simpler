@@ -46,3 +46,65 @@ TEST(UrmaCompletionScheduler, PollsOneCqeDw0WithoutWritingIt) {
     );
     EXPECT_EQ(dw0, (1U << 2U) | (1U << 16U));
 }
+
+TEST(UrmaCompletionScheduler, RetireWritesOnlyTheRequestedRange) {
+    constexpr uint16_t kMask = 7U;  // depth = 8
+    alignas(CHIP_ALIGN_SIZE) uint32_t ack[8] = {};
+
+    // sequence 6 -> tail slot (6 - 1) & 7 = 5; ack_begin = 2.
+    retire_urma_cqe_record(
+        reinterpret_cast<uint64_t>(&ack[5]), /*ack_begin=*/2U, /*sequence=*/6U, kMask);
+
+    EXPECT_EQ(ack[0], 0U);
+    EXPECT_EQ(ack[1], 0U);
+    EXPECT_EQ(ack[2], 3U);
+    EXPECT_EQ(ack[3], 4U);
+    EXPECT_EQ(ack[4], 5U);
+    EXPECT_EQ(ack[5], 6U);
+    EXPECT_EQ(ack[6], 0U);
+    EXPECT_EQ(ack[7], 0U);
+}
+
+TEST(UrmaCompletionScheduler, RetireWrapsAcrossTheRingEnd) {
+    constexpr uint16_t kMask = 3U;  // depth = 4
+    alignas(CHIP_ALIGN_SIZE) uint32_t ack[4] = {};
+
+    // sequence 7 -> tail slot (7 - 1) & 3 = 2; ack_begin = 4.
+    retire_urma_cqe_record(
+        reinterpret_cast<uint64_t>(&ack[2]), /*ack_begin=*/4U, /*sequence=*/7U, kMask);
+
+    EXPECT_EQ(ack[0], 5U);
+    EXPECT_EQ(ack[1], 6U);
+    EXPECT_EQ(ack[2], 7U);
+    EXPECT_EQ(ack[3], 0U);
+}
+
+TEST(UrmaCompletionScheduler, RetireSingleSlot) {
+    constexpr uint16_t kMask = 7U;
+    alignas(CHIP_ALIGN_SIZE) uint32_t ack[8] = {};
+
+    // Single WQE: ack_begin = sequence - 1, so only the tail slot is written.
+    retire_urma_cqe_record(
+        reinterpret_cast<uint64_t>(&ack[4]), /*ack_begin=*/4U, /*sequence=*/5U, kMask);
+
+    EXPECT_EQ(ack[4], 5U);
+    EXPECT_EQ(ack[3], 0U);
+    EXPECT_EQ(ack[5], 0U);
+}
+
+TEST(UrmaCompletionScheduler, FailedPollStillRetiresTheWholeRange) {
+    alignas(CHIP_ALIGN_SIZE) uint32_t cqe = (1U << 2U) | (1U << 24U);  // owner ok, status bad
+    EXPECT_EQ(
+        poll_urma_cqe_record(reinterpret_cast<uint64_t>(&cqe), /*expected_owner=*/1).state,
+        CompletionPollState::FAILED);
+
+    constexpr uint16_t kMask = 7U;
+    alignas(CHIP_ALIGN_SIZE) uint32_t ack[8] = {};
+    retire_urma_cqe_record(
+        reinterpret_cast<uint64_t>(&ack[5]), /*ack_begin=*/2U, /*sequence=*/6U, kMask);
+
+    EXPECT_EQ(ack[2], 3U);
+    EXPECT_EQ(ack[3], 4U);
+    EXPECT_EQ(ack[4], 5U);
+    EXPECT_EQ(ack[5], 6U);
+}

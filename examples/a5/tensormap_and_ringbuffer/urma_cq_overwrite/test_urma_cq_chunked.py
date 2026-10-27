@@ -139,7 +139,7 @@ class _UrmaCqChunkedBase(SceneTestCase):
                 [
                     TensorArg(f"in_{rank}", inp),
                     TensorArg(f"out_{rank}", torch.zeros(N, dtype=torch.float32)),
-                    TensorArg(f"probe_{rank}", torch.zeros(4, dtype=torch.int32)),
+                    TensorArg(f"probe_{rank}", torch.zeros(6, dtype=torch.int32)),
                     TensorArg(f"flag_{rank}", torch.zeros(1, dtype=torch.int32)),
                 ]
             )
@@ -157,6 +157,8 @@ class _UrmaCqChunkedBase(SceneTestCase):
             probe[1] = 2
             probe[2] = 1
             probe[3] = 2
+            probe[4] = 0
+            probe[5] = 0
 
 
 @pytest.mark.skipif(

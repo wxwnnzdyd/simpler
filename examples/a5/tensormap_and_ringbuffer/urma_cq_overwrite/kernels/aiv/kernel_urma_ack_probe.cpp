@@ -73,16 +73,22 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     uint32_t ack0 = 0;
     uint32_t ack1 = 0;
-    if (cq->ackAddr != 0U && cq->depth >= 2U) {
+    uint32_t ack2 = 0;
+    uint32_t ack3 = 0;
+    if (cq->ackAddr != 0U && cq->depth >= 4U) {
         __gm__ uint32_t *base = reinterpret_cast<__gm__ uint32_t *>(cq->ackAddr);
-        pto::comm::urma::DcciCachelines(reinterpret_cast<__gm__ uint8_t *>(base), 2U * sizeof(uint32_t));
+        pto::comm::urma::DcciCachelines(reinterpret_cast<__gm__ uint8_t *>(base), 4U * sizeof(uint32_t));
         ack0 = ld_dev(base + 0U, 0);
         ack1 = ld_dev(base + 1U, 0);
+        ack2 = ld_dev(base + 2U, 0);
+        ack3 = ld_dev(base + 3U, 0);
     }
 
     st_dev(static_cast<int32_t>(submitted), probe + 0, 0);
     st_dev(static_cast<int32_t>(acked), probe + 1, 0);
     st_dev(static_cast<int32_t>(ack0), probe + 2, 0);
     st_dev(static_cast<int32_t>(ack1), probe + 3, 0);
+    st_dev(static_cast<int32_t>(ack2), probe + 4, 0);
+    st_dev(static_cast<int32_t>(ack3), probe + 5, 0);
     dsb(DSB_DDR);
 }
