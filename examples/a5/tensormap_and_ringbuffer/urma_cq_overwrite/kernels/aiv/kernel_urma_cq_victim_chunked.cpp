@@ -33,9 +33,10 @@
 
 namespace {
 
-// Temporary 64 KB control: one TGET that fits in a single WQE, so the record
-// covers exactly one sequence. Swap back to 67371008 for the 257 MB case.
-constexpr int kElems = 128 * 128;
+// 257 MB of float payload. send_request_entry splits it into 256 MB + 1 MB as
+// two independent requests (submit_chunked_urma_request), so each chunk gets
+// its own record and its own ack slot. The probe expects acked=2.
+constexpr int kElems = 67371008;
 
 template <typename T>
 static inline __aicore__ __gm__ T *tensor_data(__gm__ Tensor *tensor) {
