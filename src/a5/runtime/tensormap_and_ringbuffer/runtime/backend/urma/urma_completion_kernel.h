@@ -219,11 +219,6 @@ inline __aicore__ bool submit_chunked_urma_request(AsyncCtx &ctx, UrmaRequestDes
         return false;
     }
 
-    // TEMP: bypass chunking for the 257 MB isolation test. One TGET_ASYNC
-    // makes UrmaPostSliceOnJetty split the transfer into two WQEs itself.
-    return submit_urma_request_once(ctx, desc);
-
-#if 0
     const uint64_t total_bytes = elem_count * sizeof(RawDType);
     const uint64_t max_bytes = kUrmaMaxTransferBytes;
     if (total_bytes <= max_bytes) {
@@ -249,7 +244,6 @@ inline __aicore__ bool submit_chunked_urma_request(AsyncCtx &ctx, UrmaRequestDes
         offset += current_elems;
     }
     return true;
-#endif
 }
 
 }  // namespace pto2::urma_backend

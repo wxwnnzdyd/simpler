@@ -7,17 +7,16 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Pin the deferred ack gap after a single TGET_ASYNC larger than one WQE.
+"""Pin the deferred ack state after a chunked 257 MB TGET.
 
-submit_chunked_urma_request is bypassed for this case, so the 257 MB transfer
-goes through one TGET_ASYNC and UrmaPostSliceOnJetty emits two WQEs (sequence 1
-and 2). GetUrmaCompletionRecordAt publishes only the tail record (sequence 2),
-so the AICPU acks only slot 1 and the contiguous prefix stops at the
-never-acked slot 0. The probe should report:
+submit_chunked_urma_request splits the transfer into 256 MB + 1 MB, each with
+its own record. If the second UrmaPostSend starts from a stale SQ head it
+overwrites the first WQE and the second CQE never lands; that path fails with
+AICPU 507018. With a healthy head handoff the probe should report:
 
   probe[0] = submittedWqeCount   (expected 2)
-  probe[1] = AdvanceAcked(...)   (expected 0)
-  probe[2] = ack ring slot 0     (expected 0)
+  probe[1] = AdvanceAcked(...)   (expected 2)
+  probe[2] = ack ring slot 0     (expected 1)
   probe[3] = ack ring slot 1     (expected 2)
 """
 
@@ -151,12 +150,12 @@ class _UrmaCqChunkedBase(SceneTestCase):
             expected_out = getattr(args, f"in_{1 - rank}")
             getattr(args, f"out_{rank}").copy_(expected_out)
 
-            # One TGET_ASYNC split into two WQEs, one record for the tail:
-            # submitted=2, acked=0, ack[0]=0, ack[1]=2.
+            # Two independent chunks, two records, both acked:
+            # submitted=2, acked=2, ack[0]=1, ack[1]=2.
             probe = getattr(args, f"probe_{rank}")
             probe[0] = 2
-            probe[1] = 0
-            probe[2] = 0
+            probe[1] = 2
+            probe[2] = 1
             probe[3] = 2
 
 
