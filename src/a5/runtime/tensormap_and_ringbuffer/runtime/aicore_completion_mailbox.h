@@ -60,11 +60,11 @@ struct AICoreCompletionMailboxMessage {
     uint32_t expected_value;
     uint32_t engine;
     int32_t completion_type;
+    // Low 8 bits: MSG_KIND_*. Bits 16-31: URMA ack_mask (depth - 1). Reusing
+    // the kind word keeps the message at one cache line.
     uint32_t kind;
-    // URMA CQ-slot ack payload. Fits in the former _pad[3] slack without
-    // growing the 64-byte message.
     uint32_t sequence;
-    uint32_t _pad0;
+    uint32_t ack_begin;
     uint64_t ack_addr;
 };
 
@@ -91,6 +91,8 @@ struct AICoreCompletionMsgView {
     uint32_t kind{0};
     uint32_t sequence{0};
     uint64_t ack_addr{0};
+    uint32_t ack_begin{0};
+    uint16_t ack_mask{0};
 };
 
 struct AICoreCompletionMailbox {
@@ -124,19 +126,27 @@ struct AICoreCompletionMailbox {
     bool try_push_condition(
         TaskId task_token, uint64_t addr, uint32_t expected_value, uint32_t engine, int32_t completion_type
     ) {
-        return try_push_condition(task_token, addr, 0, expected_value, engine, completion_type, 0, 0);
+        return try_push_condition(task_token, addr, 0, expected_value, engine, completion_type, 0, 0, 0, 0);
     }
 
     bool try_push_condition(
         TaskId task_token, uint64_t addr, uint64_t backend_cookie, uint32_t expected_value, uint32_t engine,
         int32_t completion_type
     ) {
-        return try_push_condition(task_token, addr, backend_cookie, expected_value, engine, completion_type, 0, 0);
+        return try_push_condition(task_token, addr, backend_cookie, expected_value, engine, completion_type, 0, 0, 0, 0);
     }
 
     bool try_push_condition(
         TaskId task_token, uint64_t addr, uint64_t backend_cookie, uint32_t expected_value, uint32_t engine,
         int32_t completion_type, uint64_t ack_addr, uint32_t sequence
+    ) {
+        return try_push_condition(
+            task_token, addr, backend_cookie, expected_value, engine, completion_type, ack_addr, sequence, 0, 0);
+    }
+
+    bool try_push_condition(
+        TaskId task_token, uint64_t addr, uint64_t backend_cookie, uint32_t expected_value, uint32_t engine,
+        int32_t completion_type, uint64_t ack_addr, uint32_t sequence, uint32_t ack_begin, uint16_t ack_mask
     ) {
         while (true) {
             uint64_t h = head.load(std::memory_order_relaxed);
@@ -151,8 +161,9 @@ struct AICoreCompletionMailbox {
                 slot->expected_value = expected_value;
                 slot->engine = engine;
                 slot->completion_type = completion_type;
-                slot->kind = MSG_KIND_CONDITION;
+                slot->kind = MSG_KIND_CONDITION | (static_cast<uint32_t>(ack_mask) << 16U);
                 slot->sequence = sequence;
+                slot->ack_begin = ack_begin;
                 slot->ack_addr = ack_addr;
                 slot->seq.store(new_head, std::memory_order_release);
                 return true;
@@ -180,6 +191,7 @@ struct AICoreCompletionMailbox {
                 slot->completion_type = 0;
                 slot->kind = MSG_KIND_TASK_NORMAL_DONE;
                 slot->sequence = 0;
+                slot->ack_begin = 0;
                 slot->ack_addr = 0;
                 slot->seq.store(new_head, std::memory_order_release);
                 return true;
@@ -205,8 +217,10 @@ struct AICoreCompletionMailbox {
         out.expected_value = slot->expected_value;
         out.engine = slot->engine;
         out.completion_type = slot->completion_type;
-        out.kind = slot->kind;
+        out.kind = slot->kind & 0xFFU;
+        out.ack_mask = static_cast<uint16_t>(slot->kind >> 16U);
         out.sequence = slot->sequence;
+        out.ack_begin = slot->ack_begin;
         out.ack_addr = slot->ack_addr;
         tail.store(t + 1, std::memory_order_release);
         return true;

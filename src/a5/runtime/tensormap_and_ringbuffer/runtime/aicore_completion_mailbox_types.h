@@ -53,9 +53,12 @@ struct DeferredCompletionEntry {
     int32_t completion_type;
     uint32_t sequence;
     uint64_t ack_addr;
+    uint32_t ack_begin;
+    uint16_t ack_mask;
+    uint16_t _pad;
 };
 
-static_assert(sizeof(DeferredCompletionEntry) == 40, "DeferredCompletionEntry layout drift");
+static_assert(sizeof(DeferredCompletionEntry) == 48, "DeferredCompletionEntry layout drift");
 
 struct alignas(CHIP_ALIGN_SIZE) DeferredCompletionSlab {
     volatile uint32_t count;

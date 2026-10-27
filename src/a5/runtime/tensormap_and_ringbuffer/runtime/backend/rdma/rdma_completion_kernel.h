@@ -206,6 +206,8 @@ register_rdma_async_event_status(AsyncCtx &ctx, const PtoAsyncEvent &event, cons
         0,
         0,
         0,
+        0,
+        0,
     };
     if (!register_completion_condition(ctx, token)) {
         defer_error(ctx, SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED);

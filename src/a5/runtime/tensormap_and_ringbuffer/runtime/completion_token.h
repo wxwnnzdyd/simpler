@@ -29,12 +29,15 @@ struct CompletionToken {
     uint32_t engine;
     int32_t completion_type;
     uint64_t backend_cookie;
-    // URMA CQ-slot ack: `sequence` is the CQE sequence this record covers and
-    // `ack_addr` is the per-slot ack word the consumer stores it into. Other
-    // backends leave both zero.
+    // URMA CQ-slot ack: `sequence` is the tail CQE sequence this record covers,
+    // `ack_begin` is the first sequence - 1, and `ack_addr` is the tail slot's
+    // ack word. `ack_mask` is depth - 1, used to walk the ring. Other backends
+    // leave these zero.
     uint32_t sequence;
-    uint32_t _pad;
+    uint32_t ack_begin;
     uint64_t ack_addr;
+    uint16_t ack_mask;
+    uint16_t _pad;
 };
 
 enum class CompletionPollState : uint8_t {

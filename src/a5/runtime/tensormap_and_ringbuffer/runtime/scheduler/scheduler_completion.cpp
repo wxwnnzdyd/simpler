@@ -134,7 +134,7 @@ void SchedulerContext::complete_slot_task(
                 volatile DeferredCompletionEntry *e = &deferred_slab->entries[i];
                 while (!mailbox->try_push_condition(
                     token, e->addr, e->backend_cookie, e->expected_value, e->engine, e->completion_type, e->ack_addr,
-                    e->sequence
+                    e->sequence, e->ack_begin, e->ack_mask
                 )) {
                     sched_->async_wait_list.mpsc_skipped_count.fetch_add(1, std::memory_order_relaxed);
                     SPIN_WAIT_HINT();

@@ -80,7 +80,7 @@ inline __aicore__ void
 register_sdma_post_done_record(AsyncCtx &ctx, volatile __gm__ void *record_addr, uint64_t post_id) {
     CompletionToken token{
         reinterpret_cast<uint64_t>(record_addr), 0, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_SDMA_EVENT_RECORD, post_id,
-        0, 0, 0
+        0, 0, 0, 0, 0
     };
     (void)register_completion_condition(ctx, token);
 }

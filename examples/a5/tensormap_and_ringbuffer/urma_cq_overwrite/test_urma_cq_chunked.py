@@ -7,16 +7,16 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Pin the deferred ack state before simpler consumes ack_begin.
+"""Verify the deferred ack range after a 257 MB TGET.
 
 submit_chunked_urma_request is bypassed, so the 257 MB transfer goes through
-one TGET_ASYNC and UrmaPostSliceOnJetty emits two WQEs. pto-isa now publishes
-ack_begin/ack_mask on the record, but simpler still retires only the tail slot,
-so the probe is expected to show the gap until the simpler-side plumbing lands:
+one TGET_ASYNC and UrmaPostSliceOnJetty emits two WQEs. The completion record
+carries the whole (ack_begin, sequence] range, and the consumer acknowledges
+both slots, so the probe should report:
 
   probe[0] = submittedWqeCount   (expected 2)
-  probe[1] = AdvanceAcked(...)   (expected 0)
-  probe[2] = ack ring slot 0     (expected 0)
+  probe[1] = AdvanceAcked(...)   (expected 2)
+  probe[2] = ack ring slot 0     (expected 1)
   probe[3] = ack ring slot 1     (expected 2)
 """
 
@@ -150,13 +150,12 @@ class _UrmaCqChunkedBase(SceneTestCase):
             expected_out = getattr(args, f"in_{1 - rank}")
             getattr(args, f"out_{rank}").copy_(expected_out)
 
-            # One TGET_ASYNC split into two WQEs, one record for the tail.
-            # pto-isa now carries ack_begin/ack_mask, but simpler still acks
-            # only the tail slot until the plumbing below lands.
+            # One TGET_ASYNC split into two WQEs, one record for the whole
+            # range: submitted=2, acked=2, ack[0]=1, ack[1]=2.
             probe = getattr(args, f"probe_{rank}")
             probe[0] = 2
-            probe[1] = 0
-            probe[2] = 0
+            probe[1] = 2
+            probe[2] = 1
             probe[3] = 2
 
 

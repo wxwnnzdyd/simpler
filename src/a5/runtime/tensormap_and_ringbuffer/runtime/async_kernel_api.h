@@ -136,6 +136,8 @@ inline __aicore__ bool register_completion_condition(AsyncCtx &ctx, const Comple
     slot->completion_type = token.completion_type;
     slot->sequence = token.sequence;
     slot->ack_addr = token.ack_addr;
+    slot->ack_begin = token.ack_begin;
+    slot->ack_mask = token.ack_mask;
     *ctx.completion_count = idx + 1;
     return true;
 }
@@ -151,7 +153,7 @@ inline __aicore__ void
 save_expected_notification_counter(AsyncCtx &ctx, volatile __gm__ void *counter_addr, uint32_t expected_value) {
     CompletionToken token{
         reinterpret_cast<uint64_t>(counter_addr), expected_value, COMPLETION_ENGINE_SDMA, COMPLETION_TYPE_COUNTER, 0,
-        0, 0, 0
+        0, 0, 0, 0, 0
     };
     (void)register_completion_condition(ctx, token);
     pto2::detail::defer_flush(ctx);

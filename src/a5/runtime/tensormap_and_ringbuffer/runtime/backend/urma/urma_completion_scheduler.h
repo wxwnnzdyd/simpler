@@ -69,21 +69,29 @@ inline CompletionPollResult poll_urma_cqe_record(uint64_t cqe_addr, uint32_t exp
     return {CompletionPollState::READY, SIMPLER_ERROR_NONE};
 }
 
-// Publish "this CQE sequence has been observed" into the CQ ack ring. The
+// Publish "these CQE sequences have been observed" into the CQ ack ring. The
 // producer scans the ring for the contiguous acked prefix and only then reuses
-// the slot, so a PENDING record must not be acked and a FAILED one still must
-// be (otherwise the slot leaks and the producer spins forever).
-inline void retire_urma_cqe_record(uint64_t ack_addr, uint32_t sequence) {
-    if (ack_addr == 0U || sequence == 0U) {
+// the slots, so a PENDING record must not be acked and a FAILED one still must
+// be (otherwise the slots leak and the producer spins forever).
+inline void retire_urma_cqe_record(
+    uint64_t ack_addr, uint32_t ack_begin, uint32_t sequence, uint16_t ack_mask) {
+    if (ack_addr == 0U || sequence == 0U || ack_mask == 0U || ack_begin >= sequence) {
         return;
     }
-    auto *slot = reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(ack_addr));
-    const auto *line = reinterpret_cast<const void *>(cache_line(slot));
-    // Invalidate first so the store's read-for-ownership pulls in the current
-    // line: the flush then writes back sibling slots unchanged, not stale.
-    cache_invalidate_range(line, CHIP_ALIGN_SIZE);
-    __atomic_store_n(slot, sequence, __ATOMIC_RELEASE);
-    cache_flush_range(line, CHIP_ALIGN_SIZE);
+    // ack_addr points at the tail slot; back out the ring base so the walk can
+    // start from ack_begin + 1 without needing the CQ object.
+    const uint32_t tailSlot = (sequence - 1U) & ack_mask;
+    const uintptr_t base = static_cast<uintptr_t>(ack_addr) - tailSlot * sizeof(uint32_t);
+    for (uint32_t seq = ack_begin + 1U; seq <= sequence; ++seq) {
+        auto *slot = reinterpret_cast<volatile uint32_t *>(
+            base + ((seq - 1U) & ack_mask) * sizeof(uint32_t));
+        const auto *line = reinterpret_cast<const void *>(cache_line(slot));
+        // Invalidate first so the store's read-for-ownership pulls in the current
+        // line: the flush then writes back sibling slots unchanged, not stale.
+        cache_invalidate_range(line, CHIP_ALIGN_SIZE);
+        __atomic_store_n(slot, seq, __ATOMIC_RELEASE);
+        cache_flush_range(line, CHIP_ALIGN_SIZE);
+    }
 }
 
 }  // namespace pto2::urma_backend

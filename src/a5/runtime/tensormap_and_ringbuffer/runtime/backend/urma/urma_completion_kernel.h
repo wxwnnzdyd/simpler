@@ -260,6 +260,8 @@ inline __aicore__ bool register_completion_condition(AsyncCtx &ctx, const Comple
     slot->completion_type = token.completion_type;
     slot->sequence = token.sequence;
     slot->ack_addr = token.ack_addr;
+    slot->ack_begin = token.ack_begin;
+    slot->ack_mask = token.ack_mask;
     *ctx.completion_count = idx + 1;
     return true;
 }
@@ -315,8 +317,10 @@ register_urma_async_event(AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAs
             COMPLETION_TYPE_URMA_CQE_RECORD,
             0,
             record.sequence,
-            0,
+            static_cast<uint32_t>(record.ack_begin),
             reinterpret_cast<uint64_t>(record.ack_addr),
+            record.ack_mask,
+            0,
         };
         if (!register_completion_condition(ctx, token)) {
             defer_error(ctx, SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED);

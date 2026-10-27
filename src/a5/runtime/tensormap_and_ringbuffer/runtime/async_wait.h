@@ -54,10 +54,12 @@ struct CompletionCondition {
     uint64_t addr{0};
     uint64_t backend_cookie{0};
     uint32_t expected_value{0};
-    // URMA CQ-slot ack: the sequence this record covers and the slot word the
-    // consumer stores it into once the CQE has been observed.
+    // URMA CQ-slot ack: the tail sequence, the first sequence - 1, the tail
+    // slot's word, and depth - 1 for walking the ring.
     uint64_t ack_addr{0};
     uint32_t sequence{0};
+    uint32_t ack_begin{0};
+    uint16_t ack_mask{0};
 
     CompletionPollResult test() const;
     void retire();
@@ -93,7 +95,7 @@ inline CompletionPollResult urma_cqe_record_poll_op(const CompletionCondition &c
 }
 
 inline void urma_cqe_record_retire_op(CompletionCondition &cond) {
-    pto2::urma_backend::retire_urma_cqe_record(cond.ack_addr, cond.sequence);
+    pto2::urma_backend::retire_urma_cqe_record(cond.ack_addr, cond.ack_begin, cond.sequence, cond.ack_mask);
 }
 
 inline CompletionPollResult rdma_hns1825_cqe_poll_op(const CompletionCondition &cond) {
@@ -252,7 +254,7 @@ struct AsyncWaitList {
                 }
                 if (!append_condition_locked(
                         *entry, msg.addr, msg.backend_cookie, msg.expected_value, static_cast<AsyncEngine>(msg.engine),
-                        msg.completion_type, msg.ack_addr, msg.sequence, error_code
+                        msg.completion_type, msg.ack_addr, msg.sequence, msg.ack_begin, msg.ack_mask, error_code
                     )) {
                     return drained;
                 }
@@ -297,7 +299,8 @@ struct AsyncWaitList {
 
     bool append_condition_locked(
         AsyncWaitEntry &entry, uint64_t addr, uint64_t backend_cookie, uint32_t expected_value, AsyncEngine engine,
-        int32_t completion_type, uint64_t ack_addr, uint32_t sequence, int32_t &error_code
+        int32_t completion_type, uint64_t ack_addr, uint32_t sequence, uint32_t ack_begin, uint16_t ack_mask,
+        int32_t &error_code
     ) {
         if (entry.condition_count >= MAX_COMPLETIONS_PER_TASK) {
             error_code = SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED;
@@ -316,6 +319,8 @@ struct AsyncWaitList {
         cond.expected_value = expected_value;
         cond.ack_addr = ack_addr;
         cond.sequence = sequence;
+        cond.ack_begin = ack_begin;
+        cond.ack_mask = ack_mask;
         entry.waiting_completion_count++;
         return true;
     }
