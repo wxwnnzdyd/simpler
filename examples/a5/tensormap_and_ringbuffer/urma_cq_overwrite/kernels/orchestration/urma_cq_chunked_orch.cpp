@@ -45,9 +45,6 @@ __attribute__((visibility("default"))) void urma_cq_chunked_orchestration(const 
     victim_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     rt_submit_aiv_task(0, victim_args);
 
-    (void)probe;  // TEMP: victim-only mode; the probe task is disabled below.
-
-#if 0
     // Depends on victim's `out`, so it runs only after the deferred record has
     // been retired and its ack has been published.
     CoreTaskArgs probe_args;
@@ -55,7 +52,6 @@ __attribute__((visibility("default"))) void urma_cq_chunked_orchestration(const 
     probe_args.add_output(probe);
     probe_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     rt_submit_aiv_task(1, probe_args);
-#endif
 }
 
 }  // extern "C"
