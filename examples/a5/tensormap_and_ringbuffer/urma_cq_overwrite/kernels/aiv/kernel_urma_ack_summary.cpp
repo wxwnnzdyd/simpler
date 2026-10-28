@@ -33,13 +33,6 @@
 
 namespace {
 
-// The sequence task retires only after every slot it posted has been acked, so
-// submitted and acked must both equal the total WQE count of the run.
-constexpr int32_t kSummaryAckedTwoLaps = 1;
-constexpr int32_t kSummaryAckedOneLap = 2;
-constexpr int32_t kSummaryAckedNoWrap = 3;
-constexpr int32_t kSummaryMismatch = 0;
-
 template <typename T>
 static inline __aicore__ __gm__ T *tensor_data(__gm__ Tensor *tensor) {
     return reinterpret_cast<__gm__ T *>(tensor->buffer.addr) + tensor->start_offset;
@@ -50,12 +43,16 @@ static inline __aicore__ __gm__ T *tensor_data(__gm__ Tensor *tensor) {
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
     __gm__ Tensor *summary_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[1]);
-    const uint32_t expected = static_cast<uint32_t>(args[2]);
 
     __gm__ int32_t *summary = tensor_data<int32_t>(summary_tensor);
+    // A negative submitted count marks a run that never reached the queue, so a
+    // failure reads differently from a queue that simply has no completions.
+    st_dev(-1, summary + 0, 0);
+    st_dev(-1, summary + 1, 0);
+    st_dev(0, summary + 2, 0);
+
     if (comm_ctx == nullptr || comm_ctx->rankNum != 2 || comm_ctx->rankId >= comm_ctx->rankNum ||
         comm_ctx->workSpace == 0 || comm_ctx->windowsIn[comm_ctx->rankId] == 0) {
-        st_dev(kSummaryMismatch, summary + 2, 0);
         dsb(DSB_DDR);
         pipe_barrier(PIPE_ALL);
         return;
@@ -66,7 +63,6 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     pto::comm::AsyncSession session;
     if (!pto::comm::BuildAsyncSession<pto::comm::DmaEngine::URMA>(workspace, peer_rank, session)) {
-        st_dev(kSummaryMismatch, summary + 2, 0);
         dsb(DSB_DDR);
         pipe_barrier(PIPE_ALL);
         return;
@@ -77,23 +73,16 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     pto::comm::urma::DcciCachelines(reinterpret_cast<__gm__ uint8_t *>(cq), sizeof(*cq));
     pto::comm::urma::DcciCachelines(reinterpret_cast<__gm__ uint8_t *>(wq), sizeof(*wq));
 
+    // The sequence tasks retired, so every slot they posted was acked: the
+    // submitted and acked cursors sit at the end of the run. The ring depth is
+    // reported alongside them because how many laps that run covered is a
+    // property of the device CQ, not of the run.
     const uint32_t submitted = wq->submittedWqeCount;
     const uint32_t acked = pto::comm::urma::detail::AdvanceAcked(cq, submitted);
 
-    int32_t code = kSummaryMismatch;
-    if (submitted == expected && acked == expected) {
-        if (expected > 2U * cq->depth) {
-            code = kSummaryAckedTwoLaps;
-        } else if (expected > cq->depth) {
-            code = kSummaryAckedOneLap;
-        } else {
-            code = kSummaryAckedNoWrap;
-        }
-    }
-
     st_dev(static_cast<int32_t>(submitted), summary + 0, 0);
     st_dev(static_cast<int32_t>(acked), summary + 1, 0);
-    st_dev(code, summary + 2, 0);
+    st_dev(static_cast<int32_t>(cq->depth), summary + 2, 0);
     dsb(DSB_DDR);
     pipe_barrier(PIPE_ALL);
 }

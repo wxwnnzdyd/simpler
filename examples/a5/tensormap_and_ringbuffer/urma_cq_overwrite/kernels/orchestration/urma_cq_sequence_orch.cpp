@@ -16,11 +16,10 @@
 
 namespace {
 
-// Each sequence task posts POSTS_PER_TASK WQEs; the tasks are chained with an
-// ordering dependency so exactly one sequence task posts to the shared PER_PEER
-// queue at a time.
-constexpr uint32_t kNTaskChunks = 16;
-constexpr uint32_t kPostsPerTask = 64;
+// The tasks are chained with an ordering dependency so exactly one sequence
+// task posts to the shared PER_PEER queue at a time; the per-task post count
+// arrives as a scalar argument.
+constexpr uint32_t kNTaskChunks = 64;
 
 }  // namespace
 
@@ -67,7 +66,6 @@ __attribute__((visibility("default"))) void urma_cq_sequence_orchestration(const
     CoreTaskArgsWithDeps<> summary_args;
     summary_args.add_inout(summary);
     summary_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
-    summary_args.add_scalar(posts * kNTaskChunks);
     if (previous.is_valid()) {
         summary_args.add_dep_wait(previous);
     }

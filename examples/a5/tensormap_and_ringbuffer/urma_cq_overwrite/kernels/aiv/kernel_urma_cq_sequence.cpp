@@ -33,9 +33,9 @@
 
 namespace {
 
-// One 64 KB slice per post, so every post contributes exactly one WQE and the
+// One 16 KB slice per post, so every post contributes exactly one WQE and the
 // ring position of a post is its index in the whole sequence.
-constexpr int kElems = 128 * 128;
+constexpr int kElems = 128 * 32;
 
 template <typename T>
 static inline __aicore__ __gm__ T *tensor_data(__gm__ Tensor *tensor) {

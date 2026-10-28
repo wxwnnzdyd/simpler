@@ -9,27 +9,27 @@
 # -----------------------------------------------------------------------------------------------------------
 """Verify the deferred ack prefix over a long mixed TGET/TPUT sequence.
 
-Each rank chained 16 AIV tasks; a task posts 64 instructions and every
+Each rank chains 64 AIV tasks; a task posts 64 instructions and every
 instruction registers its own deferred completion record. Tasks are ordered by
 an explicit dependency, so a single sequence task owns the shared PER_PEER queue
 at a time and the whole run is one monotonically increasing sequence.
 
 Instructions alternate TGET (into out) and TPUT (out into the peer scratch),
-which puts both opcodes on the same CQ. The run posts 16 * 64 = 1024 WQEs, i.e.
-it crosses the ring several times for any CQ depth up to 512.
+which puts both opcodes on the same CQ. The run posts 64 * 64 = 4096 WQEs.
 
 The summary task reports:
 
-  summary[0] = submittedWqeCount        (expected 1024)
-  summary[1] = AdvanceAcked(...)        (expected 1024)
-  summary[2] = 1  two or more laps crossed
-               2  one lap crossed
-               3  the ring never wrapped
-               0  submitted/acked mismatch
+  summary[0] = submittedWqeCount        (expected 4096)
+  summary[1] = AdvanceAcked(...)        (expected 4096)
+  summary[2] = cq->depth                (the device's CQ depth)
 
-summary[2] == 2 or 3 means the run was too short to reuse slots; raise
-kNTaskChunks in urma_cq_sequence_orch.cpp. TPUT data is not checked here: the
-test asserts the completion sequence, not the write path.
+summary[2] is a property of the device, not of the run, so the check is a
+relation: submitted and acked must both equal 4096, and 4096 must exceed twice
+the reported depth, i.e. the run has to reuse CQ slots at least twice. A shorter
+run fails with the measured depth in the message.
+
+TPUT data is not checked here: the test asserts the completion sequence, not the
+write path.
 """
 
 import os
@@ -40,13 +40,13 @@ from simpler.task_interface import ArgDirection as D
 from simpler.task_interface import CommBufferSpec, DataType, TaskArgs, TensorArgType
 
 from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
-from simpler_setup.scene_test import _rehosted_buffer_for, _rehosted_ref_for
+from simpler_setup.scene_test import _describe_mismatch, _rehosted_buffer_for, _rehosted_ref_for
 
 NRANKS = 2
 DTYPE_NBYTES = 4
-ELEMS_PER_POST = 128 * 128
+ELEMS_PER_POST = 128 * 32
 POSTS_PER_TASK = 64
-NTASK_CHUNKS = 16
+NTASK_CHUNKS = 64
 N = ELEMS_PER_POST * POSTS_PER_TASK * NTASK_CHUNKS
 EXPECTED_WQES = POSTS_PER_TASK * NTASK_CHUNKS
 URMA_DATA_OFFSET_NBYTES = 64 * DTYPE_NBYTES
@@ -132,7 +132,7 @@ class _UrmaCqSequenceBase(SceneTestCase):
                         "func_id": 1,
                         "source": "kernels/aiv/kernel_urma_ack_summary.cpp",
                         "core_type": "aiv",
-                        "signature": [D.OUT, D.IN, D.IN],
+                        "signature": [D.OUT, D.IN],
                     },
                 ],
             }
@@ -168,7 +168,29 @@ class _UrmaCqSequenceBase(SceneTestCase):
             summary = getattr(args, f"summary_{rank}")
             summary[0] = EXPECTED_WQES
             summary[1] = EXPECTED_WQES
-            summary[2] = 1
+            # summary[2] carries the device CQ depth, which the host cannot
+            # predict; compare_outputs checks it as a relation instead.
+            summary[2] = 0
+
+    def compare_outputs(self, test_args, golden_args, output_names, params):
+        for name in output_names:
+            actual = getattr(test_args, name)
+            expected = getattr(golden_args, name)
+            if name.startswith("summary_"):
+                submitted, acked, depth = (int(value) for value in actual[:3].tolist())
+                assert submitted == EXPECTED_WQES, (
+                    f"{name}: submittedWqeCount {submitted}, expected {EXPECTED_WQES}"
+                )
+                assert acked == EXPECTED_WQES, f"{name}: AdvanceAcked {acked}, expected {EXPECTED_WQES}"
+                assert depth > 0, f"{name}: reported CQ depth {depth} is not positive"
+                assert EXPECTED_WQES > 2 * depth, (
+                    f"{name}: {EXPECTED_WQES} WQEs cover {EXPECTED_WQES / depth:.1f} laps of a "
+                    f"depth-{depth} CQ; raise NTASK_CHUNKS past {2 * depth} WQEs"
+                )
+                continue
+            assert torch.allclose(actual, expected, rtol=self.RTOL, atol=self.ATOL), (
+                f"{name}: {_describe_mismatch(actual, expected, self.RTOL, self.ATOL)}"
+            )
 
 
 @pytest.mark.skipif(
