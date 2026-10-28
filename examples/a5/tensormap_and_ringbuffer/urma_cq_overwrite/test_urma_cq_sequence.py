@@ -7,26 +7,29 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Verify the deferred ack prefix over a long mixed TGET/TPUT sequence.
+"""Verify the deferred ack prefix across two full laps of the CQ ring.
 
-Each rank chains 64 AIV tasks; a task posts 64 instructions and every
+Each rank chains 1032 AIV tasks; a task posts 64 instructions and every
 instruction registers its own deferred completion record. Tasks are ordered by
 an explicit dependency, so a single sequence task owns the shared PER_PEER queue
 at a time and the whole run is one monotonically increasing sequence.
 
 Instructions alternate TGET (into out) and TPUT (out into the peer scratch),
-which puts both opcodes on the same CQ. The run posts 64 * 64 = 4096 WQEs.
+which puts both opcodes on the same CQ. The run posts 1032 * 64 = 66048 WQEs,
+two full laps of a 32768-deep CQ plus 512 WQEs. A slice is 1 KB, so the buffers
+stay small even though the sequence is long.
 
 The summary task reports:
 
-  summary[0] = submittedWqeCount        (expected 4096)
-  summary[1] = AdvanceAcked(...)        (expected 4096)
+  summary[0] = submittedWqeCount        (expected 66048)
+  summary[1] = AdvanceAcked(...)        (expected 66048)
   summary[2] = cq->depth                (the device's CQ depth)
 
-summary[2] is a property of the device, not of the run, so the check is a
-relation: submitted and acked must both equal 4096, and 4096 must exceed twice
-the reported depth, i.e. the run has to reuse CQ slots at least twice. A shorter
-run fails with the measured depth in the message.
+summary[2] is a property of the device, not of the run, so compare_outputs
+checks the relation instead: submitted and acked must both equal 66048, and
+66048 must exceed twice the reported depth. Reaching a slot twice is what
+exercises the absolute-sequence comparison in AdvanceAcked -- a slot reused in
+the next lap still holds the previous lap's value when it is compared.
 
 TPUT data is not checked here: the test asserts the completion sequence, not the
 write path.
@@ -44,9 +47,9 @@ from simpler_setup.scene_test import _describe_mismatch, _rehosted_buffer_for, _
 
 NRANKS = 2
 DTYPE_NBYTES = 4
-ELEMS_PER_POST = 128 * 32
+ELEMS_PER_POST = 256
 POSTS_PER_TASK = 64
-NTASK_CHUNKS = 64
+NTASK_CHUNKS = 1032
 N = ELEMS_PER_POST * POSTS_PER_TASK * NTASK_CHUNKS
 EXPECTED_WQES = POSTS_PER_TASK * NTASK_CHUNKS
 URMA_DATA_OFFSET_NBYTES = 64 * DTYPE_NBYTES
@@ -184,8 +187,8 @@ class _UrmaCqSequenceBase(SceneTestCase):
                 assert acked == EXPECTED_WQES, f"{name}: AdvanceAcked {acked}, expected {EXPECTED_WQES}"
                 assert depth > 0, f"{name}: reported CQ depth {depth} is not positive"
                 assert EXPECTED_WQES > 2 * depth, (
-                    f"{name}: {EXPECTED_WQES} WQEs cover {EXPECTED_WQES / depth:.1f} laps of a "
-                    f"depth-{depth} CQ; raise NTASK_CHUNKS past {2 * depth} WQEs"
+                    f"{name}: {EXPECTED_WQES} WQEs cover {EXPECTED_WQES / depth:.2f} laps of a "
+                    f"depth-{depth} CQ; two laps need more than {2 * depth} WQEs, so raise NTASK_CHUNKS"
                 )
                 continue
             assert torch.allclose(actual, expected, rtol=self.RTOL, atol=self.ATOL), (

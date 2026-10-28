@@ -18,8 +18,9 @@ namespace {
 
 // The tasks are chained with an ordering dependency so exactly one sequence
 // task posts to the shared PER_PEER queue at a time; the per-task post count
-// arrives as a scalar argument.
-constexpr uint32_t kNTaskChunks = 64;
+// arrives as a scalar argument. 1032 * 64 = 66048 WQEs, which covers two full
+// laps of a 32768-deep CQ with 512 WQEs of margin.
+constexpr uint32_t kNTaskChunks = 1032;
 
 }  // namespace
 
