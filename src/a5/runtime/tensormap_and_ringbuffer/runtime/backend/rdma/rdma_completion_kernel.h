@@ -184,8 +184,10 @@ register_rdma_async_event_status(AsyncCtx &ctx, const PtoAsyncEvent &event, cons
     const uint32_t engine = static_cast<uint32_t>(event.engine);
     const uint32_t record_count = event.CompletionRecordCount(session);
     if (engine != static_cast<uint32_t>(::pto::comm::DmaEngine::RDMA) || record_count != 1U) {
+        // Reaching here means the error code is recordable, and a recorded
+        // error aborts the run. Waiting would only hold this core through a
+        // transfer whose result nobody consumes.
         defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
-        (void)event.Wait(session);
         return RdmaEventRegistrationResult::INVALID_EVENT;
     }
 
@@ -193,7 +195,6 @@ register_rdma_async_event_status(AsyncCtx &ctx, const PtoAsyncEvent &event, cons
     if (record.kind != ::pto::comm::CompletionKind::RDMA_HNS1825_CQE || record.addr == nullptr ||
         record.expected > 1ULL) {
         defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
-        (void)event.Wait(session);
         return RdmaEventRegistrationResult::INVALID_EVENT;
     }
 
@@ -206,7 +207,6 @@ register_rdma_async_event_status(AsyncCtx &ctx, const PtoAsyncEvent &event, cons
     };
     if (!register_completion_condition(ctx, token)) {
         defer_error(ctx, SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED);
-        (void)event.Wait(session);
         return RdmaEventRegistrationResult::REGISTRATION_FAILED;
     }
     return RdmaEventRegistrationResult::OK;

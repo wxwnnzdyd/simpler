@@ -306,6 +306,12 @@ register_urma_async_event(AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAs
         (void)event.Wait(session);
         return true;
     }
+    if (event.postFailed) {
+        // A failed post still carries a non-zero handle, so it has to be
+        // rejected before the empty-request check.
+        defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
+        return false;
+    }
     if (event.handle == 0) {
         return true;
     }
@@ -314,8 +320,10 @@ register_urma_async_event(AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAs
     const uint32_t record_count = event.CompletionRecordCount(session);
     if (engine != static_cast<uint32_t>(::pto::comm::DmaEngine::URMA) || record_count == 0U ||
         record_count > ctx.completion_capacity) {
+        // Reaching here means the error code is recordable, and a recorded
+        // error aborts the run. Waiting would only hold this core through a
+        // transfer whose result nobody consumes.
         defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
-        (void)event.Wait(session);
         return false;
     }
 
@@ -324,7 +332,6 @@ register_urma_async_event(AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAs
         if (record.kind != ::pto::comm::CompletionKind::URMA_CQE_DW0 || record.addr == nullptr ||
             record.expected > 1ULL) {
             defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
-            (void)event.Wait(session);
             return false;
         }
 
@@ -337,7 +344,6 @@ register_urma_async_event(AsyncCtx &ctx, const PtoAsyncEvent &event, const PtoAs
         };
         if (!register_completion_condition(ctx, token)) {
             defer_error(ctx, SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED);
-            (void)event.Wait(session);
             return false;
         }
     }
