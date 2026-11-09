@@ -29,6 +29,8 @@ struct CompletionToken {
     uint32_t engine;
     int32_t completion_type;
     uint64_t backend_cookie;
+    // Empty for backends whose ring needs no consumer confirmation (SDMA, URMA).
+    CompletionAck ack;
 };
 
 enum class CompletionPollState : uint8_t {

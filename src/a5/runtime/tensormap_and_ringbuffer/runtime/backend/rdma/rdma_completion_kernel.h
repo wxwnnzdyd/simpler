@@ -131,8 +131,11 @@ inline __aicore__ RdmaSubmitStatus
 submit_rdma_request_status(AsyncCtx &ctx, RdmaRequestDescriptor<DstTensor, SrcTensor, ScratchTileT> desc) {
 #if defined(PTO_RDMA_SUPPORTED)
     pto::comm::AsyncSession session;
+    // AICPU observes the completion, so the sender must not recycle the CQ slot
+    // on its own: build a deferred session and let the retire below confirm it.
+    const bool deferred = pto2::detail::async_ctx_is_deferred(ctx);
     if (!pto::comm::BuildAsyncSession<pto::comm::DmaEngine::RDMA>(
-            desc.scratch, desc.workspace, desc.local_rank, session, desc.sync_id
+            desc.scratch, desc.workspace, desc.local_rank, session, desc.sync_id, 0, deferred
         )) {
         pto2::detail::defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
         return RdmaSubmitStatus::BUILD_SESSION_FAILED;
@@ -198,12 +201,28 @@ register_rdma_async_event_status(AsyncCtx &ctx, const PtoAsyncEvent &event, cons
         return RdmaEventRegistrationResult::INVALID_EVENT;
     }
 
+    // The completion is only valid while its CQ slot exists, and the sender
+    // stops recycling slots at the acked prefix. Record which slots to confirm.
+    const bool ackUsable = record.ack_addr != nullptr && record.ack_mask != 0U && record.sequence != 0ULL &&
+                           record.sequence <= 0xffffffffULL && record.ack_begin < record.sequence &&
+                           record.sequence - record.ack_begin <= 0xffffULL;
+    if (!ackUsable) {
+        defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
+        return RdmaEventRegistrationResult::INVALID_EVENT;
+    }
+
     CompletionToken token{
         reinterpret_cast<uint64_t>(record.addr),
         static_cast<uint32_t>(record.expected),
         COMPLETION_ENGINE_ROCE,
         COMPLETION_TYPE_RDMA_HNS1825_CQE,
         0,
+        CompletionAck{
+            reinterpret_cast<uint64_t>(record.ack_addr),
+            static_cast<uint32_t>(record.sequence),
+            record.ack_mask,
+            static_cast<uint16_t>(record.sequence - record.ack_begin),
+        },
     };
     if (!register_completion_condition(ctx, token)) {
         defer_error(ctx, SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED);

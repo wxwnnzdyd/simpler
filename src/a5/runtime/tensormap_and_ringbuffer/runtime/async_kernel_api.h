@@ -135,6 +135,7 @@ inline __aicore__ bool register_completion_condition(AsyncCtx &ctx, const Comple
     slot->engine = token.engine;
     slot->completion_type = token.completion_type;
     slot->_pad = 0;
+    slot->ack = token.ack;
     *ctx.completion_count = idx + 1;
     return true;
 }

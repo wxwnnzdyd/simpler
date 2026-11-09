@@ -55,7 +55,28 @@ inline CompletionPollResult poll_rdma_hns1825_cqe_record(uint64_t cqe_addr, uint
     return {CompletionPollState::READY, SIMPLER_ERROR_NONE};
 }
 
-inline void retire_rdma_hns1825_cqe_record(uint64_t /*cqe_addr*/, uint32_t /*expected_owner*/) {}
+// The sender publishes the CQ consumer index from the acked prefix, so a CQ slot
+// stays recyclable only until somebody confirms it. Write the event's slots now
+// that this consumer has observed them: ascending, absolute sequence values, one
+// 64-bit slot per CQE, exactly what pto-isa's AckRdmaCqeRange writes.
+//
+// The ack ring is a separate allocation, so the base is reconstructed from the
+// last slot and the ring mask; this keeps the record down to one pointer.
+inline void retire_rdma_hns1825_cqe_record(const CompletionAck &ack) {
+    if (ack.slot_addr == 0U || ack.sequence == 0U || ack.mask == 0U || ack.count == 0U) {
+        return;
+    }
+    const uint64_t last = ack.sequence;
+    const uint64_t first = last + 1U - ack.count;
+    const uint64_t base = ack.slot_addr - ((last - 1U) & ack.mask) * sizeof(uint64_t);
+    for (uint64_t sequence = first; sequence <= last; ++sequence) {
+        auto *slot = reinterpret_cast<volatile uint64_t *>(
+            static_cast<uintptr_t>(base + ((sequence - 1U) & ack.mask) * sizeof(uint64_t))
+        );
+        __atomic_store_n(slot, sequence, __ATOMIC_RELEASE);
+        cache_flush_range(reinterpret_cast<const void *>(cache_line(slot)), CHIP_ALIGN_SIZE);
+    }
+}
 
 // Diagnostic mirror of the poll above, for a wait that has stopped progressing.
 inline void

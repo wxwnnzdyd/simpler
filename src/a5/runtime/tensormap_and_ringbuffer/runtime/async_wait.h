@@ -54,6 +54,8 @@ struct CompletionCondition {
     uint64_t addr{0};
     uint64_t backend_cookie{0};
     uint32_t expected_value{0};
+    // RDMA only: the CQ slots this completion must confirm back to the sender.
+    CompletionAck ack{};
 
     CompletionPollResult test() const;
     void retire();
@@ -97,7 +99,7 @@ inline CompletionPollResult rdma_hns1825_cqe_poll_op(const CompletionCondition &
 }
 
 inline void rdma_hns1825_cqe_retire_op(CompletionCondition &cond) {
-    pto2::rdma_backend::retire_rdma_hns1825_cqe_record(cond.addr, cond.expected_value);
+    pto2::rdma_backend::retire_rdma_hns1825_cqe_record(cond.ack);
 }
 
 inline const CompletionBackendOps *completion_backend_ops_for(int completion_type) {
@@ -246,10 +248,7 @@ struct AsyncWaitList {
                     entry->waiting_completion_count = 0;
                     entry->normal_done = false;
                 }
-                if (!append_condition_locked(
-                        *entry, msg.addr, msg.backend_cookie, msg.expected_value, static_cast<AsyncEngine>(msg.engine),
-                        msg.completion_type, error_code
-                    )) {
+                if (!append_condition_locked(*entry, msg, error_code)) {
                     return drained;
                 }
             } else if (msg.kind == MSG_KIND_TASK_NORMAL_DONE) {
@@ -291,25 +290,23 @@ struct AsyncWaitList {
         return drained;
     }
 
-    bool append_condition_locked(
-        AsyncWaitEntry &entry, uint64_t addr, uint64_t backend_cookie, uint32_t expected_value, AsyncEngine engine,
-        int32_t completion_type, int32_t &error_code
-    ) {
+    bool append_condition_locked(AsyncWaitEntry &entry, const AICoreCompletionMsgView &msg, int32_t &error_code) {
         if (entry.condition_count >= MAX_COMPLETIONS_PER_TASK) {
             error_code = SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED;
             return false;
         }
         CompletionCondition &cond = entry.conditions[entry.condition_count++];
-        cond.engine = engine;
-        cond.completion_type = completion_type;
+        cond.engine = static_cast<AsyncEngine>(msg.engine);
+        cond.completion_type = msg.completion_type;
         cond.satisfied = false;
         cond.retired = false;
-        cond.addr = addr;
-        cond.backend_cookie = backend_cookie;
-        cond.counter_addr = completion_type == COMPLETION_TYPE_COUNTER ?
-                                reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(addr)) :
+        cond.addr = msg.addr;
+        cond.backend_cookie = msg.backend_cookie;
+        cond.counter_addr = msg.completion_type == COMPLETION_TYPE_COUNTER ?
+                                reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(msg.addr)) :
                                 nullptr;
-        cond.expected_value = expected_value;
+        cond.expected_value = msg.expected_value;
+        cond.ack = msg.ack;
         entry.waiting_completion_count++;
         return true;
     }

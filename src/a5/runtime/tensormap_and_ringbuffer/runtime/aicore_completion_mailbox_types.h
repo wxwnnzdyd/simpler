@@ -38,6 +38,19 @@ inline constexpr int32_t MAX_COMPLETIONS_PER_TASK = 64;
 #define COMPLETION_TYPE_URMA_CQE_RECORD 2
 #define COMPLETION_TYPE_RDMA_HNS1825_CQE 3
 
+// Confirmation a ring-backed completion owes its sender. RDMA publishes the CQ
+// consumer index from the acked prefix, so the consumer that observed a
+// completion must write (sequence - count, sequence] into the ack ring before
+// the sender may recycle those slots. `slot_addr` names the ack slot of
+// `sequence`; with `mask` the whole ring addresses back out of it, so one
+// pointer is enough.
+struct CompletionAck {
+    uint64_t slot_addr;
+    uint32_t sequence;
+    uint16_t mask;
+    uint16_t count;
+};
+
 // DeferredCompletionEntry / DeferredCompletionSlab back the per-task scratch
 // area that AICore writes into to record "this completion has to be observed
 // before the task can retire." The FIN-handling scheduler thread reads the
@@ -45,6 +58,7 @@ inline constexpr int32_t MAX_COMPLETIONS_PER_TASK = 64;
 // them to the dispatch thread. `volatile` here is load-bearing: writers live
 // on AICore and readers on AICPU, so the qualifier is the correct way to
 // pin the compiler against caching / reordering on either side.
+
 struct DeferredCompletionEntry {
     uint64_t addr;
     uint64_t backend_cookie;
@@ -52,9 +66,11 @@ struct DeferredCompletionEntry {
     uint32_t engine;
     int32_t completion_type;
     uint32_t _pad;
+    CompletionAck ack;
 };
 
-static_assert(sizeof(DeferredCompletionEntry) == 32, "DeferredCompletionEntry layout drift");
+static_assert(sizeof(CompletionAck) == 16, "CompletionAck layout drift");
+static_assert(sizeof(DeferredCompletionEntry) == 48, "DeferredCompletionEntry layout drift");
 
 struct alignas(CHIP_ALIGN_SIZE) DeferredCompletionSlab {
     volatile uint32_t count;
