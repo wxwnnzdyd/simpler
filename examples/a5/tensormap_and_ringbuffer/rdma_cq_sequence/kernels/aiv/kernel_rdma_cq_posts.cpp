@@ -42,7 +42,9 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     const uint32_t posts = static_cast<uint32_t>(args[kArgPosts]);
     const uint32_t task_index = static_cast<uint32_t>(args[kArgTaskIndex]);
 
-    __gm__ int32_t *status = tensor_data<int32_t>(status_tensor);
+    // Each task owns three words; the orchestrator passes the whole tensor and
+    // the kernel offsets into its own slice.
+    __gm__ int32_t *status = tensor_data<int32_t>(status_tensor) + static_cast<uint64_t>(task_index) * 3U;
     if (!validate_comm(comm_ctx, status)) {
         return;
     }

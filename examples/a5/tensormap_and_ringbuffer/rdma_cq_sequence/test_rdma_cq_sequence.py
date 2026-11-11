@@ -119,7 +119,7 @@ def build_chip_callable(platform: str) -> ChipCallable:
             2,
             "kernels/aiv/kernel_rdma_cq_summary.cpp",
             [ArgDirection.IN, ArgDirection.IN, ArgDirection.IN, ArgDirection.INOUT, ArgDirection.INOUT]
-            + [ArgDirection.IN] * 3,
+            + [ArgDirection.IN] * 4,
         ),
     ]:
         kernel = kc.compile_incore(
@@ -260,6 +260,11 @@ def _run_case_on_worker(
 
     try:
         worker.run(orch_fn, args=None, config=CallConfig())
+    except Exception:
+        # The chip process may have died; the shm tensors are host memory and can
+        # still be read, which is the only record of how far the run got.
+        _dump_status(name, tasks, status, summary)
+        raise
     finally:
         for r in range(nranks):
             worker.release_buffer(send_buf[r])
@@ -268,6 +273,21 @@ def _run_case_on_worker(
             worker.release_buffer(signal_buf[r])
 
     return _check_result(name, mode, tasks, posts, summary, status)
+
+
+def _dump_status(name, tasks, status, summary) -> None:
+    for rank in range(len(status)):
+        words = [int(x) for x in status[rank].tolist()]
+        summary_words = [int(x) for x in summary[rank].tolist()]
+        written = [
+            (idx, words[idx * STATUS_WORDS_PER_TASK : (idx + 1) * STATUS_WORDS_PER_TASK])
+            for idx in range(tasks + 1)
+            if words[idx * STATUS_WORDS_PER_TASK] != -1
+        ]
+        print(
+            f"[rdma_cq_sequence] case={name} rank={rank} aborted; summary={summary_words} "
+            f"status slices written: {written[:8]}"
+        )
 
 
 def _check_result(name, mode, tasks, posts, summary, status) -> bool:
@@ -323,13 +343,17 @@ def run_case(platform: str, device_ids: list[int], name: str, mode: int, tasks: 
         worker.close()
 
 
-def run(platform: str = "a5", device_ids: list[int] | None = None, only: str | None = None) -> int:
+def run(
+    platform: str = "a5", device_ids: list[int] | None = None, only: str | None = None, tasks_override: int | None = None
+) -> int:
     if device_ids is None:
         device_ids = [0, 1]
     ok = True
     for name, mode, tasks, posts in CASES:
         if only is not None and name != only:
             continue
+        if tasks_override is not None:
+            tasks = tasks_override
         ok = run_case(platform, device_ids, name, mode, tasks, posts) and ok
     return 0 if ok else 1
 
@@ -348,8 +372,9 @@ def main() -> int:
     parser.add_argument("-p", "--platform", default="a5")
     parser.add_argument("-d", "--device", default="0-1")
     parser.add_argument("-k", "--only", default=None, help="run a single case: chain | parallel | notify")
+    parser.add_argument("-n", "--tasks", type=int, default=None, help="override the chunk count (bisect)")
     args = parser.parse_args()
-    return run(args.platform, parse_device_range(args.device), args.only)
+    return run(args.platform, parse_device_range(args.device), args.only, args.tasks)
 
 
 if __name__ == "__main__":

@@ -48,7 +48,9 @@ constexpr int kScalarPosts = 2;
 constexpr int kScalarTasks = 3;
 
 // Each task reports into its own three-word status slice, so a later task
-// cannot overwrite an earlier task's failure.
+// cannot overwrite an earlier task's failure. The kernel addresses the slice as
+// status + index * 3; slicing the tensor here would need a view per task, and
+// views over a host staging tensor are not a supported path.
 constexpr uint32_t kStatusWordsPerTask = 3;
 // The parallel mode keeps one task id per chunk to hand to the summary; the
 // chain modes only keep the previous one.
@@ -91,7 +93,6 @@ __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const
         return;
     }
     const uint32_t func = mode == kModeNotify ? kFuncNotify : kFuncPosts;
-    const uint32_t status_shape[1] = {kStatusWordsPerTask};
 
     // Chain modes keep exactly one task on the queue; the parallel mode leaves
     // every chunk independent so the scheduler spreads them across AIVs.
@@ -100,9 +101,6 @@ __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const
     uint32_t submitted_count = 0;
 
     for (uint64_t chunk = 0; chunk < tasks; ++chunk) {
-        const uint32_t status_offset[1] = {static_cast<uint32_t>(chunk * kStatusWordsPerTask)};
-        // add_* stores pointers, so the view has to outlive the call: no temporaries.
-        simpler::tmr::Tensor status_slot = status_all.view(status_shape, status_offset);
         CoreTaskArgsWithDeps<> task_args;
         task_args.add_input(send);
         if (mode == kModeNotify) {
@@ -112,7 +110,7 @@ __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const
             task_args.add_inout(recv);
             task_args.add_inout(tput);
         }
-        task_args.add_inout(status_slot);
+        task_args.add_inout(status_all);
         task_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
         task_args.add_scalar(posts);
         task_args.add_scalar(chunk);
@@ -127,17 +125,17 @@ __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const
         }
     }
 
-    const uint32_t summary_status_offset[1] = {static_cast<uint32_t>(tasks * kStatusWordsPerTask)};
-    simpler::tmr::Tensor summary_status_slot = status_all.view(status_shape, summary_status_offset);
     CoreTaskArgsWithDeps<> summary_args;
     summary_args.add_input(recv);
     summary_args.add_input(tput);
     summary_args.add_input(signal);
     summary_args.add_inout(summary);
-    summary_args.add_inout(summary_status_slot);
+    summary_args.add_inout(status_all);
     summary_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     summary_args.add_scalar(posts * tasks);
     summary_args.add_scalar(mode);
+    // The summary reports into the slice after the last chunk.
+    summary_args.add_scalar(tasks);
     if (mode == kModeParallel) {
         for (uint32_t i = 0; i < submitted_count; ++i) {
             summary_args.add_dep_wait(submitted[i]);
