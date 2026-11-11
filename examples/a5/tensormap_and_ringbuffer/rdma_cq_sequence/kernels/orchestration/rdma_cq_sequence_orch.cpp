@@ -111,7 +111,10 @@ __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const
             task_args.add_inout(recv);
             task_args.add_inout(tput);
         }
-        task_args.add_inout(status_all);
+        // A host OUTPUT_EXISTING tensor is a producer-side output, the same way
+        // the demo hands its status word to a task; add_inout would ask the
+        // runtime to stage host data into a device tensor that has none.
+        task_args.add_output(status_all);
         task_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
         task_args.add_scalar(posts);
         task_args.add_scalar(chunk);
@@ -130,8 +133,8 @@ __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const
     summary_args.add_input(recv);
     summary_args.add_input(tput);
     summary_args.add_input(signal);
-    summary_args.add_inout(summary);
-    summary_args.add_inout(status_all);
+    summary_args.add_output(summary);
+    summary_args.add_output(status_all);
     summary_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     summary_args.add_scalar(posts * tasks);
     summary_args.add_scalar(mode);
