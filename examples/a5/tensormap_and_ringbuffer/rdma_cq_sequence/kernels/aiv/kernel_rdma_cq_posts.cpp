@@ -44,7 +44,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     // Each task owns three words; the orchestrator passes the whole tensor and
     // the kernel offsets into its own slice.
-    __gm__ int32_t *status = tensor_data<int32_t>(status_tensor) + static_cast<uint64_t>(task_index) * 3U;
+    __gm__ int32_t *status = tensor_data<int32_t>(status_tensor) + static_cast<uint64_t>(task_index) * kStatusWordsPerTask;
+    mark_entered(status);
     if (!validate_comm(comm_ctx, status)) {
         return;
     }

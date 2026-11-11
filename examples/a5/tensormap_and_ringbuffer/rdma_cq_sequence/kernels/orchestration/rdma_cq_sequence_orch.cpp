@@ -47,11 +47,12 @@ constexpr int kScalarMode = 1;
 constexpr int kScalarPosts = 2;
 constexpr int kScalarTasks = 3;
 
-// Each task reports into its own three-word status slice, so a later task
-// cannot overwrite an earlier task's failure. The kernel addresses the slice as
-// status + index * 3; slicing the tensor here would need a view per task, and
-// views over a host staging tensor are not a supported path.
-constexpr uint32_t kStatusWordsPerTask = 3;
+// Each task reports into its own four-word status slice (status, two details,
+// and a "kernel entered" marker), so a later task cannot overwrite an earlier
+// task's failure. The kernel addresses the slice as status + index * 4; slicing
+// the tensor here would need a view per task, and views over a host staging
+// tensor are not a supported path.
+constexpr uint32_t kStatusWordsPerTask = 4;
 // The parallel mode keeps one task id per chunk to hand to the summary; the
 // chain modes only keep the previous one.
 constexpr uint32_t kMaxParallelTasks = 64;

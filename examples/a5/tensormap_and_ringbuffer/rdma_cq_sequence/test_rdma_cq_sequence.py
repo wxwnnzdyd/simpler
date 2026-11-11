@@ -65,7 +65,7 @@ DTYPE_NBYTES = 4
 SLICE_FLOATS = 64
 POSTS_PER_TASK = 64
 RDMA_DATA_OFFSET_NBYTES = 64 * 4
-STATUS_WORDS_PER_TASK = 3
+STATUS_WORDS_PER_TASK = 4
 SUMMARY_WORDS = 7
 RANK_STRIDE = 1_000_000.0
 
@@ -302,10 +302,12 @@ def _check_result(name, mode, tasks, posts, summary, status) -> bool:
             for idx in range(tasks + 1)
             if rank_status[idx * STATUS_WORDS_PER_TASK] != 0
         ]
+        entered = sum(1 for idx in range(tasks + 1) if rank_status[idx * STATUS_WORDS_PER_TASK + 3] == 0x5A5A5A5A)
         print(
             f"[rdma_cq_sequence] case={name} rank={rank} "
             f"reserve/ready/posted/completed/acked={words[0]}/{words[1]}/{words[2]}/{words[3]}/{words[4]} "
-            f"qpNum={words[5]} cqDepth={words[6]} expectedCqes={expected_cqes}"
+            f"qpNum={words[5]} cqDepth={words[6]} expectedCqes={expected_cqes} "
+            f"kernelsEntered={entered}/{tasks + 1}"
         )
         if bad_slices:
             print(f"[rdma_cq_sequence] case={name} rank={rank} failed tasks: {bad_slices[:4]}")
@@ -346,6 +348,11 @@ def run_case(platform: str, device_ids: list[int], name: str, mode: int, tasks: 
 def run(
     platform: str = "a5", device_ids: list[int] | None = None, only: str | None = None, tasks_override: int | None = None
 ) -> int:
+    if not rdma_workspace_enabled():
+        raise RuntimeError(
+            "rdma_cq_sequence requires the host runtime built with SIMPLER_ENABLE_PTO_RDMA_WORKSPACE=ON; "
+            "without it comm_ctx->workSpace is not an RDMA workspace and every kernel bails out silently."
+        )
     if device_ids is None:
         device_ids = [0, 1]
     ok = True
