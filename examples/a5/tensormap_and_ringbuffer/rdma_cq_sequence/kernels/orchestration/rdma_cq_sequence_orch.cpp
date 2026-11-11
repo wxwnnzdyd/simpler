@@ -101,6 +101,8 @@ __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const
 
     for (uint64_t chunk = 0; chunk < tasks; ++chunk) {
         const uint32_t status_offset[1] = {static_cast<uint32_t>(chunk * kStatusWordsPerTask)};
+        // add_* stores pointers, so the view has to outlive the call: no temporaries.
+        simpler::tmr::Tensor status_slot = status_all.view(status_shape, status_offset);
         CoreTaskArgsWithDeps<> task_args;
         task_args.add_input(send);
         if (mode == kModeNotify) {
@@ -110,7 +112,7 @@ __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const
             task_args.add_inout(recv);
             task_args.add_inout(tput);
         }
-        task_args.add_inout(status_all.view(status_shape, status_offset));
+        task_args.add_inout(status_slot);
         task_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
         task_args.add_scalar(posts);
         task_args.add_scalar(chunk);
@@ -126,12 +128,13 @@ __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const
     }
 
     const uint32_t summary_status_offset[1] = {static_cast<uint32_t>(tasks * kStatusWordsPerTask)};
+    simpler::tmr::Tensor summary_status_slot = status_all.view(status_shape, summary_status_offset);
     CoreTaskArgsWithDeps<> summary_args;
     summary_args.add_input(recv);
     summary_args.add_input(tput);
     summary_args.add_input(signal);
     summary_args.add_inout(summary);
-    summary_args.add_inout(status_all.view(status_shape, summary_status_offset));
+    summary_args.add_inout(summary_status_slot);
     summary_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     summary_args.add_scalar(posts * tasks);
     summary_args.add_scalar(mode);
