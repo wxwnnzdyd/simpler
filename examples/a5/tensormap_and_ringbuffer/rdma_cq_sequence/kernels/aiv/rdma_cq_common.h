@@ -79,6 +79,10 @@ enum class Status : int32_t {
     kRegisterFailed = 4,
     kBadArguments = 5,
     kAckedMismatch = 6,
+    // comm_ctx->workSpace is not an HNS1825 RDMA workspace: the host runtime was
+    // built without SIMPLER_ENABLE_PTO_RDMA_WORKSPACE=ON, or the context belongs
+    // to another engine. Without this check the queue pointers are garbage.
+    kInvalidWorkspace = 7,
     kTgetMismatch = 100,
     kTputMismatch = 200,
     kSignalMismatch = 300,
@@ -125,6 +129,15 @@ inline __aicore__ bool validate_comm(__gm__ CommContext *comm_ctx, __gm__ int32_
     if (comm_ctx == nullptr || comm_ctx->rankNum != 2 || comm_ctx->rankId >= comm_ctx->rankNum ||
         comm_ctx->workSpace == 0 || comm_ctx->windowsIn[comm_ctx->rankId] == 0) {
         set_status(status, Status::kInvalidComm);
+        return false;
+    }
+    // A non-RDMA workspace has a different header; interpreting it as RdmaInfo
+    // reads wild queue pointers, so refuse it here instead of faulting.
+    __gm__ pto::comm::rdma::RdmaInfo *info =
+        reinterpret_cast<__gm__ pto::comm::rdma::RdmaInfo *>(comm_ctx->workSpace);
+    if (!pto::comm::rdma::IsWorkspaceHeaderValid(info) ||
+        info->backend != pto::comm::rdma::RdmaBackend::HNS_1825) {
+        set_status(status, Status::kInvalidWorkspace);
         return false;
     }
     return true;
