@@ -282,7 +282,10 @@ inline __aicore__ bool register_completion_condition(AsyncCtx &ctx, const Comple
     slot->_pad = 0;
     // URMA has no consumer-confirmation ring today; a backend that grows one
     // fills this through the token.
-    slot->ack = token.ack;
+    slot->ack.slot_addr = token.ack.slot_addr;
+    slot->ack.sequence = token.ack.sequence;
+    slot->ack.mask = token.ack.mask;
+    slot->ack.count = token.ack.count;
     *ctx.completion_count = idx + 1;
     return true;
 }
