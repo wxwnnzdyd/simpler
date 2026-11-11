@@ -157,6 +157,10 @@ def build_chip_callable(platform: str) -> ChipCallable:
     )
 
 
+def _align64(nbytes: int) -> int:
+    return (nbytes + 63) // 64 * 64
+
+
 def _send_pattern(rank: int, total_posts: int) -> torch.Tensor:
     """Every post's slice carries its own index, so a misplaced transfer shows."""
     posts = torch.arange(total_posts, dtype=torch.float32).repeat_interleave(SLICE_FLOATS)
@@ -183,8 +187,10 @@ def _run_case_on_worker(
 
     total_posts = tasks * posts
     slice_elems = total_posts * SLICE_FLOATS
-    send_nbytes = slice_elems * DTYPE_NBYTES
-    signal_nbytes = total_posts * DTYPE_NBYTES
+    # A domain buffer's physical size must be 64-byte aligned; the element count
+    # stays exact, the padding is only headroom.
+    send_nbytes = _align64(slice_elems * DTYPE_NBYTES)
+    signal_nbytes = _align64(total_posts * DTYPE_NBYTES)
     status_words = SUMMARY_STATUS_WORDS
     # summary/status are host OUTPUT_EXISTING tensors, not part of the symmetric
     # window. The window itself must be 64-byte aligned and cover every domain
