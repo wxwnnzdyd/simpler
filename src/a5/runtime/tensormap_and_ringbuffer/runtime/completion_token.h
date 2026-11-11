@@ -28,9 +28,14 @@ struct CompletionToken {
     uint32_t expected_value;
     uint32_t engine;
     int32_t completion_type;
+    // RDMA: the ack slot of ack_sequence. Zero for backends that need no
+    // consumer confirmation (SDMA, URMA).
     uint64_t backend_cookie;
-    // Empty for backends whose ring needs no consumer confirmation (SDMA, URMA).
-    CompletionAck ack;
+    // RDMA ack range (ack_begin, ack_sequence], walked with ack_mask.
+    uint32_t ack_sequence;
+    uint32_t ack_begin;
+    uint16_t ack_mask;
+    uint16_t _pad;
 };
 
 enum class CompletionPollState : uint8_t {

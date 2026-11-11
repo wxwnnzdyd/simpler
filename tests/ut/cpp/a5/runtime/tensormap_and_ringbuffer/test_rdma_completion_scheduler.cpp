@@ -101,19 +101,15 @@ TEST(A5RdmaCompletionScheduler, OwnerFlippedRoundReturnsReady) {
 }
 
 // The sender only recycles a CQ slot after the acked prefix passes it, so the
-// consumer has to write the sequence it observed. The record carries one slot
-// address plus the ring mask; the retire must address the rest out of it.
+// consumer has to write the sequence it observed. The record carries the slot
+// address of the last sequence plus the ring mask; the retire must address the
+// rest of the range out of it.
 TEST(A5RdmaCompletionScheduler, RetireConfirmsTheObservedSlot) {
     constexpr uint64_t kRingSlots = 8;
     uint64_t ring[kRingSlots] = {};
 
-    CompletionAck ack{};
-    ack.slot_addr = reinterpret_cast<uint64_t>(&ring[2]);  // sequence 3 -> slot (3 - 1) & 7
-    ack.sequence = 3;
-    ack.mask = kRingSlots - 1;
-    ack.count = 1;
-
-    retire_rdma_hns1825_cqe_record(ack);
+    // sequence 3, ack_begin 2: slot (3 - 1) & 7 = 2
+    retire_rdma_hns1825_cqe_record(reinterpret_cast<uint64_t>(&ring[2]), 3, 2, kRingSlots - 1);
 
     EXPECT_EQ(ring[2], 3U);
     EXPECT_EQ(ring[1], 0U);
@@ -126,21 +122,17 @@ TEST(A5RdmaCompletionScheduler, RetireConfirmsNotifyRangeAcrossTheRingEdge) {
     constexpr uint64_t kRingSlots = 8;
     uint64_t ring[kRingSlots] = {};
 
-    CompletionAck ack{};
-    ack.slot_addr = reinterpret_cast<uint64_t>(&ring[0]);  // sequence 9 -> slot 0
-    ack.sequence = 9;
-    ack.mask = kRingSlots - 1;
-    ack.count = 2;  // sequences 8 and 9 -> slots 7 and 0
-
-    retire_rdma_hns1825_cqe_record(ack);
+    // sequence 9 -> slot 0, ack_begin 7 -> slot 7: the range wraps the edge.
+    retire_rdma_hns1825_cqe_record(reinterpret_cast<uint64_t>(&ring[0]), 9, 7, kRingSlots - 1);
 
     EXPECT_EQ(ring[7], 8U);
     EXPECT_EQ(ring[0], 9U);
 }
 
-TEST(A5RdmaCompletionScheduler, RetireWithoutAckDescriptorWritesNothing) {
+TEST(A5RdmaCompletionScheduler, RetireWithoutAckRangeWritesNothing) {
     uint64_t ring[2] = {};
-    retire_rdma_hns1825_cqe_record(CompletionAck{});
+    retire_rdma_hns1825_cqe_record(0, 0, 0, 0);
+    retire_rdma_hns1825_cqe_record(reinterpret_cast<uint64_t>(&ring[0]), 1, 1, 0);  // empty range
     EXPECT_EQ(ring[0], 0U);
     EXPECT_EQ(ring[1], 0U);
 }

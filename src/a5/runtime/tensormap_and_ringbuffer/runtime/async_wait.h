@@ -54,8 +54,11 @@ struct CompletionCondition {
     uint64_t addr{0};
     uint64_t backend_cookie{0};
     uint32_t expected_value{0};
-    // RDMA only: the CQ slots this completion must confirm back to the sender.
-    CompletionAck ack{};
+    // RDMA only: confirm (ack_begin, ack_sequence] back to the sender; the ack
+    // slot of ack_sequence is in backend_cookie.
+    uint32_t ack_sequence{0};
+    uint32_t ack_begin{0};
+    uint16_t ack_mask{0};
 
     CompletionPollResult test() const;
     void retire();
@@ -99,7 +102,9 @@ inline CompletionPollResult rdma_hns1825_cqe_poll_op(const CompletionCondition &
 }
 
 inline void rdma_hns1825_cqe_retire_op(CompletionCondition &cond) {
-    pto2::rdma_backend::retire_rdma_hns1825_cqe_record(cond.ack);
+    pto2::rdma_backend::retire_rdma_hns1825_cqe_record(
+        cond.backend_cookie, cond.ack_sequence, cond.ack_begin, cond.ack_mask
+    );
 }
 
 inline const CompletionBackendOps *completion_backend_ops_for(int completion_type) {
@@ -306,7 +311,9 @@ struct AsyncWaitList {
                                 reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(msg.addr)) :
                                 nullptr;
         cond.expected_value = msg.expected_value;
-        cond.ack = msg.ack;
+        cond.ack_sequence = msg.ack_sequence;
+        cond.ack_begin = msg.ack_begin;
+        cond.ack_mask = msg.ack_mask;
         entry.waiting_completion_count++;
         return true;
     }

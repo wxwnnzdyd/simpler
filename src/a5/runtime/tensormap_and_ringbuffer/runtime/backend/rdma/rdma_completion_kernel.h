@@ -203,10 +203,8 @@ register_rdma_async_event_status(AsyncCtx &ctx, const PtoAsyncEvent &event, cons
 
     // The completion is only valid while its CQ slot exists, and the sender
     // stops recycling slots at the acked prefix. Record which slots to confirm.
-    const bool ackUsable = record.ack_addr != nullptr && record.ack_mask != 0U && record.sequence != 0ULL &&
-                           record.sequence <= 0xffffffffULL && record.ack_begin < record.sequence &&
-                           record.sequence - record.ack_begin <= 0xffffULL;
-    if (!ackUsable) {
+    if (record.ack_addr == nullptr || record.ack_mask == 0U || record.sequence == 0U ||
+        record.ack_begin >= record.sequence) {
         defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
         return RdmaEventRegistrationResult::INVALID_EVENT;
     }
@@ -216,13 +214,11 @@ register_rdma_async_event_status(AsyncCtx &ctx, const PtoAsyncEvent &event, cons
         static_cast<uint32_t>(record.expected),
         COMPLETION_ENGINE_ROCE,
         COMPLETION_TYPE_RDMA_HNS1825_CQE,
+        reinterpret_cast<uint64_t>(record.ack_addr),
+        record.sequence,
+        record.ack_begin,
+        record.ack_mask,
         0,
-        CompletionAck{
-            reinterpret_cast<uint64_t>(record.ack_addr),
-            static_cast<uint32_t>(record.sequence),
-            record.ack_mask,
-            static_cast<uint16_t>(record.sequence - record.ack_begin),
-        },
     };
     if (!register_completion_condition(ctx, token)) {
         defer_error(ctx, SIMPLER_ERROR_ASYNC_REGISTRATION_FAILED);

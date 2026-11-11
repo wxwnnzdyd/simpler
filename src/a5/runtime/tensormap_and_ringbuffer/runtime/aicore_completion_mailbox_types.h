@@ -38,19 +38,6 @@ inline constexpr int32_t MAX_COMPLETIONS_PER_TASK = 64;
 #define COMPLETION_TYPE_URMA_CQE_RECORD 2
 #define COMPLETION_TYPE_RDMA_HNS1825_CQE 3
 
-// Confirmation a ring-backed completion owes its sender. RDMA publishes the CQ
-// consumer index from the acked prefix, so the consumer that observed a
-// completion must write (sequence - count, sequence] into the ack ring before
-// the sender may recycle those slots. `slot_addr` names the ack slot of
-// `sequence`; with `mask` the whole ring addresses back out of it, so one
-// pointer is enough.
-struct CompletionAck {
-    uint64_t slot_addr;
-    uint32_t sequence;
-    uint16_t mask;
-    uint16_t count;
-};
-
 // DeferredCompletionEntry / DeferredCompletionSlab back the per-task scratch
 // area that AICore writes into to record "this completion has to be observed
 // before the task can retire." The FIN-handling scheduler thread reads the
@@ -61,16 +48,23 @@ struct CompletionAck {
 
 struct DeferredCompletionEntry {
     uint64_t addr;
+    // RDMA: the ack slot of ack_sequence (the completion's last CQ slot). The
+    // consumer writes ack_sequence there so the sender may recycle the slot;
+    // backends whose completion is a monotonic counter leave this zero.
     uint64_t backend_cookie;
     uint32_t expected_value;
     uint32_t engine;
     int32_t completion_type;
-    uint32_t _pad;
-    CompletionAck ack;
+    // RDMA ack range: the consumer confirms (ack_begin, ack_sequence], walking
+    // the CQ ring with ack_mask = depth - 1. A notify post covers two slots;
+    // everything else covers one and leaves ack_begin at ack_sequence - 1.
+    uint32_t ack_sequence;
+    uint32_t ack_begin;
+    uint16_t ack_mask;
+    uint16_t _pad;
 };
 
-static_assert(sizeof(CompletionAck) == 16, "CompletionAck layout drift");
-static_assert(sizeof(DeferredCompletionEntry) == 48, "DeferredCompletionEntry layout drift");
+static_assert(sizeof(DeferredCompletionEntry) == 40, "DeferredCompletionEntry layout drift");
 
 struct alignas(CHIP_ALIGN_SIZE) DeferredCompletionSlab {
     volatile uint32_t count;

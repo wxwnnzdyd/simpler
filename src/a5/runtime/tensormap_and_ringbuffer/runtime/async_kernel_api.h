@@ -135,10 +135,9 @@ inline __aicore__ bool register_completion_condition(AsyncCtx &ctx, const Comple
     slot->engine = token.engine;
     slot->completion_type = token.completion_type;
     slot->_pad = 0;
-    slot->ack.slot_addr = token.ack.slot_addr;
-    slot->ack.sequence = token.ack.sequence;
-    slot->ack.mask = token.ack.mask;
-    slot->ack.count = token.ack.count;
+    slot->ack_sequence = token.ack_sequence;
+    slot->ack_begin = token.ack_begin;
+    slot->ack_mask = token.ack_mask;
     *ctx.completion_count = idx + 1;
     return true;
 }

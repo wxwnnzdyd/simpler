@@ -130,12 +130,9 @@ void SchedulerContext::complete_slot_task(
             const TaskId token = slot_state.task->task_id;
             for (uint32_t i = 0; i < cond_count; ++i) {
                 volatile DeferredCompletionEntry *e = &deferred_slab->entries[i];
-                // The slab is volatile (AICore writes, AICPU reads). The scalar
-                // fields below convert by value already; the ack descriptor is a
-                // struct, so copy it field by field before taking its address.
-                const CompletionAck ack{e->ack.slot_addr, e->ack.sequence, e->ack.mask, e->ack.count};
                 while (!mailbox->try_push_condition(
-                    token, e->addr, e->backend_cookie, e->expected_value, e->engine, e->completion_type, ack
+                    token, e->addr, e->backend_cookie, e->expected_value, e->engine, e->completion_type,
+                    e->ack_sequence, e->ack_begin, e->ack_mask
                 )) {
                     sched_->async_wait_list.mpsc_skipped_count.fetch_add(1, std::memory_order_relaxed);
                     SPIN_WAIT_HINT();

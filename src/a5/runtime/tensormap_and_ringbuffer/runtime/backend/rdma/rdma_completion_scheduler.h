@@ -60,20 +60,22 @@ inline CompletionPollResult poll_rdma_hns1825_cqe_record(uint64_t cqe_addr, uint
 // that this consumer has observed them: ascending, absolute sequence values, one
 // 64-bit slot per CQE, exactly what pto-isa's AckRdmaCqeRange writes.
 //
-// The ack ring is a separate allocation, so the base is reconstructed from the
-// last slot and the ring mask; this keeps the record down to one pointer.
-inline void retire_rdma_hns1825_cqe_record(const CompletionAck &ack) {
-    if (ack.slot_addr == 0U || ack.sequence == 0U || ack.mask == 0U || ack.count == 0U) {
+// `ack_addr` names the slot of `sequence`; the ring is a separate allocation, so
+// its base is reconstructed from that slot and the ring mask. One pointer is
+// therefore enough to address every slot in the range.
+inline void retire_rdma_hns1825_cqe_record(
+    uint64_t ack_addr, uint32_t sequence, uint32_t ack_begin, uint16_t ack_mask
+) {
+    if (ack_addr == 0U || sequence == 0U || ack_mask == 0U || ack_begin >= sequence) {
         return;
     }
-    const uint64_t last = ack.sequence;
-    const uint64_t first = last + 1U - ack.count;
-    const uint64_t base = ack.slot_addr - ((last - 1U) & ack.mask) * sizeof(uint64_t);
-    for (uint64_t sequence = first; sequence <= last; ++sequence) {
+    const uint64_t last = sequence;
+    const uint64_t base = ack_addr - ((last - 1U) & ack_mask) * sizeof(uint64_t);
+    for (uint64_t slot_sequence = static_cast<uint64_t>(ack_begin) + 1U; slot_sequence <= last; ++slot_sequence) {
         auto *slot = reinterpret_cast<volatile uint64_t *>(
-            static_cast<uintptr_t>(base + ((sequence - 1U) & ack.mask) * sizeof(uint64_t))
+            static_cast<uintptr_t>(base + ((slot_sequence - 1U) & ack_mask) * sizeof(uint64_t))
         );
-        __atomic_store_n(slot, sequence, __ATOMIC_RELEASE);
+        __atomic_store_n(slot, slot_sequence, __ATOMIC_RELEASE);
         cache_flush_range(reinterpret_cast<const void *>(cache_line(slot)), CHIP_ALIGN_SIZE);
     }
 }

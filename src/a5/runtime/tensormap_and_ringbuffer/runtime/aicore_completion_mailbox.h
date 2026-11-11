@@ -45,7 +45,7 @@ static_assert(
 #define MSG_KIND_CONDITION 0u
 #define MSG_KIND_TASK_NORMAL_DONE 1u
 
-struct AICoreCompletionMailboxMessage {
+struct alignas(CHIP_ALIGN_SIZE) AICoreCompletionMailboxMessage {
     // Per-slot ready flag. Producer publishes `tail+1` after filling the rest
     // of the slot with a release store; consumer waits for the matching seq
     // value with an acquire load. The release-acquire pair publishes all
@@ -56,14 +56,18 @@ struct AICoreCompletionMailboxMessage {
     // TASK_NORMAL_DONE: ChipTaskSlotState pointer carried over to the consumer
     //   so it can finalize the AsyncWaitEntry.slot_state binding.
     uint64_t addr;
+    // CONDITION: RDMA puts the ack slot of ack_sequence here; other backends
+    // leave it zero.
     uint64_t backend_cookie;
     uint32_t expected_value;
     uint32_t engine;
     int32_t completion_type;
     uint32_t kind;
-    // RDMA ack descriptor flattened from DeferredCompletionEntry.ack; zero for
-    // every backend that does not confirm slots.
-    CompletionAck ack;
+    // RDMA ack range flattened from DeferredCompletionEntry; zero elsewhere.
+    uint32_t ack_sequence;
+    uint32_t ack_begin;
+    uint16_t ack_mask;
+    uint16_t _pad;
 };
 
 static_assert(sizeof(AICoreCompletionMailboxMessage) == CHIP_ALIGN_SIZE, "AICoreCompletionMailboxMessage layout drift");
@@ -87,7 +91,9 @@ struct AICoreCompletionMsgView {
     uint32_t engine{0};
     int32_t completion_type{0};
     uint32_t kind{0};
-    CompletionAck ack{};
+    uint32_t ack_sequence{0};
+    uint32_t ack_begin{0};
+    uint16_t ack_mask{0};
 };
 
 struct AICoreCompletionMailbox {
@@ -121,12 +127,12 @@ struct AICoreCompletionMailbox {
     bool try_push_condition(
         TaskId task_token, uint64_t addr, uint32_t expected_value, uint32_t engine, int32_t completion_type
     ) {
-        return try_push_condition(task_token, addr, 0, expected_value, engine, completion_type, CompletionAck{});
+        return try_push_condition(task_token, addr, 0, expected_value, engine, completion_type, 0, 0, 0);
     }
 
     bool try_push_condition(
         TaskId task_token, uint64_t addr, uint64_t backend_cookie, uint32_t expected_value, uint32_t engine,
-        int32_t completion_type, const CompletionAck &ack
+        int32_t completion_type, uint32_t ack_sequence, uint32_t ack_begin, uint16_t ack_mask
     ) {
         while (true) {
             uint64_t h = head.load(std::memory_order_relaxed);
@@ -142,7 +148,9 @@ struct AICoreCompletionMailbox {
                 slot->engine = engine;
                 slot->completion_type = completion_type;
                 slot->kind = MSG_KIND_CONDITION;
-                slot->ack = ack;
+                slot->ack_sequence = ack_sequence;
+                slot->ack_begin = ack_begin;
+                slot->ack_mask = ack_mask;
                 slot->seq.store(new_head, std::memory_order_release);
                 return true;
             }
@@ -168,7 +176,9 @@ struct AICoreCompletionMailbox {
                 slot->engine = 0;
                 slot->completion_type = 0;
                 slot->kind = MSG_KIND_TASK_NORMAL_DONE;
-                slot->ack = CompletionAck{};
+                slot->ack_sequence = 0;
+                slot->ack_begin = 0;
+                slot->ack_mask = 0;
                 slot->seq.store(new_head, std::memory_order_release);
                 return true;
             }
@@ -194,7 +204,9 @@ struct AICoreCompletionMailbox {
         out.engine = slot->engine;
         out.completion_type = slot->completion_type;
         out.kind = slot->kind;
-        out.ack = slot->ack;
+        out.ack_sequence = slot->ack_sequence;
+        out.ack_begin = slot->ack_begin;
+        out.ack_mask = slot->ack_mask;
         tail.store(t + 1, std::memory_order_release);
         return true;
     }
