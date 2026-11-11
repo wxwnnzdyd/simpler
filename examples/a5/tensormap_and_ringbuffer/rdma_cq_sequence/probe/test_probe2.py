@@ -159,7 +159,13 @@ def run(platform: str, device_ids: list[int]) -> int:
 
     try:
         worker.init()
-        bufs.extend([[worker.create_buffer(SLICE_BYTES) for _ in range(nranks)] for _ in range(4)])
+        # One row per domain buffer, each sized like the buffer it feeds.
+        bufs.extend(
+            [
+                [worker.create_buffer(size) for _ in range(nranks)]
+                for size in (SLICE_BYTES, SLICE_BYTES, SLICE_BYTES, SIGNAL_BYTES)
+            ]
+        )
         worker.run(orch_fn, args=None, config=CallConfig())
     finally:
         for row in bufs:
