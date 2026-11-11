@@ -32,6 +32,8 @@ constexpr int kArgStatus = 4;
 constexpr int kArgCommCtx = 5;
 constexpr int kArgTotalPosts = 6;
 constexpr int kArgMode = 7;
+constexpr int kArgRawTasks = 8;
+constexpr int kArgRawPosts = 9;
 
 // 0: chain / parallel posts (TPUT on even posts, TGET on odd ones).
 // 1: notify posts (payload + signal per post).
@@ -67,6 +69,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[kArgCommCtx]);
     const uint32_t total_posts = static_cast<uint32_t>(args[kArgTotalPosts]);
     const uint32_t mode = static_cast<uint32_t>(args[kArgMode]);
+    const uint32_t raw_tasks = static_cast<uint32_t>(args[kArgRawTasks]);
+    const uint32_t raw_posts = static_cast<uint32_t>(args[kArgRawPosts]);
 
     __gm__ int32_t *status = tensor_data<int32_t>(status_tensor);
     mark_entered(status);
@@ -128,6 +132,9 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     summary[kSummaryAcked] = static_cast<int64_t>(state->ackedHead);
     summary[kSummaryQpNum] = static_cast<int64_t>(info->qpNum);
     summary[kSummaryCqDepth] = static_cast<int64_t>(cq->depth);
+    summary[kSummaryRawTasks] = static_cast<int64_t>(raw_tasks);
+    summary[kSummaryRawPosts] = static_cast<int64_t>(raw_posts);
+    summary[kSummaryMode] = static_cast<int64_t>(mode);
     pto2::detail::defer_flush_range(summary, kSummaryWords * sizeof(int64_t));
 
     if (static_cast<uint64_t>(state->postedHead) != expected_acked ||

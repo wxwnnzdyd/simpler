@@ -65,7 +65,10 @@ enum SummaryWord : uint32_t {
     kSummaryAcked = 4,
     kSummaryQpNum = 5,
     kSummaryCqDepth = 6,
-    kSummaryWords = 7,
+    kSummaryRawTasks = 7,
+    kSummaryRawPosts = 8,
+    kSummaryMode = 9,
+    kSummaryWords = 10,
 };
 
 enum class Status : int32_t {

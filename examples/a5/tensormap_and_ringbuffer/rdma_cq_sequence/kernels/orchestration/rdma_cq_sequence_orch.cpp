@@ -98,10 +98,9 @@ __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const
         "rdma_cq_sequence: mode=%llu tasks=%llu posts=%llu", static_cast<unsigned long long>(mode),
         static_cast<unsigned long long>(tasks), static_cast<unsigned long long>(posts)
     );
-    if (tasks == 0 || tasks > task_limit) {
-        LOG_ERROR("rdma_cq_sequence: task count out of range, bailing out");
-        return;
-    }
+    // Clamp instead of returning: an out-of-range scalar must still leave the
+    // summary task running so it can report the scalars it actually received.
+    const uint64_t chunks = tasks > task_limit ? task_limit : tasks;
     const uint32_t func = mode == kModeNotify ? kFuncNotify : kFuncPosts;
 
     // Chain modes keep exactly one task on the queue; the parallel mode leaves
@@ -110,7 +109,7 @@ __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const
     TaskId submitted[kMaxParallelTasks];
     uint32_t submitted_count = 0;
 
-    for (uint64_t chunk = 0; chunk < tasks; ++chunk) {
+    for (uint64_t chunk = 0; chunk < chunks; ++chunk) {
         CoreTaskArgsWithDeps<> task_args;
         task_args.add_input(send);
         if (mode == kModeNotify) {
@@ -152,8 +151,11 @@ __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const
     summary_args.add_output(summary);
     summary_args.add_output(status_all);
     summary_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
-    summary_args.add_scalar(posts * tasks);
+    summary_args.add_scalar(posts * chunks);
     summary_args.add_scalar(mode);
+    // Echo the raw scalars so a mis-wired argument shows up in the summary.
+    summary_args.add_scalar(tasks);
+    summary_args.add_scalar(posts);
     if (mode == kModeParallel) {
         for (uint32_t i = 0; i < submitted_count; ++i) {
             summary_args.add_dep_wait(submitted[i]);

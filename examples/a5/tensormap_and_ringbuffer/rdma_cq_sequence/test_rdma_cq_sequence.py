@@ -66,7 +66,7 @@ SLICE_FLOATS = 64
 POSTS_PER_TASK = 64
 RDMA_DATA_OFFSET_NBYTES = 64 * 4
 SUMMARY_STATUS_WORDS = 4
-SUMMARY_WORDS = 7
+SUMMARY_WORDS = 10
 RANK_STRIDE = 1_000_000.0
 
 MODE_CHAIN = 0
@@ -119,7 +119,7 @@ def build_chip_callable(platform: str) -> ChipCallable:
             2,
             "kernels/aiv/kernel_rdma_cq_summary.cpp",
             [ArgDirection.IN, ArgDirection.IN, ArgDirection.IN, ArgDirection.INOUT, ArgDirection.INOUT]
-            + [ArgDirection.IN] * 3,
+            + [ArgDirection.IN] * 5,
         ),
     ]:
         kernel = kc.compile_incore(
@@ -298,7 +298,7 @@ def _check_result(name, mode, tasks, posts, summary, status) -> bool:
             f"[rdma_cq_sequence] case={name} rank={rank} "
             f"reserve/ready/posted/completed/acked={words[0]}/{words[1]}/{words[2]}/{words[3]}/{words[4]} "
             f"qpNum={words[5]} cqDepth={words[6]} expectedCqes={expected_cqes} "
-            f"summaryEntered={entered}"
+            f"summaryEntered={entered} orchSawTasks={words[7]} orchSawPosts={words[8]} orchSawMode={words[9]}"
         )
         if bad_slices:
             print(f"[rdma_cq_sequence] case={name} rank={rank} failed tasks: {bad_slices[:4]}")
