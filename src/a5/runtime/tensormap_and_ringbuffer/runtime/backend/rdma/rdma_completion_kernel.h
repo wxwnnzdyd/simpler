@@ -133,7 +133,7 @@ submit_rdma_request_status(AsyncCtx &ctx, RdmaRequestDescriptor<DstTensor, SrcTe
     pto::comm::AsyncSession session;
     // AICPU observes the completion, so the sender must not recycle the CQ slot
     // on its own: build a deferred session and let the retire below confirm it.
-    const bool deferred = pto2::detail::async_ctx_is_deferred(ctx);
+    const bool deferred = async_ctx_is_deferred(ctx);
     if (!pto::comm::BuildAsyncSession<pto::comm::DmaEngine::RDMA>(
             desc.scratch, desc.workspace, desc.local_rank, session, desc.sync_id, 0, deferred
         )) {
