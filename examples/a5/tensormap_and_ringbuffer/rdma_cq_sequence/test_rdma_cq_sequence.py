@@ -65,7 +65,7 @@ DTYPE_NBYTES = 4
 SLICE_FLOATS = 64
 POSTS_PER_TASK = 64
 RDMA_DATA_OFFSET_NBYTES = 64 * 4
-STATUS_WORDS_PER_TASK = 4
+SUMMARY_STATUS_WORDS = 4
 SUMMARY_WORDS = 7
 RANK_STRIDE = 1_000_000.0
 
@@ -106,20 +106,20 @@ def build_chip_callable(platform: str) -> ChipCallable:
         (
             0,
             "kernels/aiv/kernel_rdma_cq_posts.cpp",
-            [ArgDirection.IN, ArgDirection.INOUT, ArgDirection.INOUT, ArgDirection.INOUT] + [ArgDirection.IN] * 3,
+            [ArgDirection.IN, ArgDirection.INOUT, ArgDirection.INOUT] + [ArgDirection.IN] * 3,
         ),
         # notify: send, tput, signal, status, ctx, posts, task_index
         (
             1,
             "kernels/aiv/kernel_rdma_cq_notify.cpp",
-            [ArgDirection.IN, ArgDirection.INOUT, ArgDirection.INOUT, ArgDirection.INOUT] + [ArgDirection.IN] * 3,
+            [ArgDirection.IN, ArgDirection.INOUT, ArgDirection.INOUT] + [ArgDirection.IN] * 3,
         ),
         # summary: recv, tput, signal, summary, status, ctx, total_posts, mode
         (
             2,
             "kernels/aiv/kernel_rdma_cq_summary.cpp",
             [ArgDirection.IN, ArgDirection.IN, ArgDirection.IN, ArgDirection.INOUT, ArgDirection.INOUT]
-            + [ArgDirection.IN] * 4,
+            + [ArgDirection.IN] * 3,
         ),
     ]:
         kernel = kc.compile_incore(
@@ -185,7 +185,7 @@ def _run_case_on_worker(
     slice_elems = total_posts * SLICE_FLOATS
     send_nbytes = slice_elems * DTYPE_NBYTES
     signal_nbytes = total_posts * DTYPE_NBYTES
-    status_words = (tasks + 1) * STATUS_WORDS_PER_TASK
+    status_words = SUMMARY_STATUS_WORDS
     # summary/status are host OUTPUT_EXISTING tensors, not part of the symmetric
     # window. The window itself must be 64-byte aligned and cover every domain
     # buffer (the reserved prefix included).
@@ -279,14 +279,9 @@ def _dump_status(name, tasks, status, summary) -> None:
     for rank in range(len(status)):
         words = [int(x) for x in status[rank].tolist()]
         summary_words = [int(x) for x in summary[rank].tolist()]
-        written = [
-            (idx, words[idx * STATUS_WORDS_PER_TASK : (idx + 1) * STATUS_WORDS_PER_TASK])
-            for idx in range(tasks + 1)
-            if words[idx * STATUS_WORDS_PER_TASK] != -1
-        ]
         print(
             f"[rdma_cq_sequence] case={name} rank={rank} aborted; summary={summary_words} "
-            f"status slices written: {written[:8]}"
+            f"status={words[:SUMMARY_STATUS_WORDS]}"
         )
 
 
@@ -297,17 +292,13 @@ def _check_result(name, mode, tasks, posts, summary, status) -> bool:
     for rank in range(len(summary)):
         words = [int(x) for x in summary[rank].tolist()]
         rank_status = [int(x) for x in status[rank].tolist()]
-        bad_slices = [
-            (idx, rank_status[idx * STATUS_WORDS_PER_TASK : (idx + 1) * STATUS_WORDS_PER_TASK])
-            for idx in range(tasks + 1)
-            if rank_status[idx * STATUS_WORDS_PER_TASK] != 0
-        ]
-        entered = sum(1 for idx in range(tasks + 1) if rank_status[idx * STATUS_WORDS_PER_TASK + 3] == 0x5A5A5A5A)
+        bad_slices = [] if rank_status[0] == 0 else [(0, rank_status[:SUMMARY_STATUS_WORDS])]
+        entered = 1 if rank_status[3] == 0x5A5A5A5A else 0
         print(
             f"[rdma_cq_sequence] case={name} rank={rank} "
             f"reserve/ready/posted/completed/acked={words[0]}/{words[1]}/{words[2]}/{words[3]}/{words[4]} "
             f"qpNum={words[5]} cqDepth={words[6]} expectedCqes={expected_cqes} "
-            f"kernelsEntered={entered}/{tasks + 1}"
+            f"summaryEntered={entered}"
         )
         if bad_slices:
             print(f"[rdma_cq_sequence] case={name} rank={rank} failed tasks: {bad_slices[:4]}")

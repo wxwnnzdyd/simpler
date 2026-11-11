@@ -32,7 +32,6 @@ constexpr int kArgStatus = 4;
 constexpr int kArgCommCtx = 5;
 constexpr int kArgTotalPosts = 6;
 constexpr int kArgMode = 7;
-constexpr int kArgStatusIndex = 8;
 
 // 0: chain / parallel posts (TPUT on even posts, TGET on odd ones).
 // 1: notify posts (payload + signal per post).
@@ -68,10 +67,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[kArgCommCtx]);
     const uint32_t total_posts = static_cast<uint32_t>(args[kArgTotalPosts]);
     const uint32_t mode = static_cast<uint32_t>(args[kArgMode]);
-    const uint32_t status_index = static_cast<uint32_t>(args[kArgStatusIndex]);
 
-    __gm__ int32_t *status =
-        tensor_data<int32_t>(status_tensor) + static_cast<uint64_t>(status_index) * kStatusWordsPerTask;
+    __gm__ int32_t *status = tensor_data<int32_t>(status_tensor);
     mark_entered(status);
     if (!validate_comm(comm_ctx, status)) {
         return;

@@ -79,10 +79,9 @@ __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const
         "rdma_cq_sequence: orch entered tensors=%d scalars=%d", static_cast<int>(orch_args.tensor_count()),
         static_cast<int>(orch_args.scalar_count())
     );
-    if (orch_args.tensor_count() != 6 || orch_args.scalar_count() != 4) {
-        LOG_ERROR("rdma_cq_sequence: unexpected arg counts, bailing out");
-        return;
-    }
+    // No fatal arg check: the counts are logged above, and a mismatch must not
+    // silently drop every task (device logs are gated by the CANN log level).
+
 
     const simpler::tmr::Tensor &send = orch_args.tensor(kTensorSend).ref();
     const simpler::tmr::Tensor &recv = orch_args.tensor(kTensorRecv).ref();
@@ -121,10 +120,6 @@ __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const
             task_args.add_inout(recv);
             task_args.add_inout(tput);
         }
-        // A host OUTPUT_EXISTING tensor is a producer-side output, the same way
-        // the demo hands its status word to a task; add_inout would ask the
-        // runtime to stage host data into a device tensor that has none.
-        task_args.add_output(status_all);
         task_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
         task_args.add_scalar(posts);
         task_args.add_scalar(chunk);
@@ -159,8 +154,6 @@ __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const
     summary_args.add_scalar(reinterpret_cast<uint64_t>(comm_ctx));
     summary_args.add_scalar(posts * tasks);
     summary_args.add_scalar(mode);
-    // The summary reports into the slice after the last chunk.
-    summary_args.add_scalar(tasks);
     if (mode == kModeParallel) {
         for (uint32_t i = 0; i < submitted_count; ++i) {
             summary_args.add_dep_wait(submitted[i]);

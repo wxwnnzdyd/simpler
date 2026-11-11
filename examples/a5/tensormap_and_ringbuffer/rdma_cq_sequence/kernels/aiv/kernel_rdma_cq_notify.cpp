@@ -24,10 +24,9 @@ using namespace rdma_cq_sequence;
 constexpr int kArgSend = 0;
 constexpr int kArgTput = 1;
 constexpr int kArgSignal = 2;
-constexpr int kArgStatus = 3;
-constexpr int kArgCommCtx = 4;
-constexpr int kArgPosts = 5;
-constexpr int kArgTaskIndex = 6;
+constexpr int kArgCommCtx = 3;
+constexpr int kArgPosts = 4;
+constexpr int kArgTaskIndex = 5;
 
 constexpr uint32_t kNotifySyncId = 2;
 
@@ -37,18 +36,16 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     __gm__ Tensor *send_tensor = reinterpret_cast<__gm__ Tensor *>(args[kArgSend]);
     __gm__ Tensor *tput_tensor = reinterpret_cast<__gm__ Tensor *>(args[kArgTput]);
     __gm__ Tensor *signal_tensor = reinterpret_cast<__gm__ Tensor *>(args[kArgSignal]);
-    __gm__ Tensor *status_tensor = reinterpret_cast<__gm__ Tensor *>(args[kArgStatus]);
     __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[kArgCommCtx]);
     const uint32_t posts = static_cast<uint32_t>(args[kArgPosts]);
     const uint32_t task_index = static_cast<uint32_t>(args[kArgTaskIndex]);
 
-    __gm__ int32_t *status = tensor_data<int32_t>(status_tensor) + static_cast<uint64_t>(task_index) * kStatusWordsPerTask;
-    mark_entered(status);
-    if (!validate_comm(comm_ctx, status)) {
+    // The summary task owns the only host status tensor; a post task cannot write
+    // one without becoming a second producer of the same tensor.
+    if (!validate_comm(comm_ctx, nullptr)) {
         return;
     }
     if (posts == 0U || posts > 64U) {
-        set_status(status, Status::kBadArguments, static_cast<int32_t>(posts));
         return;
     }
 
@@ -64,7 +61,6 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
             scratch, reinterpret_cast<__gm__ uint8_t *>(comm_ctx->workSpace), comm_ctx->rankId, session,
             kNotifySyncId, 0, /*deferred=*/true
         )) {
-        set_status(status, Status::kBadArguments, -1);
         return;
     }
 
@@ -83,12 +79,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         );
         const auto registered = pto2::detail::register_rdma_async_event_status(async_ctx, event, session);
         if (registered != pto2::detail::RdmaEventRegistrationResult::OK) {
-            set_status(
-                status, Status::kRegisterFailed, static_cast<int32_t>(registered), static_cast<int32_t>(post)
-            );
             return;
         }
     }
 
-    set_status(status, Status::kOk, static_cast<int32_t>(posts));
 }

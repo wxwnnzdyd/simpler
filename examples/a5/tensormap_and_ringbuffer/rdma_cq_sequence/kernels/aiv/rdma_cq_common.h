@@ -88,12 +88,20 @@ enum class Status : int32_t {
 constexpr int32_t kStatusWordsPerTask = 4;
 constexpr int32_t kKernelEntered = 0x5a5a5a5a;
 
+// A task that owns no status slice passes nullptr: the summary is the only
+// writer of the host tensor, so post tasks report failures by not posting.
 inline __aicore__ void mark_entered(__gm__ int32_t *status) {
+    if (status == nullptr) {
+        return;
+    }
     status[3] = kKernelEntered;
     pto2::detail::defer_flush_range(status, kStatusWordsPerTask * sizeof(int32_t));
 }
 
 inline __aicore__ void set_status(__gm__ int32_t *status, Status code, int32_t detail0 = 0, int32_t detail1 = 0) {
+    if (status == nullptr) {
+        return;
+    }
     status[0] = static_cast<int32_t>(code);
     status[1] = detail0;
     status[2] = detail1;
