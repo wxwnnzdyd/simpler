@@ -173,7 +173,7 @@ inline __aicore__ pto2::rdma_backend::RdmaSubmitStatus submit_post(
     __gm__ float *recv_slice = local_recv + static_cast<uint64_t>(post) * kSliceFloats;
     if ((post & 1U) == 0U) {
         return pto2::rdma_backend::submit_rdma_request_status(
-            async_ctx, pto2::rdma_backend::RdmaTput(
+            async_ctx, RdmaTput(
                            global_float(remote_slice(comm_ctx, peer, local_tput, post), kSliceFloats),
                            global_float(send_slice, kSliceFloats), scratch, workspace, peer, comm_ctx->rankId,
                            sync_id
@@ -181,7 +181,7 @@ inline __aicore__ pto2::rdma_backend::RdmaSubmitStatus submit_post(
         );
     }
     return pto2::rdma_backend::submit_rdma_request_status(
-        async_ctx, pto2::rdma_backend::RdmaTget(
+        async_ctx, RdmaTget(
                        global_float(recv_slice, kSliceFloats),
                        global_float(remote_slice(comm_ctx, peer, local_send, post), kSliceFloats), scratch, workspace,
                        peer, comm_ctx->rankId, sync_id
