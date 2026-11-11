@@ -25,6 +25,7 @@ from simpler.worker import Worker
 
 from simpler_setup.elf_parser import extract_text_section
 from simpler_setup.kernel_compiler import KernelCompiler
+from simpler_setup.pto_isa import ensure_pto_isa_root
 from simpler_setup.torch_interop import make_tensor_arg
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -35,11 +36,12 @@ def build_chip_callable(platform: str) -> ChipCallable:
     kc = KernelCompiler(platform=platform)
     runtime = "tensormap_and_ringbuffer"
     extra_includes = list(kc.get_orchestration_include_dirs(runtime)) + [str(kc.project_root / "src" / "common")]
+    pto_isa_root = ensure_pto_isa_root()
 
     kernel = kc.compile_incore(
         source_path=os.path.join(HERE, "probe_kernel.cpp"),
         core_type="aiv",
-        pto_isa_root=None,
+        pto_isa_root=pto_isa_root,
         extra_include_dirs=extra_includes,
     )
     if not platform.endswith("sim"):
