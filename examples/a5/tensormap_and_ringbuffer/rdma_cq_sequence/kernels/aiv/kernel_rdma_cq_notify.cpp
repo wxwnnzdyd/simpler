@@ -71,10 +71,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     for (uint32_t i = 0; i < posts; ++i) {
         const uint32_t post = base_post + i;
         __gm__ float *send_slice = send + static_cast<uint64_t>(post) * kSliceFloats;
+        // TPUT_ASYNC_NOTIFY takes non-const lvalue references, so the tensors have
+        // to be named locals rather than temporaries.
+        auto remote_tput_slice = global_float(remote_slice(comm_ctx, peer, tput, post), kSliceFloats);
+        auto local_send_slice = global_float(send_slice, kSliceFloats);
         pto::comm::Signal remote_signal(signal + post);
         auto event = pto::comm::TPUT_ASYNC_NOTIFY<pto::comm::DmaEngine::RDMA>(
-            global_float(remote_slice(comm_ctx, peer, tput, post), kSliceFloats),
-            global_float(send_slice, kSliceFloats), remote_signal, static_cast<int32_t>(post),
+            remote_tput_slice, local_send_slice, remote_signal, static_cast<int32_t>(post),
             pto::comm::NotifyOp::Set, session, peer
         );
         const auto registered = pto2::detail::register_rdma_async_event_status(async_ctx, event, session);
