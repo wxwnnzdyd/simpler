@@ -73,8 +73,14 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
 }
 
 __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const ChipTaskArgs &orch_args) {
+    // Deliberately unconditional: the first question when nothing runs is
+    // whether this entry was reached at all, and with which arg shape.
+    LOG_ERROR(
+        "rdma_cq_sequence: orch entered tensors=%d scalars=%d", static_cast<int>(orch_args.tensor_count()),
+        static_cast<int>(orch_args.scalar_count())
+    );
     if (orch_args.tensor_count() != 6 || orch_args.scalar_count() != 4) {
-        LOG_ERROR("rdma_cq_sequence: expected 6 tensors and 4 scalars");
+        LOG_ERROR("rdma_cq_sequence: unexpected arg counts, bailing out");
         return;
     }
 
@@ -89,8 +95,12 @@ __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const
     const uint64_t posts = orch_args.scalar<uint64_t>(kScalarPosts);
     const uint64_t tasks = orch_args.scalar<uint64_t>(kScalarTasks);
     const uint32_t task_limit = mode == kModeParallel ? kMaxParallelTasks : kMaxChainTasks;
+    LOG_ERROR(
+        "rdma_cq_sequence: mode=%llu tasks=%llu posts=%llu", static_cast<unsigned long long>(mode),
+        static_cast<unsigned long long>(tasks), static_cast<unsigned long long>(posts)
+    );
     if (tasks == 0 || tasks > task_limit) {
-        LOG_ERROR("rdma_cq_sequence: task count out of range");
+        LOG_ERROR("rdma_cq_sequence: task count out of range, bailing out");
         return;
     }
     const uint32_t func = mode == kModeNotify ? kFuncNotify : kFuncPosts;
@@ -122,12 +132,23 @@ __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const
             task_args.add_dep_wait(previous);
         }
         const TaskId task = rt_submit_aiv_task(func, task_args).task_id();
+        if (chunk < 4) {
+            LOG_ERROR(
+                "rdma_cq_sequence: submitted chunk=%llu task=%llx valid=%d", static_cast<unsigned long long>(chunk),
+                static_cast<unsigned long long>(task.is_valid() ? TaskId::to_uint64(task) : 0ULL),
+                static_cast<int>(task.is_valid())
+            );
+        }
         if (mode != kModeParallel) {
             previous = task;
         } else {
             submitted[submitted_count++] = task;
         }
     }
+    LOG_ERROR(
+        "rdma_cq_sequence: loop done submitted=%u last_valid=%d", static_cast<unsigned>(submitted_count),
+        static_cast<int>(previous.is_valid())
+    );
 
     CoreTaskArgsWithDeps<> summary_args;
     summary_args.add_input(recv);
@@ -147,7 +168,10 @@ __attribute__((visibility("default"))) void rdma_cq_sequence_orchestration(const
     } else if (previous.is_valid()) {
         summary_args.add_dep_wait(previous);
     }
-    rt_submit_aiv_task(kFuncSummary, summary_args);
+    const TaskId summary_task = rt_submit_aiv_task(kFuncSummary, summary_args).task_id();
+    LOG_ERROR(
+        "rdma_cq_sequence: summary submitted valid=%d", static_cast<int>(summary_task.is_valid())
+    );
 }
 
 }  // extern "C"
