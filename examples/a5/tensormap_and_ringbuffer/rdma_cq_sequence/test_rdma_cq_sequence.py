@@ -337,7 +337,11 @@ def run_case(platform: str, device_ids: list[int], name: str, mode: int, tasks: 
 
 
 def run(
-    platform: str = "a5", device_ids: list[int] | None = None, only: str | None = None, tasks_override: int | None = None
+    platform: str = "a5",
+    device_ids: list[int] | None = None,
+    only: str | None = None,
+    tasks_override: int | None = None,
+    posts_override: int | None = None,
 ) -> int:
     if not rdma_workspace_enabled():
         raise RuntimeError(
@@ -352,6 +356,8 @@ def run(
             continue
         if tasks_override is not None:
             tasks = tasks_override
+        if posts_override is not None:
+            posts = posts_override
         ok = run_case(platform, device_ids, name, mode, tasks, posts) and ok
     return 0 if ok else 1
 
@@ -371,8 +377,9 @@ def main() -> int:
     parser.add_argument("-d", "--device", default="0-1")
     parser.add_argument("-k", "--only", default=None, help="run a single case: chain | parallel | notify")
     parser.add_argument("-n", "--tasks", type=int, default=None, help="override the chunk count (bisect)")
+    parser.add_argument("--posts", type=int, default=None, help="override the posts per chunk (bisect)")
     args = parser.parse_args()
-    return run(args.platform, parse_device_range(args.device), args.only, args.tasks)
+    return run(args.platform, parse_device_range(args.device), args.only, args.tasks, args.posts)
 
 
 if __name__ == "__main__":
