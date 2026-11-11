@@ -136,7 +136,7 @@ inline __aicore__ bool validate_comm(__gm__ CommContext *comm_ctx, __gm__ int32_
     __gm__ pto::comm::rdma::RdmaInfo *info =
         reinterpret_cast<__gm__ pto::comm::rdma::RdmaInfo *>(comm_ctx->workSpace);
     if (!pto::comm::rdma::IsWorkspaceHeaderValid(info) ||
-        info->backend != pto::comm::rdma::RdmaBackend::HNS_1825) {
+        info->backend != pto::comm::RdmaBackend::HNS_1825) {
         set_status(status, Status::kInvalidWorkspace);
         return false;
     }
