@@ -185,12 +185,12 @@ def _run_case_on_worker(
     slice_elems = total_posts * SLICE_FLOATS
     send_nbytes = slice_elems * DTYPE_NBYTES
     signal_nbytes = total_posts * DTYPE_NBYTES
-    summary_nbytes = SUMMARY_WORDS * 8
     status_words = (tasks + 1) * STATUS_WORDS_PER_TASK
-    window_size = max(
-        RDMA_DATA_OFFSET_NBYTES + 3 * send_nbytes + signal_nbytes + summary_nbytes + status_words * 4 + 4096,
-        4 * 1024 * 1024,
-    )
+    # summary/status are host OUTPUT_EXISTING tensors, not part of the symmetric
+    # window. The window itself must be 64-byte aligned and cover every domain
+    # buffer (the reserved prefix included).
+    window_bytes = RDMA_DATA_OFFSET_NBYTES + 3 * send_nbytes + signal_nbytes
+    window_size = max((window_bytes + 63) // 64 * 64, 4 * 1024 * 1024)
 
     send_host = [_send_pattern(rank, total_posts) for rank in range(nranks)]
     recv_zero = [_zero_float(slice_elems) for _ in range(nranks)]
