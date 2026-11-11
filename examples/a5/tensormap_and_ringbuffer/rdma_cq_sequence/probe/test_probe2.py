@@ -115,9 +115,8 @@ def run(platform: str, device_ids: list[int]) -> int:
     slice_elems = SLICE_BYTES // 4
     signal_elems = SIGNAL_BYTES // 4
     window_size = 4 * 1024 * 1024
-    bufs = [
-        [worker.create_buffer(SLICE_BYTES) for _ in range(nranks)] for _ in range(4)
-    ]
+    # create_buffer requires a READY worker, so the buffers are created after init.
+    bufs: list[list] = []
 
     def orch_fn(orch, _args, cfg):
         with orch.allocate_domain(
@@ -160,6 +159,7 @@ def run(platform: str, device_ids: list[int]) -> int:
 
     try:
         worker.init()
+        bufs.extend([[worker.create_buffer(SLICE_BYTES) for _ in range(nranks)] for _ in range(4)])
         worker.run(orch_fn, args=None, config=CallConfig())
     finally:
         for row in bufs:
