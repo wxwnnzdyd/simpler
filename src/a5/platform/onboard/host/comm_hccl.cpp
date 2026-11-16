@@ -73,8 +73,8 @@
 #define __gm__
 #endif
 #include "pto/comm/async/rdma/rdma_workspace_manager.hpp"
-#include "pto/comm/workspace.hpp"
 #endif
+#include "pto/comm/workspace.hpp"
 
 // Thin wrappers around the HCCL public APIs we use. Kept as a translation
 // layer in case we need to swap (e.g., InitConfig variant) later.
@@ -837,8 +837,7 @@ static void ensure_sdma_workspace(CommHandle h) {
     if (h->sdma_workspace.impl != nullptr) return;
     pto::comm::WorkspaceRequest req{};
     uint64_t workspace_size = 0;
-    const aclError size_status =
-        pto::comm::PtoCommGetWorkspaceSize(pto::comm::DmaEngine::SDMA, req, &workspace_size);
+    const aclError size_status = pto::comm::PtoCommGetWorkspaceSize(pto::comm::DmaEngine::SDMA, req, &workspace_size);
     if (size_status != ACL_SUCCESS || workspace_size == 0) {
         LOG_ERROR("[comm rank %d] SDMA GetWorkspaceSize failed", h->rank);
         return;
@@ -959,8 +958,7 @@ static int init_urma_workspace(
     req.urma = &urma_config;
 #endif
 
-    const aclError size_status =
-        pto::comm::PtoCommGetWorkspaceSize(pto::comm::DmaEngine::URMA, req, &workspace_size);
+    const aclError size_status = pto::comm::PtoCommGetWorkspaceSize(pto::comm::DmaEngine::URMA, req, &workspace_size);
     if (size_status != ACL_SUCCESS || workspace_size == 0) {
         LOG_ERROR("[comm rank %d] URMA GetWorkspaceSize rejected configuration", h->rank);
         return COMM_DOMAIN_URMA_INIT_FAILED;
@@ -971,7 +969,8 @@ static int init_urma_workspace(
     pto::comm::Workspace workspace{};
     const aclError status = pto::comm::CreateWorkspace(
         pto::comm::DmaEngine::URMA, req, alloc.urma_workspace_addr, workspace_size, &workspace,
-        pto::comm::WorkspaceFailurePolicy::Destroy);
+        pto::comm::WorkspaceFailurePolicy::Destroy
+    );
     if (status != ACL_SUCCESS) {
         LOG_ERROR("[comm rank %d] URMA workspace initialization failed", h->rank);
         (void)aclrtFree(alloc.urma_workspace_addr);
